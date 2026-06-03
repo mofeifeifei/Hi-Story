@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS historical_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_id INTEGER NOT NULL UNIQUE,
+  dynasty TEXT,
+  period TEXT,
+  year_range TEXT,
+  political_context TEXT,
+  official_system TEXT,
+  military_system TEXT,
+  social_order TEXT,
+  daily_life TEXT,
+  language_style TEXT,
+  taboo_words TEXT,
+  allowed_fiction TEXT,
+  locked_facts TEXT,
+  source_notes TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE CASCADE
+);

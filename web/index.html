@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hi Story</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="./brand-logo.png" alt="Hi Story Logo">
+        <div>
+          <div class="brand-name">Hi Story</div>
+          <div class="brand-subtitle">长篇历史小说工作台</div>
+        </div>
+      </div>
+
+      <button class="primary wide" id="newWorkBtn">新建文章</button>
+      <div class="side-heading">作品</div>
+      <div class="work-list" id="workList"></div>
+
+      <div class="side-heading">流程</div>
+      <nav class="flow-nav" id="tabNav">
+        <button data-tab="project" data-step="1" class="active">设定</button>
+        <button data-tab="outline" data-step="2">大纲与细纲</button>
+        <button data-tab="writing" data-step="3">写作</button>
+        <button data-tab="library" data-step="4">资料库</button>
+        <button data-tab="export" data-step="5">导出</button>
+        <button data-tab="records" data-step="6">运行记录</button>
+        <button data-tab="settings" data-step="7">设置</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow" id="connectionText">正在连接本地服务...</div>
+          <h1 id="currentTitle">未选择文章</h1>
+        </div>
+        <div class="top-actions">
+          <span class="badge" id="modeBadge">状态未知</span>
+          <button id="refreshBtn">刷新</button>
+        </div>
+      </header>
+
+      <section class="progress-card" id="progressCard">
+        <div class="progress-main">
+          <div class="progress-head">
+            <div>
+              <div class="eyebrow">创作路径</div>
+              <h3 id="progressTitle">等待选择文章</h3>
+            </div>
+            <div class="task-pill" id="taskStatusPill">空闲</div>
+          </div>
+          <div class="progress-track" id="progressTrack"></div>
+        </div>
+        <div class="task-panel">
+          <div class="eyebrow">当前任务</div>
+          <div class="task-title" id="taskTitle">暂无进行中的任务</div>
+          <p id="taskDetail">生成设定、大纲、细纲和正文时，会在这里显示状态。</p>
+          <button class="danger soft-danger" id="stopTaskBtn" disabled>停止生成</button>
+        </div>
+      </section>
+
+      <section class="tab-panel active" id="tab-project">
+        <div class="page-title">
+          <div>
+            <h2>设定</h2>
+            <p>把创意、题材、风格和必须锁定的要求写清楚，再让策划 AI 生成可确认的设定草稿。</p>
+          </div>
+        </div>
+
+        <div class="action-bar project-action-bar">
+          <div class="action-group">
+            <button class="primary" id="saveWorkBtn">保存基础信息</button>
+            <button id="generatePlanBtn">生成设定草稿</button>
+            <button id="applyPlanBtn">采用入库</button>
+          </div>
+          <div class="action-group danger-zone">
+            <button class="danger" id="deleteWorkBtn">删除文章</button>
+          </div>
+        </div>
+
+        <div class="project-grid">
+          <section class="panel project-form-panel">
+            <div class="project-form-scroll">
+              <div class="settings-lock-panel" id="settingsLockPanel">
+                <div>
+                  <div class="panel-title">
+                    <h3>作品设定保护</h3>
+                    <p>锁定后，基础信息、风格与整本契约都不能修改；需要调整时可以随时解锁。</p>
+                  </div>
+                  <div class="lock-status" id="settingsLockStatus">当前未锁定</div>
+                </div>
+                <button type="button" id="toggleSettingsLockBtn">锁定作品设定</button>
+              </div>
+
+              <div class="project-form-section">
+                <div class="panel-title">
+                  <h3>基础信息</h3>
+                  <p>先把作品身份写清楚，后续大纲、正文都会读取这里。</p>
+                </div>
+                <div class="grid two">
+                  <label>小说名称<input id="titleInput"></label>
+                  <label>题材<input id="genreInput" placeholder="历史穿越、权谋、悬疑等"></label>
+                  <label>目标平台<input id="platformInput" placeholder="番茄、七猫、起点等"></label>
+                  <label>目标字数<input id="targetWordsInput" type="number" min="0" step="10000"></label>
+                </div>
+                <label>一句话创意<textarea id="ideaInput" rows="3"></textarea></label>
+              </div>
+
+              <div class="project-form-section">
+                <div class="panel-title">
+                  <h3>风格控制</h3>
+                  <p>这些选项会写入作品风格，后续大纲和正文都会读取。</p>
+                </div>
+                <div class="grid three compact-fields">
+                  <label>叙事节奏
+                    <select id="paceInput">
+                      <option value=""></option>
+                      <option value="快节奏">快节奏</option>
+                      <option value="稳推进">稳推进</option>
+                      <option value="慢热">慢热</option>
+                      <option value="强反转">强反转</option>
+                      <option value="群像推进">群像推进</option>
+                    </select>
+                  </label>
+                  <label>语言风格
+                    <select id="languageInput">
+                      <option value=""></option>
+                      <option value="白话凝练">白话凝练</option>
+                      <option value="古意克制">古意克制</option>
+                      <option value="幽默轻松">幽默轻松</option>
+                      <option value="压迫冷峻">压迫冷峻</option>
+                      <option value="细腻沉浸">细腻沉浸</option>
+                    </select>
+                  </label>
+                  <label>情绪底色
+                    <select id="moodInput">
+                      <option value=""></option>
+                      <option value="热血">热血</option>
+                      <option value="苍凉">苍凉</option>
+                      <option value="轻松">轻松</option>
+                      <option value="压迫">压迫</option>
+                      <option value="群像">群像</option>
+                    </select>
+                  </label>
+                  <label>叙事视角
+                    <select id="povInput">
+                      <option value=""></option>
+                      <option value="第三人称有限视角">第三人称有限视角</option>
+                      <option value="第三人称多视角">第三人称多视角</option>
+                      <option value="第一人称">第一人称</option>
+                      <option value="全知视角">全知视角</option>
+                    </select>
+                  </label>
+                  <label>单章字数
+                    <select id="chapterWordsInput">
+                      <option value=""></option>
+                      <option value="2000字左右">2000 字左右</option>
+                      <option value="3000字左右">3000 字左右</option>
+                      <option value="5000字左右">5000 字左右</option>
+                      <option value="按剧情自然分配">按剧情自然分配</option>
+                    </select>
+                  </label>
+                  <label>爽点密度
+                    <select id="payoffInput">
+                      <option value=""></option>
+                      <option value="低">低</option>
+                      <option value="中">中</option>
+                      <option value="高">高</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div class="project-form-section contract-panel">
+                <div class="panel-title">
+                  <h3>整本契约</h3>
+                  <p>只保留需要你亲自拍板的长期约束；大纲和正文会读取这里。</p>
+                </div>
+                <div class="grid two compact-fields">
+                  <label>主角爽点<textarea id="protagonistFantasyInput" rows="3"></textarea></label>
+                  <label>升级阶梯<textarea id="escalationLadderInput" rows="3"></textarea></label>
+                  <label>关系主线<textarea id="relationshipMainlineInput" rows="3"></textarea></label>
+                  <label>绝对红线<textarea id="absoluteRedLinesInput" rows="3"></textarea></label>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel project-preview-panel">
+            <div class="project-preview-shell">
+              <div class="panel-head">
+                <div>
+                  <h3>设定草稿与当前设定</h3>
+                  <p>草稿需要确认后才会同步到资料库。</p>
+                </div>
+              </div>
+              <input class="search" id="planSearchInput" placeholder="搜索人物、规则、卖点或关键词">
+              <div class="browser">
+                <div class="browser-nav" id="planNav"></div>
+                <pre class="detail-box" id="planPreview">暂无设定。</pre>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-outline">
+        <div class="page-title">
+          <div>
+            <h2>大纲与细纲</h2>
+            <p>左侧是目录，右侧是当前条目的编辑器。写作页只读取这里保存好的章节任务单。</p>
+          </div>
+        </div>
+
+        <div class="action-bar outline-action-bar">
+          <div class="action-group">
+            <button id="generateOutlineBtn">生成全书大纲</button>
+            <button id="addVolumeBtn">添加分卷</button>
+            <button id="addChapterBtn">添加章节</button>
+          </div>
+          <div class="action-group chapter-generate-group">
+            <label class="inline-label">起始章<input id="chapterStartInput" type="number" min="1" value="1" title="起始章"></label>
+            <label class="inline-label">数量<input id="chapterCountInput" type="number" min="1" max="30" value="3" title="数量"></label>
+            <button id="generateChapterOutlinesBtn">生成细纲</button>
+          </div>
+          <div class="action-group">
+            <button class="primary" id="saveOutlineBtn">保存当前大纲</button>
+          </div>
+        </div>
+
+        <div class="outline-layout">
+          <aside class="panel nav-panel">
+            <div class="panel-title compact-title">
+              <h3>目录</h3>
+              <p>选择全书、分卷或章节后在中间编辑。</p>
+            </div>
+            <div class="button-row compact outline-tools">
+              <button id="outlineExpandAllBtn">全部展开</button>
+              <button id="outlineCollapseAllBtn">全部收起</button>
+            </div>
+            <div class="target-note" id="outlineTargetText">生成目标：未选择文章</div>
+            <input class="search" id="outlineSearchInput" placeholder="搜索大纲、分卷或章节">
+            <div class="outline-tree" id="outlineTree"></div>
+          </aside>
+
+          <section class="panel editor-panel">
+            <div class="panel-head">
+              <div>
+                <h3 id="outlineEditorTitle">全书大纲</h3>
+                <p id="outlineEditorHint">选择左侧目录后编辑。</p>
+              </div>
+              <button class="danger" id="deleteOutlineItemBtn">删除当前条目</button>
+            </div>
+            <div id="outlineEditor"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-writing">
+        <div class="page-title">
+          <div>
+            <h2>写作</h2>
+            <p>按“载入章节 → 检查任务单 → 生成正文 → 保存最终稿 → 记忆入库”的顺序推进。</p>
+          </div>
+        </div>
+
+        <div class="action-bar writing-action-bar">
+          <div class="action-group">
+            <label class="inline-label wide-select">生成方式
+            <select id="generateModeInput">
+              <option value="standard">生成并审稿</option>
+              <option value="polish">生成、审稿并修订</option>
+              <option value="fast">只生成正文</option>
+            </select>
+            </label>
+            <button id="loadChapterBtn">载入章节</button>
+            <button class="primary" id="generateChapterBtn">生成正文</button>
+            <button id="saveChapterBtn">保存最终稿</button>
+            <button id="memoryBtn">生成记忆入库</button>
+          </div>
+          <div class="action-group danger-zone">
+            <button class="danger" id="deleteWritingChapterBtn">删除当前章</button>
+          </div>
+        </div>
+
+        <div class="writing-layout">
+          <aside class="panel chapter-rail">
+            <input class="search" id="chapterSearchInput" placeholder="搜索章节">
+            <div class="chapter-list" id="writingChapterList"></div>
+          </aside>
+
+          <section class="panel writer-panel">
+            <div class="grid two">
+              <label>当前章节<input id="writingChapterNumberInput" type="number" min="1" value="1"></label>
+              <label>章节名<input id="chapterTitleInput"></label>
+            </div>
+            <textarea class="manuscript" id="chapterTextInput" placeholder="正文编辑区。AI 生成后可以直接修改，再保存最终稿。"></textarea>
+            <div class="revision-row">
+              <textarea id="revisionInstructionInput" placeholder="修改意见：例如加强开头承接、减少解释、提高历史质感。"></textarea>
+              <button id="reviseWithInstructionBtn">按意见修订</button>
+            </div>
+          </section>
+
+          <aside class="panel writing-inspector">
+            <div class="mini-tabs" id="inspectorTabs">
+              <button data-inspector="outline" class="active">任务单</button>
+              <button data-inspector="context">上下文</button>
+              <button data-inspector="review">审稿</button>
+              <button data-inspector="memory">记忆</button>
+              <button data-inspector="draft">初稿</button>
+            </div>
+            <pre id="chapterOutlinePreview" class="inspector-pane active" data-pane="outline">未载入章节。</pre>
+            <pre id="contextPreview" class="inspector-pane" data-pane="context">未载入章节。</pre>
+            <pre id="reviewPreview" class="inspector-pane" data-pane="review">暂无审稿结果。</pre>
+            <pre id="memoryPreview" class="inspector-pane" data-pane="memory">暂无记忆卡。</pre>
+            <pre id="draftPreview" class="inspector-pane" data-pane="draft">暂无初稿。</pre>
+          </aside>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-library">
+        <div class="page-title">
+          <div>
+            <h2>资料库</h2>
+            <p>每本文章都有自己的数据库。这里可以搜索、分类、编辑和保存关键资料。</p>
+          </div>
+          <div class="button-row">
+            <button id="refreshLibraryBtn">刷新资料库</button>
+            <button id="addLibraryItemBtn">新增</button>
+            <button class="primary" id="saveLibraryItemBtn">保存当前资料</button>
+            <button class="danger" id="deleteLibraryItemBtn">删除当前资料</button>
+          </div>
+        </div>
+
+        <div class="library-layout">
+          <aside class="panel nav-panel">
+            <div class="category-tabs" id="libraryTabs"></div>
+            <input class="search" id="librarySearchInput" placeholder="搜索当前分类">
+            <div class="library-list" id="libraryList"></div>
+          </aside>
+          <section class="panel editor-panel">
+            <div class="panel-head">
+              <div>
+                <h3 id="libraryEditorTitle">资料详情</h3>
+                <p id="libraryEditorHint">选择左侧资料后编辑。</p>
+              </div>
+            </div>
+            <div id="libraryEditor"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-export">
+        <div class="page-title">
+          <div>
+            <h2>导出</h2>
+            <p>可以导出整本、当前章或章节范围，并可选择本次导出目录。</p>
+          </div>
+        </div>
+        <div class="export-layout">
+          <div class="panel export-card">
+            <label>导出范围
+              <select id="exportScopeInput">
+                <option value="book">整本小说</option>
+                <option value="chapter">当前章节</option>
+                <option value="range">章节范围</option>
+              </select>
+            </label>
+            <label>格式
+              <select id="exportFormatInput">
+                <option value="txt">TXT</option>
+                <option value="docx">DOCX</option>
+              </select>
+            </label>
+            <label>起始章节<input id="exportStartInput" type="number" min="1" value="1"></label>
+            <label>结束章节<input id="exportEndInput" type="number" min="1" value="1"></label>
+            <label class="check"><input id="includeDraftInput" type="checkbox"> 正文为空时使用草稿</label>
+            <button class="primary" id="exportBtn">开始导出</button>
+          </div>
+          <div class="panel">
+            <h3>导出位置</h3>
+            <p class="path-text" id="exportDirText">未选择文章。</p>
+            <div class="button-row">
+              <button id="chooseExportDirBtn">选择位置</button>
+              <button id="openExportDirBtn">打开位置</button>
+              <button id="resetExportDirBtn">恢复默认</button>
+            </div>
+            <pre id="exportResult" class="detail-box small">暂无导出记录。</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-records">
+        <div class="page-title">
+          <div>
+            <h2>运行记录</h2>
+            <p>这里记录本次工作台操作、生成任务、保存动作和错误信息，便于回看流程。</p>
+          </div>
+          <div class="button-row">
+            <button id="clearLogBtn">清空本次记录</button>
+            <button id="refreshRecordsBtn">刷新运行记录</button>
+          </div>
+        </div>
+
+        <div class="records-layout">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>本次操作记录</h3>
+                <p>刷新页面后，前端操作记录会重新开始；AI 调用仍会写入本地数据库的运行表。</p>
+              </div>
+            </div>
+            <div class="log record-log" id="logList"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>AI 调用记录</h3>
+                <p>读取当前文章数据库里的 Agent 调用历史，刷新页面后仍会保留。</p>
+              </div>
+            </div>
+            <div class="log record-log" id="agentRunList"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>生成任务流水</h3>
+                <p>记录设定、大纲、细纲、正文、修订和记忆任务的开始、完成、停止与失败状态。</p>
+              </div>
+            </div>
+            <div class="log record-log" id="taskRunList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-settings">
+        <div class="page-title">
+          <div>
+            <h2>设置</h2>
+            <p>保存后写入本地 config.json，下一次 AI 调用会使用新配置。</p>
+          </div>
+          <div class="button-row">
+            <button class="primary" id="saveConfigBtn">保存设置</button>
+            <button id="testApiBtn">测试 API</button>
+          </div>
+        </div>
+
+        <div class="settings-layout">
+          <div class="panel">
+            <h3>常用 AI 配置</h3>
+            <div class="grid two">
+              <label>模型供应商<input id="modelProviderInput"></label>
+              <label>Base URL<input id="baseUrlInput"></label>
+              <label>Wire API
+                <select id="wireApiInput">
+                  <option value="chat_completions">chat_completions</option>
+                  <option value="responses">responses</option>
+                </select>
+              </label>
+              <label>主模型<input id="defaultModelInput"></label>
+              <label>超时秒数<input id="timeoutInput" type="number" min="10" max="3600"></label>
+              <label>最大重试<input id="maxRetriesInput" type="number" min="0" max="10"></label>
+            </div>
+            <label>API Key
+              <div class="secret-field">
+                <input id="apiKeyInput" type="password">
+                <button type="button" id="toggleApiKeyBtn">显示</button>
+              </div>
+            </label>
+            <div class="button-row wrap">
+              <label class="check"><input id="mockModeInput" type="checkbox"> mock 模式</label>
+              <label class="check"><input id="singleModelInput" type="checkbox"> 所有 Agent 使用主模型</label>
+            </div>
+          </div>
+
+          <details class="panel" id="advancedSettingsBox">
+            <summary>高级设置</summary>
+            <div class="grid two after-summary">
+              <label>审稿模型<input id="reviewModelInput"></label>
+              <label>策划模型<input id="plannerModelInput"></label>
+              <label>写稿模型<input id="writerModelInput"></label>
+              <label>审稿 Agent 模型<input id="reviewerModelInput"></label>
+              <label>修订模型<input id="reviserModelInput"></label>
+              <label>记忆模型<input id="memoryModelInput"></label>
+              <label>推理强度
+                <select id="reasoningEffortInput">
+                  <option value=""></option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                </select>
+              </label>
+              <label>最大输出 Token<input id="maxOutputTokensInput" type="number" min="0" max="200000"></label>
+              <label>上下文窗口<input id="contextWindowInput" type="number" min="4096" max="2000000"></label>
+              <label>自动压缩阈值<input id="autoCompactInput" type="number" min="4096" max="2000000"></label>
+            </div>
+            <div class="button-row wrap">
+              <label class="check"><input id="disableStorageInput" type="checkbox"> 禁用响应存储</label>
+              <label class="check"><input id="systemProxyInput" type="checkbox"> 使用系统代理</label>
+              <label class="grow">手动代理<input id="proxyUrlInput" placeholder="http://127.0.0.1:7890"></label>
+            </div>
+          </details>
+
+          <pre class="detail-box" id="configResult">设置尚未测试。</pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack"></div>
+
+  <div class="modal-backdrop" id="confirmModal" hidden>
+    <div class="confirm-dialog">
+      <h3 id="confirmTitle">确认操作</h3>
+      <p id="confirmMessage">确定继续吗？</p>
+      <div class="button-row dialog-actions">
+        <button id="confirmCancelBtn">取消</button>
+        <button class="danger" id="confirmOkBtn">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
