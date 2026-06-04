@@ -90,7 +90,6 @@
                 <div>
                   <div class="panel-title">
                     <h3>作品设定保护</h3>
-                    <p>锁定后，基础信息、风格与整本契约都不能修改；需要调整时可以随时解锁。</p>
                   </div>
                   <div class="lock-status" id="settingsLockStatus">当前未锁定</div>
                 </div>
@@ -100,7 +99,6 @@
               <div class="project-form-section">
                 <div class="panel-title">
                   <h3>基础信息</h3>
-                  <p>先把作品身份写清楚，后续大纲、正文都会读取这里。</p>
                 </div>
                 <div class="grid two">
                   <label>小说名称<input id="titleInput"></label>
@@ -114,7 +112,6 @@
               <div class="project-form-section">
                 <div class="panel-title">
                   <h3>风格控制</h3>
-                  <p>这些选项会写入作品风格，后续大纲和正文都会读取。</p>
                 </div>
                 <div class="grid three compact-fields">
                   <label>叙事节奏
@@ -179,7 +176,6 @@
               <div class="project-form-section contract-panel">
                 <div class="panel-title">
                   <h3>整本契约</h3>
-                  <p>只保留需要你亲自拍板的长期约束；大纲和正文会读取这里。</p>
                 </div>
                 <div class="grid two compact-fields">
                   <label>主角爽点<textarea id="protagonistFantasyInput" rows="3"></textarea></label>
@@ -196,7 +192,6 @@
               <div class="panel-head">
                 <div>
                   <h3>设定草稿与当前设定</h3>
-                  <p>草稿需要确认后才会同步到资料库。</p>
                 </div>
               </div>
               <input class="search" id="planSearchInput" placeholder="搜索人物、规则、卖点或关键词">
@@ -213,7 +208,6 @@
         <div class="page-title">
           <div>
             <h2>大纲与细纲</h2>
-            <p>左侧是目录，右侧是当前条目的编辑器。写作页只读取这里保存好的章节任务单。</p>
           </div>
         </div>
 
@@ -237,7 +231,6 @@
           <aside class="panel nav-panel">
             <div class="panel-title compact-title">
               <h3>目录</h3>
-              <p>选择全书、分卷或章节后在中间编辑。</p>
             </div>
             <div class="button-row compact outline-tools">
               <button id="outlineExpandAllBtn">全部展开</button>
@@ -252,7 +245,7 @@
             <div class="panel-head">
               <div>
                 <h3 id="outlineEditorTitle">全书大纲</h3>
-                <p id="outlineEditorHint">选择左侧目录后编辑。</p>
+                <p id="outlineEditorHint"></p>
               </div>
               <button class="danger" id="deleteOutlineItemBtn">删除当前条目</button>
             </div>
@@ -327,7 +320,6 @@
         <div class="page-title">
           <div>
             <h2>资料库</h2>
-            <p>每本文章都有自己的数据库。这里可以搜索、分类、编辑和保存关键资料。</p>
           </div>
           <div class="button-row">
             <button id="refreshLibraryBtn">刷新资料库</button>
@@ -347,7 +339,7 @@
             <div class="panel-head">
               <div>
                 <h3 id="libraryEditorTitle">资料详情</h3>
-                <p id="libraryEditorHint">选择左侧资料后编辑。</p>
+                <p id="libraryEditorHint"></p>
               </div>
             </div>
             <div id="libraryEditor"></div>
@@ -359,7 +351,6 @@
         <div class="page-title">
           <div>
             <h2>导出</h2>
-            <p>可以导出整本、当前章或章节范围，并可选择本次导出目录。</p>
           </div>
         </div>
         <div class="export-layout">
@@ -399,7 +390,6 @@
         <div class="page-title">
           <div>
             <h2>运行记录</h2>
-            <p>这里记录本次工作台操作、生成任务、保存动作和错误信息，便于回看流程。</p>
           </div>
           <div class="button-row">
             <button id="clearLogBtn">清空本次记录</button>
@@ -412,7 +402,6 @@
             <div class="panel-head">
               <div>
                 <h3>本次操作记录</h3>
-                <p>刷新页面后，前端操作记录会重新开始；AI 调用仍会写入本地数据库的运行表。</p>
               </div>
             </div>
             <div class="log record-log" id="logList"></div>
@@ -421,7 +410,6 @@
             <div class="panel-head">
               <div>
                 <h3>AI 调用记录</h3>
-                <p>读取当前文章数据库里的 Agent 调用历史，刷新页面后仍会保留。</p>
               </div>
             </div>
             <div class="log record-log" id="agentRunList"></div>

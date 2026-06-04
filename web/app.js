@@ -1003,14 +1003,14 @@ function renderOutlineEditor() {
   $("deleteOutlineItemBtn").style.visibility = selection.type === "full" ? "hidden" : "visible";
   if (selection.type === "full") {
     $("outlineEditorTitle").textContent = "全书大纲";
-    $("outlineEditorHint").textContent = "这里保存作品整体方向。";
+    $("outlineEditorHint").textContent = "";
     editor.innerHTML = `<textarea id="outlineFullEdit" rows="20">${escapeHtml(state.outline.full_outline || "")}</textarea>`;
     return;
   }
   if (selection.type === "volume") {
     const volume = state.outline.volume_outline[selection.index] || {};
     $("outlineEditorTitle").textContent = `分卷：${volume.title || "未命名"}`;
-    $("outlineEditorHint").textContent = "分卷用于控制阶段目标和主冲突。";
+    $("outlineEditorHint").textContent = "";
     editor.innerHTML = `
       <div class="outline-form">
         <div class="grid two">
@@ -1028,7 +1028,7 @@ function renderOutlineEditor() {
   const chapter = chapterByNumber(selection.chapter_number) || { chapter_number: selection.chapter_number || 1 };
   const detail = chapterDetail(chapter);
   $("outlineEditorTitle").textContent = `章节：第 ${chapter.chapter_number} 章`;
-  $("outlineEditorHint").textContent = `章节任务单会直接参与正文生成。当前所属分卷：第 ${detail.volume_number || volumeForChapter(chapter)} 卷。`;
+  $("outlineEditorHint").textContent = "";
   editor.innerHTML = `
     <div class="outline-form">
       <div class="grid two">
