@@ -638,8 +638,10 @@ function splitStyle(style) {
     result.pace = extra[0];
     extra.length = 0;
   }
+  const customAllowed = new Set(["language", "mood"]);
   for (const key of ["pace", "language", "mood", "pov", "chapter_words", "payoff"]) {
     if (result[key] && !STYLE_SELECT_OPTIONS[key].includes(result[key])) {
+      if (customAllowed.has(key)) continue;
       extra.push(`${Object.keys(map).find((label) => map[label] === key)}：${result[key]}`);
       result[key] = "";
     }
