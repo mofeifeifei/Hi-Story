@@ -27,6 +27,7 @@ class ReviewerAgent(BaseAgent):
             "本地模板句检测结果也需要纳入 template_hits。\n\n"
             "重点检查：第一段是否执行 chapter_transition_contract，章末是否留下下一章可直接承接的外部锚点。\n\n"
             "同时检查：是否兑现章节目的词、目标情绪、读者期待、本章回报，是否使用 minimal_memory_pack 中的必要状态和约束。\n\n"
+            "还要根据 chapter_word_target 检查正文长度是否符合动态目标，不能把完整章节误写成短摘要或为凑字数注水。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
             f"本地模板句与历史穿帮检测：\n{json_dumps(combined_hits)}\n\n"

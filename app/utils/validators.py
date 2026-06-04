@@ -100,6 +100,7 @@ def validate_review(data: Any) -> list[str]:
         "hook_score",
         "historical_score",
         "readability_score",
+        "length_score",
     ]:
         try:
             score = int(data.get(key))

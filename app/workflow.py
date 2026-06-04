@@ -21,6 +21,7 @@ from app.utils.outline_utils import (
     repeat_risk_warnings,
 )
 from app.utils.text_check import DEFAULT_TEMPLATE_BLACKLIST, blacklist_for_prompt, repeated_text_warnings
+from app.utils.word_target import chapter_word_target_from_style
 
 
 class NovelWorkflow:
@@ -431,6 +432,7 @@ class NovelWorkflow:
                 "revision_layers": "修订时按结构、情绪、语言三层内部检查，只输出最终正文。",
             },
         }
+        context["chapter_word_target"] = chapter_word_target_from_style((bundle.get("work") or {}).get("style", ""))
         context["history_specialist"] = historical_context_for_bundle(context)
         return self.normalize_output_names(work_id, context)
 

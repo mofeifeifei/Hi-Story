@@ -45,6 +45,7 @@ output_contract: 结构化数据
 - **用户批注**：是否违反用户要求保留、重写、锁定或重点加强的内容？
 - **情绪和节奏**：是否情绪空洞、节奏拖沓、重复解释或缺少信息增量？
 - **移动端阅读**：是否有大段不分段、长篇背景说明、人物履历堆叠、设定讲解压过动作和对白的问题？
+- **字数控制**：是否符合 `chapter_word_target`？如果存在 `min` / `max`，正文是否明显短于或长于建议范围？如果是自然分配，是否仍然像完整章节，而不是概要、片段或短摘要？是否为了凑字数重复解释、重复心理活动或重复环境描写？
 - **结尾钩子**：结尾是否具体、可信，并且自然连接下一章？
 - **钩子类型**：`opening_hook` 和 `ending_hook` 中标注的钩子类型是否在正文中真正落地？是否连续复用同一种章尾钩子导致疲劳？
 - **章末交接口**：最后 150 字是否留下可被下一章第一段承接的外部锚点？是否落成动作中断、证据出现、关系逼问、威胁抵达、代价落地或选择逼近，而不是意味悠长、心理顿悟、命运旁白或空悬念？
@@ -79,6 +80,8 @@ output_contract: 结构化数据
   "hook_score": 0,
   "historical_score": 0,
   "readability_score": 0,
+  "length_score": 0,
+  "length_problem": "",
   "repeat_risk": [],
   "problems": [],
   "suggestions": [],
@@ -100,7 +103,7 @@ output_contract: 结构化数据
 
 ```
 {
-  "type": "continuity/transition/opening/ending_style/character/world_rule/history/foreshadow/timeline/scene_card/user_note/expectation/payoff/emotion/rhythm/hook/mobile_readability/first_three_chapters/repeat/template/risk",
+  "type": "continuity/transition/opening/ending_style/character/world_rule/history/foreshadow/timeline/scene_card/user_note/expectation/payoff/emotion/rhythm/hook/length/mobile_readability/first_three_chapters/repeat/template/risk",
   "severity": "low/medium/high",
   "evidence": "",
   "why_it_matters": ""

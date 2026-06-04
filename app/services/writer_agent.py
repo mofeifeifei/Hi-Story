@@ -19,6 +19,7 @@ class WriterAgent(BaseAgent):
             "注意：必须优先执行 chapter.outline_task_sheet 中的本章目标、场景卡、核心冲突、线索推进、信息增量和接力棒。\n"
             "必须优先使用 minimal_memory_pack；它只包含本章不知道就会写错的人物状态、伏笔和世界约束。\n"
             "必须优先服从 book_bible、chapter_notes、人物动态状态和用户批注。\n"
+            "必须读取 chapter_word_target，并按其中的动态目标字数、建议范围和规则生成完整章节。\n"
             "必须优先承接 chapter_transition_contract；第一段要直接接住上一章末尾的具体动作、对白、物件、证据或威胁。\n"
             "章末必须留下可被下一章第一段承接的外部锚点；不能用意味悠长的空泛收束。\n"
             "不能擅自修改锁定设定；不要使用禁用模板句。\n"

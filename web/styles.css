@@ -724,6 +724,29 @@ textarea {
   line-height: 1.8;
 }
 
+.word-status {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.word-status.ok {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.word-status.warn {
+  color: #92400e;
+  border-color: #facc15;
+  background: #fffbeb;
+}
+
 .revision-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 118px;

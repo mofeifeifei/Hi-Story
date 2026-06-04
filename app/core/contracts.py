@@ -93,8 +93,10 @@ def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> di
         "hook_score",
         "historical_score",
         "readability_score",
+        "length_score",
     ]:
         review.setdefault(key, 0)
+    review.setdefault("length_problem", "")
     review.setdefault("repeat_risk", [])
     review.setdefault("problems", [])
     review.setdefault("suggestions", [])

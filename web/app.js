@@ -5,6 +5,7 @@ const state = {
   selectedWorkId: null,
   selectedChapter: 1,
   currentChapter: null,
+  currentChapterWordTarget: null,
   pendingPlan: null,
   pendingPlanWorkId: null,
   config: null,
@@ -437,6 +438,7 @@ function bindEvents() {
   $("clearLogBtn").addEventListener("click", clearRunLogs);
   $("refreshRecordsBtn").addEventListener("click", refreshRecords);
   $("chapterSearchInput").addEventListener("input", renderChapterLists);
+  $("chapterTextInput").addEventListener("input", updateChapterWordStatus);
   $("loadChapterBtn").addEventListener("click", () => loadChapter(Number($("writingChapterNumberInput").value || 1), "writing"));
   $("generateChapterBtn").addEventListener("click", generateChapter);
   $("saveChapterBtn").addEventListener("click", saveChapterText);
@@ -581,6 +583,7 @@ function clearWorkState() {
   state.work = null;
   state.selectedWorkId = null;
   state.currentChapter = null;
+  state.currentChapterWordTarget = null;
   state.pendingPlan = null;
   state.pendingPlanWorkId = null;
   state.outline = { full_outline: "", volume_outline: [], chapters: [] };
@@ -1471,6 +1474,7 @@ function renderChapterLists() {
 function fillChapter(data) {
   const chapter = data.chapter || {};
   state.currentChapter = chapter;
+  state.currentChapterWordTarget = data.context?.chapter_word_target || null;
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
   $("chapterTextInput").value = chapter.final_text || chapter.draft || "";
@@ -1483,6 +1487,30 @@ function fillChapter(data) {
   $("draftPreview").textContent = chapter.draft || "暂无初稿。";
   $("exportStartInput").value = chapter.chapter_number || 1;
   $("exportEndInput").value = chapter.chapter_number || 1;
+  updateChapterWordStatus();
+}
+
+function updateChapterWordStatus() {
+  const node = $("chapterWordStatus");
+  if (!node) return;
+  const count = countTextWords($("chapterTextInput")?.value || "");
+  const target = state.currentChapterWordTarget || {};
+  const label = target.label || "未设置";
+  const min = Number(target.min || 0);
+  const max = Number(target.max || 0);
+  node.classList.remove("ok", "warn");
+  if (min && max) {
+    const status = count < min ? "偏短，建议扩写" : count > max ? "偏长，建议压缩" : "符合";
+    node.classList.add(status === "符合" ? "ok" : "warn");
+    node.textContent = `当前正文：${count} 字；目标：${label}；建议范围：${min}-${max} 字；状态：${status}`;
+    return;
+  }
+  const note = target.note || "优先保证章节完整。";
+  node.textContent = `当前正文：${count} 字；目标：${label}；${note}`;
+}
+
+function countTextWords(text) {
+  return String(text || "").replace(/\s+/g, "").length;
 }
 
 function formatChapterTask(chapter) {
@@ -1540,6 +1568,7 @@ async function generateChapter() {
     });
     if (taskWasStopped(task)) return;
     if (data.final_text || data.draft) $("chapterTextInput").value = data.final_text || data.draft;
+    updateChapterWordStatus();
     $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "暂无记忆卡。");
     $("draftPreview").textContent = data.draft || "暂无初稿。";
@@ -1609,6 +1638,7 @@ async function reviseWithInstruction() {
     });
     if (taskWasStopped(task)) return;
     $("chapterTextInput").value = data.revised_text || $("chapterTextInput").value;
+    updateChapterWordStatus();
     $("revisionInstructionInput").value = "";
     log("修订完成，满意后请保存最终稿。");
     notify("修订完成，满意后请保存最终稿。", "success");

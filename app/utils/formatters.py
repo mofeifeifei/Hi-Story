@@ -109,6 +109,7 @@ REVIEW_TYPE_LABELS = {
     "emotion": "情绪",
     "rhythm": "节奏",
     "hook": "结尾牵引",
+    "length": "字数控制",
     "ending_style": "章末风格",
     "opening": "开篇",
     "mobile_readability": "移动端阅读",
@@ -546,6 +547,12 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
     lines.append(f"文章：{_text(work.get('title'))}")
     lines.append(f"章节：第{_text(chapter.get('chapter_number'))}章 {_text(chapter.get('title'), '')}")
     lines.append(f"细纲：{_text(chapter.get('outline'))}")
+    word_target = context.get("chapter_word_target")
+    if isinstance(word_target, dict):
+        lines.append(f"单章字数：{_text(word_target.get('label'))}")
+        if word_target.get("min") and word_target.get("max"):
+            lines.append(f"建议范围：{_text(word_target.get('min'))}-{_text(word_target.get('max'))} 字")
+        lines.append(f"字数规则：{_text(word_target.get('note'))}")
     bible = context.get("book_bible")
     if isinstance(bible, dict) and bible:
         _section(lines, "作品圣经")
@@ -652,6 +659,8 @@ def format_review_readable(review: dict[str, Any] | None) -> str:
         ("结尾牵引", "hook_score"),
         ("移动端可读", "readability_score"),
     ]
+    if "length_score" in review:
+        score_labels.append(("字数控制", "length_score"))
     if _int_or_zero(review.get("historical_score")):
         score_labels.append(("历史准确", "historical_score"))
     for label, key in score_labels:
@@ -685,6 +694,9 @@ def format_review_readable(review: dict[str, Any] | None) -> str:
                 lines.append(f"{index}. {_text(item)}")
     else:
         lines.append("暂无修改建议。")
+    if review.get("length_problem"):
+        _section(lines, "字数问题")
+        lines.append(_text(review.get("length_problem")))
 
     _section(lines, "模板句与风险")
     lines.append(f"模板句：{_text(review.get('template_hits'), '未发现')}")
