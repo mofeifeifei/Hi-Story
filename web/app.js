@@ -820,11 +820,21 @@ async function deleteWork() {
   const ok = await confirmAction(`确定删除《${title}》吗？这会删除它的数据库和导出文件。`, "删除文章", "删除");
   if (!ok) return;
   try {
-    await api(`/api/works/${state.selectedWorkId}`, { method: "DELETE" });
+    const deletedId = state.selectedWorkId;
+    const data = await api(`/api/works/${deletedId}`, { method: "DELETE" });
+    state.works = data.works || state.works.filter((work) => Number(work.id) !== Number(deletedId));
     state.selectedWorkId = null;
-    await loadWorks();
-    log(`已删除《${title}》。`);
-    notify(`已删除《${title}》。`, "success");
+    if (state.works.length) await selectWork(state.works[0].id, false);
+    else clearWorkState();
+    renderWorks();
+    const cleanupWarning = data.cleanup_warning || "";
+    if (cleanupWarning) {
+      log(`已从列表删除《${title}》，但目录稍后清理：${cleanupWarning}`, "warning");
+      notify("文章已从列表删除；目录被占用，稍后会自动清理。", "warning");
+    } else {
+      log(`已删除《${title}》。`);
+      notify(`已删除《${title}》。`, "success");
+    }
   } catch (error) {
     showError(error);
   }

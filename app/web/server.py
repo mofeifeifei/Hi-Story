@@ -106,8 +106,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     STATE.repo.update_work_basic(work_id, _clean_inputs(body))
                     return _work_state(work_id)
                 if method == "DELETE":
-                    STATE.repo.delete_work(work_id)
-                    return {"works": STATE.repo.list_works()}
+                    result = STATE.repo.delete_work(work_id)
+                    return {**result, "works": STATE.repo.list_works()}
 
             if len(parts) == 4 and parts[3] == "settings-lock" and method in {"POST", "PUT"}:
                 STATE.repo.set_work_settings_locked(work_id, bool(body.get("locked", False)))

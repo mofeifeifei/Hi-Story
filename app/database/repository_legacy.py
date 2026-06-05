@@ -65,6 +65,7 @@ class Repository:
         self.works_dir.mkdir(parents=True, exist_ok=True)
         self._init_index_db()
         self._migrate_legacy_db_if_needed()
+        self._cleanup_pending_deleted_dirs()
         self._upgrade_existing_work_dbs()
         self._initialized = True
 
@@ -331,16 +332,20 @@ class Repository:
             )
             conn.commit()
 
-    def delete_work(self, work_id: int) -> None:
+    def delete_work(self, work_id: int) -> dict[str, Any]:
         self.init()
         record = self._work_record(work_id)
         work_dir = self._work_dir_from_record(record)
-        if work_dir.exists():
-            self._assert_inside_works_dir(work_dir)
-            self._rmtree_with_retry(work_dir)
         with self._connect_index() as conn:
             conn.execute("DELETE FROM work_index WHERE id = ?", (work_id,))
             conn.commit()
+        cleanup = self._delete_or_mark_work_dir(work_dir)
+        return {
+            "deleted": True,
+            "work_id": work_id,
+            "work_dir": str(work_dir),
+            **cleanup,
+        }
 
     def apply_plan_to_work(self, work_id: int, inputs: dict[str, Any], plan: dict[str, Any]) -> None:
         self.init()
@@ -1707,6 +1712,20 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _cleanup_pending_deleted_dirs(self) -> None:
+        if not self.works_dir.exists():
+            return
+        for path in self.works_dir.iterdir():
+            if not path.is_dir():
+                continue
+            if ".deleted-" not in path.name and not (path / ".pending-delete").exists():
+                continue
+            try:
+                self._assert_inside_works_dir(path)
+                self._rmtree_with_retry(path)
+            except OSError:
+                continue
+
     def _upgrade_existing_work_dbs(self) -> None:
         for record in self._index_records():
             db_path = self._db_path_from_record(record)
@@ -2064,6 +2083,56 @@ class Repository:
     @staticmethod
     def _folder_name(work_id: int, title: str) -> str:
         return f"{work_id:06d}-{safe_filename(title, '未命名文章')}"
+
+    def _delete_or_mark_work_dir(self, work_dir: Path) -> dict[str, Any]:
+        if not work_dir.exists():
+            return {"directory_deleted": True}
+        self._assert_inside_works_dir(work_dir)
+        try:
+            self._rmtree_with_retry(work_dir)
+            return {"directory_deleted": True}
+        except OSError as exc:
+            pending_dir = self._pending_deleted_dir(work_dir)
+            try:
+                work_dir.rename(pending_dir)
+                try:
+                    self._rmtree_with_retry(pending_dir)
+                    return {"directory_deleted": True}
+                except OSError as cleanup_exc:
+                    return {
+                        "directory_deleted": False,
+                        "pending_delete_dir": str(pending_dir),
+                        "cleanup_warning": f"作品已从列表移除，但目录暂时被占用，稍后会自动清理：{pending_dir}。原因：{cleanup_exc}",
+                    }
+            except OSError as rename_exc:
+                self._mark_pending_delete(work_dir, rename_exc)
+                return {
+                    "directory_deleted": False,
+                    "pending_delete_dir": str(work_dir),
+                    "cleanup_warning": f"作品已从列表移除，但目录仍被占用，请关闭相关程序后手动删除：{work_dir}。原因：{rename_exc}",
+                    "cleanup_error": str(exc),
+                }
+
+    @staticmethod
+    def _mark_pending_delete(work_dir: Path, error: OSError) -> None:
+        try:
+            (work_dir / ".pending-delete").write_text(
+                f"pending delete since {now_text()}\n{error}\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def _pending_deleted_dir(self, work_dir: Path) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        base = work_dir.with_name(f"{work_dir.name}.deleted-{timestamp}")
+        candidate = base
+        counter = 2
+        while candidate.exists():
+            candidate = work_dir.with_name(f"{base.name}-{counter}")
+            counter += 1
+        self._assert_inside_works_dir(candidate)
+        return candidate
 
     @staticmethod
     def _relative_path(path: Path) -> str:
