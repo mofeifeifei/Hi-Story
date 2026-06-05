@@ -65,7 +65,10 @@ class PlannerAgent(BaseAgent):
             "请根据作品资料生成全书大纲和分卷大纲，输出供程序解析的合法 JSON。\n"
             "这不是宣传简介，要像真正能指导长篇连载的编辑部大纲。\n"
             "full_outline 要分成 4 到 8 个自然段，段落之间用换行分隔；必须包含：主线问题、阶段推进、人物关系变化、核心反转、最终收束方向。\n"
-            "volume_outline 每卷必须包含：volume_number, title, goal, main_conflict, turning_points, ending。\n"
+            "volume_outline 每卷必须包含：volume_number, title, target_chapters, min_chapters, soft_max_chapters, hard_max_chapters, "
+            "entry_condition, exit_condition, required_milestones, goal, main_conflict, turning_points, ending。\n"
+            "target/min/soft_max/hard_max 是弹性章数边界，不是平均分配；必须根据本卷剧情容量设定，长卷可以更长，过渡卷可以更短。\n"
+            "entry_condition 和 exit_condition 必须是可判断的剧情状态；required_milestones 至少 3 条，用来判断本卷是否可以收束。\n"
             "每卷 turning_points 至少 4 条，必须具体到事件，不要写“矛盾升级”“真相浮出水面”这类空话。\n\n"
             f"{history_section}\n"
             f"作品资料：\n{json_dumps(work_bundle)}"
@@ -88,12 +91,27 @@ class PlannerAgent(BaseAgent):
         volume_number: int | None = None,
     ) -> dict[str, Any]:
         history_section = history_prompt_section(work_bundle)
-        target_volume_number = int(volume_number or work_bundle.get("target_volume_number") or 1)
-        target_volume = work_bundle.get("target_volume") or {}
-        volume_title = target_volume.get("title") or f"第{target_volume_number}卷"
+        target_volume_number = int(volume_number or work_bundle.get("target_volume_number") or 0)
+        volume_instruction = ""
+        if target_volume_number:
+            target_volume = work_bundle.get("target_volume") or {}
+            volume_title = target_volume.get("title") or f"第{target_volume_number}卷"
+            volume_instruction = (
+                f"这些章节全部属于第 {target_volume_number} 卷（{volume_title}）。"
+                f"每个章节对象都必须写入 volume_number: {target_volume_number}。\n"
+            )
+        else:
+            volume_instruction = (
+                "请根据作品资料里的 volume_outline、已有章节细纲、最近章节摘要和剧情阶段，自行判断每章所属分卷。\n"
+                "章节号必须按全书连续编号，不要因为进入新分卷就从第 1 章重新开始。\n"
+                "你可以提出进入下一卷，但系统会校验：不能跳卷；当前卷未达到 min_chapters 时不能换卷；超过 hard_max_chapters 时必须进入下一卷或收束。\n"
+                "判断是否换卷时必须参考 active_volume、chapter_counts、entry_condition、exit_condition 和 required_milestones。\n"
+                "如果当前卷 exit_condition 和核心里程碑尚未完成，应继续当前卷；如果已完成且达到 min_chapters，可以把后续章节归入下一卷。\n"
+                "不要把所有章节默认放进第一卷，也不要因为界面当前选中了某个分卷就强行归入该卷。\n"
+            )
         user_prompt = (
             f"请生成从第 {start_chapter} 章开始的 {count} 章细纲，输出供程序解析的合法 JSON。\n"
-            f"这些章节全部属于第 {target_volume_number} 卷（{volume_title}）。每个章节对象都必须写入 volume_number: {target_volume_number}。\n"
+            f"{volume_instruction}"
             "JSON 字段：chapters。\n"
             "chapters 内每项必须包含：chapter_number, volume_number, story_time, title, outline, opening_hook, scene_cards, chapter_goal, conflict, main_scene, "
             "reader_expectation, characters_present, clues, new_information, chapter_payoff, "

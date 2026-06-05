@@ -11,6 +11,14 @@ def _is_list(value: Any, min_len: int = 0) -> bool:
     return isinstance(value, list) and len(value) >= min_len
 
 
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
 def validate_work_plan(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return ["作品方案必须是 JSON 对象"]
@@ -45,11 +53,33 @@ def validate_outline(data: Any) -> list[str]:
         if not isinstance(volume, dict):
             issues.append(f"第 {index} 卷不是对象")
             continue
-        for key in ["volume_number", "title", "goal", "main_conflict", "ending"]:
+        for key in [
+            "volume_number",
+            "title",
+            "goal",
+            "main_conflict",
+            "ending",
+            "target_chapters",
+            "min_chapters",
+            "soft_max_chapters",
+            "hard_max_chapters",
+            "entry_condition",
+            "exit_condition",
+        ]:
             if volume.get(key) in (None, ""):
                 issues.append(f"第 {index} 卷缺少 {key}")
         if not _is_list(volume.get("turning_points"), 4):
             issues.append(f"第 {index} 卷 turning_points 少于 4 条")
+        if not _is_list(volume.get("required_milestones"), 3):
+            issues.append(f"第 {index} 卷 required_milestones 少于 3 条")
+        target = _positive_int(volume.get("target_chapters"))
+        minimum = _positive_int(volume.get("min_chapters"))
+        soft_max = _positive_int(volume.get("soft_max_chapters"))
+        hard_max = _positive_int(volume.get("hard_max_chapters"))
+        if not all([target, minimum, soft_max, hard_max]):
+            issues.append(f"第 {index} 卷章节边界必须是正整数")
+        elif not minimum <= target <= soft_max <= hard_max:
+            issues.append(f"第 {index} 卷章节边界必须满足 min_chapters <= target_chapters <= soft_max_chapters <= hard_max_chapters")
     return issues
 
 

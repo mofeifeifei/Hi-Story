@@ -382,12 +382,23 @@ function updateTaskUI() {
   const status = active ? state.task.status || (state.task.stopped ? "cancelling" : "running") : "idle";
   $("taskTitle").textContent = title;
   $("taskDetail").textContent = detail;
+  $("taskElapsed").textContent = active ? `已运行：${formatElapsed(Date.now() - state.task.startedAt)}` : "已运行：--";
   $("taskStatusPill").textContent = active ? statusText(status) : "空闲";
   $("taskStatusPill").className = `task-pill ${active ? status === "cancelling" ? "stopping" : "running" : ""}`;
   $("stopTaskBtn").disabled = !active || state.task.stopped;
   if ($("generatePlanBtn")) {
     $("generatePlanBtn").textContent = state.task?.kind === "plan" && !state.task.stopped ? "停止生成" : "生成设定草稿";
   }
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value) => String(value).padStart(2, "0");
+  if (hours) return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  return `${pad(minutes)}:${pad(seconds)}`;
 }
 
 function statusText(status) {
@@ -472,6 +483,7 @@ async function init() {
   bindEvents();
   buildLibraryTabs();
   await Promise.all([loadHealth(), loadConfig(), loadWorks()]);
+  window.setInterval(updateTaskUI, 1000);
   updateTaskUI();
   updateProgress();
   renderLogList();
@@ -942,7 +954,7 @@ function renderOutlineTree() {
   if (!volumes.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "暂无分卷。点击“添加分卷”后，再把章节归入对应分卷。";
+    empty.textContent = "暂无分卷。";
     tree.appendChild(empty);
     updateOutlineGenerateControls();
     return;
@@ -1019,11 +1031,20 @@ function renderOutlineEditor() {
     editor.innerHTML = `
       <div class="outline-form">
         <div class="grid two">
-          ${inputField("volume_number", "卷号", volume.volume_number || selection.index + 1, "number")}
+          ${readonlyField("volume_number", "卷号", volume.volume_number || selection.index + 1, "number")}
           ${inputField("title", "卷名", volume.title || "")}
+        </div>
+        <div class="grid four compact-fields">
+          ${inputField("target_chapters", "目标章数", volume.target_chapters || "", "number")}
+          ${inputField("min_chapters", "最小章数", volume.min_chapters || "", "number")}
+          ${inputField("soft_max_chapters", "软上限", volume.soft_max_chapters || "", "number")}
+          ${inputField("hard_max_chapters", "硬上限", volume.hard_max_chapters || "", "number")}
         </div>
         ${textareaField("goal", "卷目标", volume.goal || "")}
         ${textareaField("main_conflict", "主要冲突", volume.main_conflict || "")}
+        ${textareaField("entry_condition", "进入条件", volume.entry_condition || "")}
+        ${textareaField("exit_condition", "退出条件", volume.exit_condition || "")}
+        ${textareaField("required_milestones", "卷内里程碑", arrayText(volume.required_milestones))}
         ${textareaField("turning_points", "关键转折", arrayText(volume.turning_points))}
         ${textareaField("ending", "结尾状态", volume.ending || "")}
       </div>
@@ -1037,8 +1058,8 @@ function renderOutlineEditor() {
   editor.innerHTML = `
     <div class="outline-form">
       <div class="grid two">
-        ${inputField("chapter_number", "章节号", chapter.chapter_number || "", "number")}
-        ${inputField("volume_number", "所属卷", detail.volume_number || volumeForChapter(chapter), "number")}
+        ${readonlyField("chapter_number", "章节号", chapter.chapter_number || "", "number")}
+        ${readonlyField("volume_number", "所属卷", detail.volume_number || volumeForChapter(chapter), "number")}
         ${inputField("title", "章节名", chapter.title || "")}
       </div>
       ${textareaField("outline", "细纲", detail.outline || chapter.outline || "", 8)}
@@ -1046,13 +1067,14 @@ function renderOutlineEditor() {
       ${textareaField("ending_hook", "结尾钩子", detail.ending_hook || chapter.ending_hook || "", 3)}
       <div>
         <div class="button-row"><h3>场景卡</h3><button type="button" id="addSceneBtn">添加场景</button></div>
-        <div class="scene-list" id="sceneList">${renderSceneCards(detail.scene_cards || [])}</div>
+        <div class="scene-list" id="sceneList">${renderSceneCards(detail.scene_cards || []) || '<div class="empty">暂无场景卡。</div>'}</div>
       </div>
     </div>
   `;
   $("addSceneBtn").addEventListener("click", () => {
     const list = $("sceneList");
-    list.insertAdjacentHTML("beforeend", renderSceneCards([{}], list.children.length));
+    if (list.querySelector(".empty")) list.innerHTML = "";
+    list.insertAdjacentHTML("beforeend", renderSceneCards([{}], list.querySelectorAll("[data-scene]").length));
   });
 }
 
@@ -1060,12 +1082,16 @@ function inputField(name, label, value, type = "text") {
   return `<label>${label}<input data-field="${name}" type="${type}" value="${escapeHtml(value)}"></label>`;
 }
 
+function readonlyField(name, label, value, type = "text") {
+  return `<label>${label}<input data-field="${name}" type="${type}" value="${escapeHtml(value)}" readonly></label>`;
+}
+
 function textareaField(name, label, value, rows = 4) {
   return `<label>${label}<textarea data-field="${name}" rows="${rows}">${escapeHtml(value || "")}</textarea></label>`;
 }
 
 function renderSceneCards(cards, startIndex = 0) {
-  return (cards.length ? cards : [{}]).map((card, offset) => {
+  return (cards || []).map((card, offset) => {
     const index = startIndex + offset + 1;
     return `
       <div class="scene-card" data-scene>
@@ -1095,6 +1121,11 @@ function commitOutlineEditor() {
       ...state.outline.volume_outline[selection.index],
       ...values,
       volume_number: Number(values.volume_number || selection.index + 1),
+      target_chapters: Number(values.target_chapters || 0) || "",
+      min_chapters: Number(values.min_chapters || 0) || "",
+      soft_max_chapters: Number(values.soft_max_chapters || 0) || "",
+      hard_max_chapters: Number(values.hard_max_chapters || 0) || "",
+      required_milestones: lines(values.required_milestones),
       turning_points: lines(values.turning_points),
     };
     return;
@@ -1213,21 +1244,21 @@ async function generateChapterOutlines() {
   updateOutlineGenerateControls();
   const start = Number($("chapterStartInput").value || 1);
   const count = Number($("chapterCountInput").value || 3);
-  const volumeNumber = currentOutlineTargetVolume();
-  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成第 ${volumeNumber} 卷，第 ${start} 章起的 ${count} 章任务单。`);
+  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成第 ${start} 章起的 ${count} 章任务单，系统会校验所属分卷。`);
   try {
     await persistOutline();
     if (taskWasStopped(task)) return;
-    log(`策划 AI 正在生成第 ${volumeNumber} 卷，第 ${start} 章起的 ${count} 章细纲...`);
+    log(`策划 AI 正在生成第 ${start} 章起的 ${count} 章细纲，系统会校验所属分卷...`);
     const data = await api(`/api/works/${state.selectedWorkId}/chapter-outlines`, {
       method: "POST",
-      body: { start_chapter: start, count, volume_number: volumeNumber, task_id: task.id },
+      body: { start_chapter: start, count, task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
     applyWorkState(data);
-    state.outlineTargetVolume = volumeNumber;
-    ensureExpanded(volumeNumber);
+    const generatedVolumes = new Set((data.generated_chapters || []).map((chapter) => Number(chapter.volume_number || 0)).filter(Boolean));
+    for (const volumeNumber of generatedVolumes) ensureExpanded(volumeNumber);
+    if (generatedVolumes.size) state.outlineTargetVolume = [...generatedVolumes][0];
     renderOutlineTree();
     setNextChapterStart();
     updateOutlineGenerateControls();
@@ -1244,7 +1275,21 @@ async function generateChapterOutlines() {
 function addVolume() {
   commitOutlineEditor();
   const next = Math.max(0, ...state.outline.volume_outline.map((v) => Number(v.volume_number || 0))) + 1;
-  state.outline.volume_outline.push({ volume_number: next, title: `第${next}卷`, goal: "", main_conflict: "", turning_points: [], ending: "" });
+  state.outline.volume_outline.push({
+    volume_number: next,
+    title: `第${next}卷`,
+    target_chapters: "",
+    min_chapters: "",
+    soft_max_chapters: "",
+    hard_max_chapters: "",
+    entry_condition: "",
+    exit_condition: "",
+    required_milestones: [],
+    goal: "",
+    main_conflict: "",
+    turning_points: [],
+    ending: "",
+  });
   state.outlineTargetVolume = next;
   ensureExpanded(next);
   state.outlineSelection = { type: "volume", index: state.outline.volume_outline.length - 1 };
@@ -1257,7 +1302,7 @@ function addVolume() {
 function addChapter() {
   commitOutlineEditor();
   const next = Math.max(0, ...state.outline.chapters.map((c) => Number(c.chapter_number || 0))) + 1;
-  const volumeNumber = currentOutlineTargetVolume();
+  const volumeNumber = Number(state.outlineTargetVolume || volumeForChapter({ chapter_number: next }));
   const chapter = { chapter_number: next, volume_number: volumeNumber, title: `第${next}章`, outline: "", ending_hook: "", scene_cards: [] };
   state.outline.chapters.push(chapter);
   state.outlineSelection = { type: "chapter", chapter_number: next, index: state.outline.chapters.length - 1 };
@@ -1365,24 +1410,6 @@ function collapseAllVolumes() {
   renderOutlineTree();
 }
 
-function currentOutlineTargetVolume() {
-  const selection = state.outlineSelection || {};
-  if (selection.type === "volume") {
-    const volume = state.outline.volume_outline?.[selection.index];
-    return Number(volume?.volume_number || selection.index + 1 || 1);
-  }
-  if (selection.type === "chapter") {
-    const chapter = chapterByNumber(selection.chapter_number);
-    return Number(chapter?.volume_number || volumeForChapter(chapter) || state.outlineTargetVolume || 1);
-  }
-  return Number(state.outlineTargetVolume || firstVolumeNumber());
-}
-
-function firstVolumeNumber() {
-  const first = (state.outline.volume_outline || [])[0];
-  return Number(first?.volume_number || 1);
-}
-
 function nextChapterNumber() {
   return Math.max(0, ...(state.outline.chapters || []).map((chapter) => Number(chapter.chapter_number || 0))) + 1;
 }
@@ -1393,24 +1420,22 @@ function setNextChapterStart() {
 }
 
 function updateOutlineGenerateControls() {
-  const volumeNumber = currentOutlineTargetVolume();
   const start = nextChapterNumber();
-  const input = $("chapterStartInput");
   const target = $("outlineTargetText");
   if (target) {
     if (!state.selectedWorkId) {
       target.textContent = "生成目标：未选择文章";
     } else if (!(state.outline.volume_outline || []).length) {
-      target.textContent = "生成目标：暂无分卷，请先添加或生成全书大纲";
+      target.textContent = "生成目标：暂无分卷";
     } else {
-      const volume = (state.outline.volume_outline || []).find((item, index) => Number(item.volume_number || index + 1) === volumeNumber);
-      target.textContent = volume
-        ? `生成目标：第 ${volumeNumber} 卷 · ${volume.title || "未命名"}；默认从第 ${start} 章开始`
-        : `生成目标：默认第 ${volumeNumber} 卷；默认从第 ${start} 章开始`;
+      target.textContent = `生成目标：从第 ${start} 章继续；所属分卷由分卷状态机校验`;
     }
   }
   const button = $("generateChapterOutlinesBtn");
-  if (button) button.textContent = `生成第 ${Number(input?.value || start)} 章起细纲`;
+  if (button) {
+    button.disabled = !state.selectedWorkId || !(state.outline.volume_outline || []).length;
+    button.textContent = "生成细纲";
+  }
 }
 
 function volumeForChapter(chapter) {

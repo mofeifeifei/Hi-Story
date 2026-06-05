@@ -79,17 +79,16 @@ class NovelWorkflow:
         volume_number: int | None = None,
         should_stop: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
-        target_volume_number = int(volume_number or self._infer_volume_number(work_id, start_chapter) or 1)
         bundle = self.build_planning_context(
             work_id,
             start_chapter=start_chapter,
-            volume_number=target_volume_number,
+            volume_number=volume_number,
         )
         result = self.planner.generate_chapter_outlines(
             bundle,
             start_chapter=start_chapter,
             count=count,
-            volume_number=target_volume_number,
+            volume_number=volume_number,
         )
         if should_stop and should_stop():
             raise RuntimeError("任务已停止：章节细纲已返回，但未保存。")
@@ -98,7 +97,7 @@ class NovelWorkflow:
             result,
             start_chapter=start_chapter,
             count=count,
-            volume_number=target_volume_number,
+            volume_number=volume_number,
         )
 
     def save_generated_chapter_outlines(
@@ -112,12 +111,17 @@ class NovelWorkflow:
     ) -> list[dict[str, Any]]:
         result = self.normalize_output_names(work_id, result)
         chapters = result.get("chapters", [])
-        target_volume_number = int(volume_number or self._infer_volume_number(work_id, start_chapter) or 1)
+        volume_state = self._volume_state(work_id)
         saved: list[dict[str, Any]] = []
         for item in chapters:
             chapter_number = int(item.get("chapter_number") or len(saved) + start_chapter)
             item = self._merge_chapter_outline_fields(work_id, chapter_number, item)
-            item["volume_number"] = target_volume_number
+            item["volume_number"] = self._assign_volume_number(
+                volume_state,
+                chapter_number,
+                int(item.get("volume_number") or 0),
+                explicit_volume=volume_number,
+            )
             chapter_id = self.repo.upsert_chapter_outline(
                 work_id=work_id,
                 chapter_number=chapter_number,
@@ -129,6 +133,7 @@ class NovelWorkflow:
             )
             item["id"] = chapter_id
             saved.append(item)
+            self._advance_volume_state(volume_state, chapter_number, int(item["volume_number"]))
         self.repo.log_agent_run(
             work_id=work_id,
             chapter_id=None,
@@ -140,12 +145,132 @@ class NovelWorkflow:
                     "work_id": work_id,
                     "start_chapter": start_chapter,
                     "count": count,
-                    "volume_number": target_volume_number,
+                    "volume_number": volume_number,
                 }
             ),
             output=json_dumps(result),
         )
         return saved
+
+    def _volume_state(self, work_id: int) -> dict[str, Any]:
+        work = self.repo.get_work(work_id)
+        volumes = sorted(
+            self._volume_list(work.get("volume_outline")),
+            key=lambda item: int(item.get("volume_number") or 0),
+        )
+        volume_numbers = [int(item.get("volume_number") or index + 1) for index, item in enumerate(volumes)]
+        chapters = self.repo.list_chapter_outlines(work_id)
+        chapter_volumes: dict[int, int] = {}
+        counts: dict[int, int] = {number: 0 for number in volume_numbers}
+        for chapter in chapters:
+            chapter_number = int(chapter.get("chapter_number") or 0)
+            volume_number = int(chapter.get("volume_number") or parse_outline_detail(chapter.get("outline_json")).get("volume_number") or 0)
+            if chapter_number and volume_number:
+                chapter_volumes[chapter_number] = volume_number
+                counts[volume_number] = counts.get(volume_number, 0) + 1
+        active_volume = self._active_volume_number(volume_numbers, chapter_volumes)
+        return {
+            "volumes": volumes,
+            "volume_numbers": volume_numbers,
+            "chapter_volumes": chapter_volumes,
+            "counts": counts,
+            "active_volume": active_volume,
+        }
+
+    def _assign_volume_number(
+        self,
+        state: dict[str, Any],
+        chapter_number: int,
+        proposed_volume: int,
+        *,
+        explicit_volume: int | None = None,
+    ) -> int:
+        volume_numbers = state.get("volume_numbers") or []
+        if explicit_volume:
+            return int(explicit_volume)
+        if not volume_numbers:
+            return proposed_volume or 1
+        existing_volume = int((state.get("chapter_volumes") or {}).get(int(chapter_number)) or 0)
+        if existing_volume not in volume_numbers:
+            existing_volume = 0
+        previous_volume = self._previous_volume_for_chapter(state, chapter_number)
+        current_volume = existing_volume or previous_volume or state.get("active_volume") or volume_numbers[0]
+        if current_volume not in volume_numbers:
+            current_volume = volume_numbers[0]
+        next_volume = self._next_volume_number(volume_numbers, current_volume)
+        current_plan = self._volume_plan(state, current_volume)
+        current_count = int((state.get("counts") or {}).get(current_volume, 0))
+        if existing_volume == current_volume:
+            current_count = max(0, current_count - 1)
+        min_chapters = self._int_field(current_plan, "min_chapters")
+        hard_max = self._int_field(current_plan, "hard_max_chapters")
+
+        if next_volume and hard_max and current_count >= hard_max:
+            return next_volume
+        if proposed_volume == current_volume:
+            return current_volume
+        if next_volume and proposed_volume == next_volume:
+            if min_chapters and current_count < min_chapters:
+                return current_volume
+            return next_volume
+        if proposed_volume in volume_numbers and proposed_volume < current_volume:
+            return current_volume
+        if proposed_volume in volume_numbers and next_volume and proposed_volume > next_volume:
+            return next_volume if (not min_chapters or current_count >= min_chapters) else current_volume
+        return current_volume
+
+    def _advance_volume_state(self, state: dict[str, Any], chapter_number: int, volume_number: int) -> None:
+        chapter_volumes = state.setdefault("chapter_volumes", {})
+        counts = state.setdefault("counts", {})
+        previous_volume = int(chapter_volumes.get(int(chapter_number)) or 0)
+        if previous_volume and previous_volume != int(volume_number):
+            counts[previous_volume] = max(0, int(counts.get(previous_volume, 0)) - 1)
+        if previous_volume != int(volume_number):
+            counts[volume_number] = int(counts.get(volume_number, 0)) + 1
+        chapter_volumes[int(chapter_number)] = int(volume_number)
+        state["active_volume"] = volume_number
+
+    def _previous_volume_for_chapter(self, state: dict[str, Any], chapter_number: int) -> int | None:
+        chapter_volumes = state.get("chapter_volumes") or {}
+        previous = [
+            number
+            for number in chapter_volumes
+            if int(number) < int(chapter_number)
+        ]
+        if not previous:
+            return None
+        return int(chapter_volumes[max(previous)])
+
+    @staticmethod
+    def _active_volume_number(volume_numbers: list[int], chapter_volumes: dict[int, int]) -> int:
+        if not volume_numbers:
+            return 1
+        if not chapter_volumes:
+            return volume_numbers[0]
+        last_chapter = max(chapter_volumes)
+        return int(chapter_volumes[last_chapter] or volume_numbers[0])
+
+    @staticmethod
+    def _next_volume_number(volume_numbers: list[int], current_volume: int) -> int | None:
+        ordered = sorted(int(number) for number in volume_numbers)
+        for number in ordered:
+            if number > int(current_volume):
+                return number
+        return None
+
+    @staticmethod
+    def _volume_plan(state: dict[str, Any], volume_number: int) -> dict[str, Any]:
+        for volume in state.get("volumes") or []:
+            if int(volume.get("volume_number") or 0) == int(volume_number):
+                return volume
+        return {}
+
+    @staticmethod
+    def _int_field(data: dict[str, Any], key: str) -> int:
+        try:
+            return max(0, int(data.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _merge_chapter_outline_fields(self, work_id: int, chapter_number: int, item: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -221,9 +346,25 @@ class NovelWorkflow:
             "recent_chapter_outlines": self.repo.get_recent_chapter_outlines(work_id, start_chapter, limit=5),
             "recent_summaries": self.repo.get_recent_summaries(work_id, start_chapter, limit=3),
         }
-        target_volume_number = int(volume_number or self._infer_volume_number(work_id, start_chapter) or 1)
-        context["target_volume_number"] = target_volume_number
-        context["target_volume"] = self._volume_info(work.get("volume_outline"), target_volume_number)
+        volume_state = self._volume_state(work_id)
+        context["volume_state"] = {
+            "active_volume": volume_state.get("active_volume"),
+            "volume_numbers": volume_state.get("volume_numbers", []),
+            "chapter_counts": volume_state.get("counts", {}),
+            "last_chapter_volume": self._previous_volume_for_chapter(volume_state, start_chapter),
+            "rule": "系统会校验 AI 的分卷提案：不得跳卷；当前卷未达到 min_chapters 时不得进入下一卷；达到 hard_max_chapters 后会强制进入下一卷。",
+        }
+        if volume_number is not None:
+            target_volume_number = int(volume_number or 1)
+            context["target_volume_number"] = target_volume_number
+            context["target_volume"] = self._volume_info(work.get("volume_outline"), target_volume_number)
+        else:
+            context["target_volume_number"] = None
+            context["target_volume"] = {}
+            context["volume_assignment_policy"] = {
+                "mode": "ai_decides",
+                "rule": "章节号按全书连续编号；请根据 volume_outline、已有章节和剧情阶段判断每章所属分卷。",
+            }
         context["history_specialist"] = historical_context_for_bundle(context)
         return self.normalize_output_names(work_id, context)
 

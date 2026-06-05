@@ -171,7 +171,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 try:
                     start = max(1, int(body.get("start_chapter") or 1))
                     count = min(30, max(1, int(body.get("count") or 3)))
-                    volume_number = max(1, int(body.get("volume_number") or 1))
+                    volume_number = int(body["volume_number"]) if body.get("volume_number") not in (None, "") else None
                     chapters = STATE.workflow.generate_chapter_outlines(
                         work_id,
                         start_chapter=start,
@@ -179,7 +179,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         volume_number=volume_number,
                         should_stop=lambda: STATE.task_cancelled(task_id),
                     )
-                    return {"chapters": chapters, **_work_state(work_id)}
+                    return {"generated_chapters": chapters, **_work_state(work_id)}
                 except Exception as exc:
                     _finish_task_error(task_id, exc, work_id=work_id)
                     raise

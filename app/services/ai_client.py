@@ -404,7 +404,7 @@ class AIClient:
             if task == "chapter_outlines":
                 count = int(hint.get("count", 1))
                 start = int(hint.get("start_chapter", 1))
-                volume_number = int(hint.get("volume_number") or 1)
+                volume_number = int(hint.get("volume_number") or 0)
                 return json.dumps(
                     self._mock_chapter_outlines(user_prompt, start, count, volume_number),
                     ensure_ascii=False,
@@ -615,6 +615,13 @@ class AIClient:
                 {
                     "volume_number": 1,
                     "title": "主线启动",
+                    "target_chapters": 10,
+                    "min_chapters": 6,
+                    "soft_max_chapters": 12,
+                    "hard_max_chapters": 15,
+                    "entry_condition": "主角被迫进入核心事件，明确第一阶段行动目标。",
+                    "exit_condition": "第一阶段追读问题获得阶段进展，并确认更大的主线问题存在。",
+                    "required_milestones": ["主角被迫进入事件", "重要同伴提出条件", "第一条线索被证伪"],
                     "goal": "建立核心设定、人物目标和第一阶段追读问题。",
                     "main_conflict": f"{protagonist}必须在信息不足和资源有限的情况下完成第一次关键推进。",
                     "turning_points": ["主角被迫进入事件", "重要同伴提出条件", "第一条线索被证伪", "阶段阻力主动施压"],
@@ -623,6 +630,13 @@ class AIClient:
                 {
                     "volume_number": 2,
                     "title": "冲突扩张",
+                    "target_chapters": 12,
+                    "min_chapters": 8,
+                    "soft_max_chapters": 15,
+                    "hard_max_chapters": 18,
+                    "entry_condition": "主角确认第一阶段问题背后存在更大的结构性阻力。",
+                    "exit_condition": "隐藏规则第一次显形，主角以代价换到进入下一阶段的关键机会。",
+                    "required_milestones": ["早期判断出现偏差", "同伴关系短暂破裂", "隐藏规则第一次显形"],
                     "goal": "扩大舞台，揭示早期线索背后的真实结构。",
                     "main_conflict": f"{protagonist}想继续推进，{obstacle}则利用规则漏洞制造误导。",
                     "turning_points": ["早期判断出现偏差", "同伴关系短暂破裂", "隐藏规则第一次显形", "主角以代价换到关键机会"],
@@ -631,6 +645,13 @@ class AIClient:
                 {
                     "volume_number": 3,
                     "title": "代价反噬",
+                    "target_chapters": 12,
+                    "min_chapters": 8,
+                    "soft_max_chapters": 15,
+                    "hard_max_chapters": 18,
+                    "entry_condition": "主角过去的做法开始反噬，短期解法无法继续覆盖长期矛盾。",
+                    "exit_condition": "主角承认旧方法失效，并找到改变解决问题方式的入口。",
+                    "required_milestones": ["关键伏笔反向解释", "主角失去重要资源", "同伴做出独立选择"],
                     "goal": "回收前期伏笔，让人物选择带来后果。",
                     "main_conflict": "主角过去的做法开始反噬，短期解法无法继续覆盖长期矛盾。",
                     "turning_points": ["关键伏笔反向解释", "主角失去重要资源", "同伴做出独立选择", "阶段阻力暴露更高层目标"],
@@ -639,6 +660,13 @@ class AIClient:
                 {
                     "volume_number": 4,
                     "title": "最终收束",
+                    "target_chapters": 10,
+                    "min_chapters": 6,
+                    "soft_max_chapters": 12,
+                    "hard_max_chapters": 15,
+                    "entry_condition": "主角获得完整真相和最终行动条件。",
+                    "exit_condition": "主线问题被解决，人物关系和世界状态进入新的平衡。",
+                    "required_milestones": ["最终目标被重新定义", "同伴关系完成确认", "关键规则被用到极限"],
                     "goal": "完成主线问题、人物成长和核心伏笔回收。",
                     "main_conflict": "主角必须在完整真相和最终代价之间做出不可撤销的选择。",
                     "turning_points": ["最终目标被重新定义", "同伴关系完成确认", "关键规则被用到极限", "主角承担最终代价"],
@@ -647,7 +675,7 @@ class AIClient:
             ],
         }
 
-    def _mock_chapter_outlines(self, user_prompt: str, start: int, count: int, volume_number: int = 1) -> dict[str, Any]:
+    def _mock_chapter_outlines(self, user_prompt: str, start: int, count: int, volume_number: int = 0) -> dict[str, Any]:
         profile = self._mock_profile(user_prompt)
         protagonist = profile["protagonist"]
         partner = profile["partner"]
@@ -681,7 +709,7 @@ class AIClient:
             chapters.append(
                 {
                     "chapter_number": number,
-                    "volume_number": volume_number,
+                    "volume_number": volume_number or max(1, (number - 1) // 10 + 1),
                     "story_time": f"第{number}章对应的故事时间段，紧接上一章后推进",
                     "title": title,
                     "opening_hook": f"前 300 字从{protagonist}发现“{title}”相关异常开始，让冲突和行动先出现，再补充背景。",

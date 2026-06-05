@@ -100,7 +100,9 @@ output_contract: 结构化数据
 - 伏笔铺设与回收路线；
 - 结局收束方向。
 
-每一卷必须包含 `volume_number`、`title`、`goal`、`main_conflict`、`turning_points`、`ending`。`turning_points` 至少 4 个，必须具体到事件，不要只写“矛盾升级”“真相浮出水面”“局势复杂化”。
+每一卷必须包含 `volume_number`、`title`、`target_chapters`、`min_chapters`、`soft_max_chapters`、`hard_max_chapters`、`entry_condition`、`exit_condition`、`required_milestones`、`goal`、`main_conflict`、`turning_points`、`ending`。
+
+`target_chapters`、`min_chapters`、`soft_max_chapters`、`hard_max_chapters` 是弹性边界，不是平均分配。必须根据该卷剧情容量、阶段任务和冲突复杂度设定：大卷可以更长，过渡卷可以更短。`entry_condition` 和 `exit_condition` 必须是可判断的剧情状态；`required_milestones` 至少 3 条，用来判断本卷是否已经可以收束。`turning_points` 至少 4 个，必须具体到事件，不要只写“矛盾升级”“真相浮出水面”“局势复杂化”。
 
 ### 章节细纲
 
@@ -234,7 +236,7 @@ output_contract: 结构化数据
 章节字段要求：
 
 - `outline`：至少 120 个中文字符，必须是具体任务说明。
-- `volume_number`：必须写明本章所属分卷，和当前要求生成的分卷保持一致；不要把所有章节默认放进第一卷。
+- `volume_number`：必须写明本章所属分卷。若程序明确指定目标分卷，必须和目标分卷一致；若未指定目标分卷，必须根据 `volume_outline`、`volume_state`、已有章节和剧情阶段提出归卷。章节号按全书连续编号，不要因为进入新分卷就从第 1 章重新开始。不能跳卷；当前卷未达到 `min_chapters` 时不要提议进入下一卷；超过 `hard_max_chapters` 时必须收束或进入下一卷。
 - `story_time`：必须写清本章在故事内部的时间锚点，例如朝代、年份、季节、案发第几日、行动当天或上一章后的具体间隔；不能留空，不能只写“当前”。
 - `opening_hook`：写清本章前 300 字要抓住读者的具体动作、冲突、异常、证据、情绪或选择。
 - `opening_hook`：必须包含章首钩子类型，且落到具体事件，不能只写“制造悬念”。

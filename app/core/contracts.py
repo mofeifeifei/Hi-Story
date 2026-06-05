@@ -43,6 +43,21 @@ def normalize_outline(data: Any) -> dict[str, Any]:
     outline = _object_or_empty(data)
     outline.setdefault("full_outline", "")
     outline.setdefault("volume_outline", [])
+    if isinstance(outline["volume_outline"], list):
+        normalized_volumes = []
+        for volume in outline["volume_outline"]:
+            if not isinstance(volume, dict):
+                continue
+            item = dict(volume)
+            item.setdefault("target_chapters", "")
+            item.setdefault("min_chapters", "")
+            item.setdefault("soft_max_chapters", "")
+            item.setdefault("hard_max_chapters", "")
+            item.setdefault("entry_condition", "")
+            item.setdefault("exit_condition", "")
+            item.setdefault("required_milestones", [])
+            normalized_volumes.append(item)
+        outline["volume_outline"] = normalized_volumes
     return outline
 
 

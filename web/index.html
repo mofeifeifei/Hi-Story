@@ -60,6 +60,7 @@
           <div class="eyebrow">当前任务</div>
           <div class="task-title" id="taskTitle">暂无进行中的任务</div>
           <p id="taskDetail">生成设定、大纲、细纲和正文时，会在这里显示状态。</p>
+          <div class="task-elapsed" id="taskElapsed">已运行：--</div>
           <button class="danger soft-danger" id="stopTaskBtn" disabled>停止生成</button>
         </div>
       </section>
@@ -68,7 +69,6 @@
         <div class="page-title">
           <div>
             <h2>设定</h2>
-            <p>把创意、题材、风格和必须锁定的要求写清楚，再让策划 AI 生成可确认的设定草稿。</p>
           </div>
         </div>
 
@@ -209,7 +209,7 @@
             <button id="generateChapterOutlinesBtn">生成细纲</button>
           </div>
           <div class="action-group">
-            <button class="primary" id="saveOutlineBtn">保存当前大纲</button>
+            <button class="primary" id="saveOutlineBtn">保存审查结果</button>
           </div>
         </div>
 

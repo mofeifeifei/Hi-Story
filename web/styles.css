@@ -514,6 +514,10 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .compact-fields {
   gap: 10px 12px;
 }
@@ -1110,6 +1114,13 @@ details.panel summary {
   line-height: 1.55;
 }
 
+.task-elapsed {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .task-pill {
   display: inline-flex;
   align-items: center;
@@ -1267,6 +1278,7 @@ details.panel summary {
 
   .grid.two,
   .grid.three,
+  .grid.four,
   .workflow-breakdown {
     grid-template-columns: 1fr;
   }
