@@ -615,7 +615,12 @@ def _generate_memory(
         input_preview=json_dumps({"context": context, "final_text": final_text[:3000]}),
         output=json_dumps(memory),
     )
-    return {**_chapter_state(work_id, chapter_number), "memory": memory, "memory_readable": format_memory_readable(memory)}
+    return {
+        **_chapter_state(work_id, chapter_number),
+        "memory": memory,
+        "memory_readable": format_memory_readable(memory),
+        "work_state": _work_state(work_id),
+    }
 
 
 def _revise_chapter_with_instruction(

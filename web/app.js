@@ -1484,7 +1484,7 @@ function renderChapterLists() {
     return;
   }
   for (const chapter of filtered) {
-    const status = chapter.status === "memory" ? "已记忆" : chapter.status === "final" ? "已定稿" : chapter.status === "draft" ? "有草稿" : "待写作";
+    const status = chapterStatusLabel(chapter);
     const item = document.createElement("div");
     item.className = `chapter-item ${Number(chapter.chapter_number) === Number(state.selectedChapter) ? "active" : ""}`;
     item.innerHTML = `
@@ -1690,7 +1690,12 @@ async function generateMemory() {
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (data.work_state) applyWorkState(data.work_state);
+    state.selectedChapter = chapterNumber;
+    state.currentChapter = data.chapter || state.currentChapter;
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "记忆卡已入库。");
+    renderChapterLists();
+    updateProgress();
     log(`第 ${chapterNumber} 章记忆已入库。`);
     notify(`第 ${chapterNumber} 章记忆已入库。`, "success");
   } catch (error) {
@@ -2319,10 +2324,10 @@ function updateProgress() {
   const settingDone = Boolean(workflowState.has_settings ?? (data.project_readable || (data.characters || []).length || (data.world_rules || []).length));
   const outlineDone = Boolean(workflowState.has_outline ?? (state.outline.full_outline || (state.outline.volume_outline || []).length));
   const plannedCount = Number(workflowState.planned_count ?? chapters.length);
-  const draftCount = Number(workflowState.draft_count ?? chapters.filter((chapter) => ["draft", "final", "memory"].includes(chapter.status)).length);
-  const finalCount = Number(workflowState.final_count ?? chapters.filter((chapter) => ["final", "memory"].includes(chapter.status)).length);
-  const memoryCount = Number(workflowState.memory_count ?? chapters.filter((chapter) => chapter.status === "memory").length);
-  const currentChapter = chapterByNumber(state.selectedChapter) || chapters.find((chapter) => !["memory"].includes(chapter.status)) || chapters[0];
+  const draftCount = Number(workflowState.draft_count ?? chapters.filter((chapter) => ["draft", "final", "memory"].includes(chapterStatusKey(chapter))).length);
+  const finalCount = Number(workflowState.final_count ?? chapters.filter((chapter) => ["final", "memory"].includes(chapterStatusKey(chapter))).length);
+  const memoryCount = Number(workflowState.memory_count ?? chapters.filter((chapter) => chapterStatusKey(chapter) === "memory").length);
+  const currentChapter = chapterByNumber(state.selectedChapter) || chapters.find((chapter) => chapterStatusKey(chapter) !== "memory") || chapters[0];
   const currentLabel = currentChapter
     ? `第 ${currentChapter.chapter_number} 章`
     : "未拆章";
@@ -2394,7 +2399,7 @@ function updateProgress() {
         </div>
         <strong>${progress}%</strong>
       </div>
-      <div class="workflow-meta">当前动作：${escapeHtml(flow.action)} · 最近检查点：${escapeHtml(currentLabel)} / ${escapeHtml(currentChapter ? chapterStatusText(currentChapter.status) : "待规划")}</div>
+      <div class="workflow-meta">当前动作：${escapeHtml(flow.action)} · 最近检查点：${escapeHtml(currentLabel)} / ${escapeHtml(currentChapter ? chapterStatusText(currentChapter) : "待规划")}</div>
       <div class="workflow-breakdown compact">
         ${steps.map((step) => `
           <div class="workflow-metric ${step.done ? "done" : ""}">
@@ -2407,11 +2412,28 @@ function updateProgress() {
   `;
 }
 
-function chapterStatusText(status) {
+function chapterStatusKey(chapterOrStatus) {
+  if (!chapterOrStatus || typeof chapterOrStatus === "string") return chapterOrStatus || "";
+  if (String(chapterOrStatus.memory_json || "").trim()) return "memory";
+  if (String(chapterOrStatus.final_text || "").trim()) return "final";
+  if (String(chapterOrStatus.draft || "").trim()) return "draft";
+  return chapterOrStatus.status || "";
+}
+
+function chapterStatusText(chapterOrStatus) {
+  const status = chapterStatusKey(chapterOrStatus);
   if (status === "memory") return "记忆已入库";
   if (status === "final") return "最终稿已保存";
   if (status === "draft") return "已有草稿";
   return "等待写作";
+}
+
+function chapterStatusLabel(chapterOrStatus) {
+  const status = chapterStatusKey(chapterOrStatus);
+  if (status === "memory") return "已记忆";
+  if (status === "final") return "已定稿";
+  if (status === "draft") return "有草稿";
+  return "待写作";
 }
 
 function currentFlowState(input) {

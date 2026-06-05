@@ -542,6 +542,8 @@ class Repository:
                 SELECT id, chapter_number, title,
                        CASE
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
+                         WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
                        END AS status,
                        summary, ending_hook, updated_at
@@ -561,6 +563,8 @@ class Repository:
                 SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
                        CASE
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
+                         WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
                        END AS status
                 FROM chapters
@@ -578,6 +582,8 @@ class Repository:
                 SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
                        CASE
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
+                         WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
                        END AS status
                 FROM chapters
