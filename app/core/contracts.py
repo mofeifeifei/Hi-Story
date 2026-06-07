@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import re
 from typing import Any, Callable
 
+from app.utils.name_normalizer import character_identity_key, normalize_character_name
 from app.utils.validators import (
     validate_chapter_outlines,
     validate_memory_card,
@@ -180,7 +180,7 @@ def _normalize_plan_characters(plan: dict[str, Any]) -> None:
             if not isinstance(item, dict):
                 continue
             cleaned = dict(item)
-            cleaned["name"] = _clean_character_name(cleaned.get("name"))
+            cleaned["name"] = normalize_character_name(cleaned.get("name"))
             key = _character_identity_key(cleaned)
             if not key or key in seen:
                 continue
@@ -192,20 +192,13 @@ def _normalize_plan_characters(plan: dict[str, Any]) -> None:
             else:
                 target.append(cleaned)
     if isinstance(protagonist, dict):
-        protagonist["name"] = _clean_character_name(protagonist.get("name"))
+        protagonist["name"] = normalize_character_name(protagonist.get("name"))
     plan["supporting_characters"] = supporting
     plan["villains"] = villains
 
 
-def _clean_character_name(value: Any) -> str:
-    name = str(value or "").strip()
-    name = re.sub(r"[（(].*?[）)]", "", name)
-    name = re.sub(r"^(主角|配角|反派)[:：\s]*", "", name)
-    return re.sub(r"\s+", "", name)
-
-
 def _character_identity_key(character: dict[str, Any]) -> str:
-    return _clean_character_name(character.get("name")).lower()
+    return character_identity_key(character.get("name"))
 
 
 def _role_contains(character: dict[str, Any], keyword: str) -> bool:

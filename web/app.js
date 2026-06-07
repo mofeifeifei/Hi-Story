@@ -213,6 +213,7 @@ function renderTaskRuns() {
   for (const run of state.taskRuns) {
     const item = document.createElement("div");
     item.className = `log-entry ${run.status === "done" ? "success" : run.status === "failed" ? "error" : "info"}`;
+    const duration = taskDurationText(run);
     const meta = [
       run.kind ? `类型：${run.kind}` : "",
       run.stage ? `阶段：${run.stage}` : "",
@@ -221,11 +222,19 @@ function renderTaskRuns() {
     item.innerHTML = `
       <div class="log-time">${escapeHtml(run.updated_at || run.created_at || "")}</div>
       <div class="log-message">${escapeHtml(run.title || "未命名任务")} · ${escapeHtml(statusText(run.status || ""))}</div>
+      ${duration ? `<div class="log-meta">${escapeHtml(duration)}</div>` : ""}
       ${meta ? `<div class="log-meta">${escapeHtml(meta)}</div>` : ""}
       ${run.error ? `<div class="log-meta">错误：${escapeHtml(run.error)}</div>` : ""}
     `;
     list.appendChild(item);
   }
+}
+
+function taskDurationText(run) {
+  const seconds = Number(run.duration_seconds);
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const label = ["running", "cancelling"].includes(run.status) ? "已运行" : "耗时";
+  return `${label}：${formatDurationSeconds(seconds)}`;
 }
 
 function renderAgentRuns() {
@@ -254,8 +263,10 @@ function renderAgentRuns() {
   }
 }
 
-async function refreshRecords() {
-  if (!requireWork()) {
+async function refreshRecords(options = {}) {
+  const silent = Boolean(options?.silent);
+  if (!state.selectedWorkId) {
+    if (!silent) requireWork();
     renderAgentRuns();
     renderTaskRuns();
     return;
@@ -266,9 +277,9 @@ async function refreshRecords() {
     state.taskRuns = data.task_runs || [];
     renderAgentRuns();
     renderTaskRuns();
-    log("运行记录已刷新。");
+    if (!silent) log("运行记录已刷新。");
   } catch (error) {
-    showError(error);
+    if (!silent) showError(error);
   }
 }
 
@@ -366,6 +377,7 @@ function finishTask(kind, status = "done") {
     state.task.status = status;
     state.task = null;
     updateTaskUI();
+    if (state.selectedWorkId) void refreshRecords({ silent: true });
   }
 }
 
@@ -393,12 +405,28 @@ function updateTaskUI() {
 
 function formatElapsed(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return formatDurationClock(totalSeconds);
+}
+
+function formatDurationClock(totalSeconds) {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   const pad = (value) => String(value).padStart(2, "0");
   if (hours) return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
   return `${pad(minutes)}:${pad(seconds)}`;
+}
+
+function formatDurationSeconds(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} 小时`);
+  if (minutes) parts.push(`${minutes} 分`);
+  if (rest || !parts.length) parts.push(`${rest} 秒`);
+  return parts.join(" ");
 }
 
 function statusText(status) {
@@ -441,9 +469,6 @@ function bindEvents() {
   $("outlineSearchInput").addEventListener("input", renderOutlineTree);
   $("outlineExpandAllBtn").addEventListener("click", expandAllVolumes);
   $("outlineCollapseAllBtn").addEventListener("click", collapseAllVolumes);
-  $("addVolumeBtn").addEventListener("click", addVolume);
-  $("addChapterBtn").addEventListener("click", addChapter);
-  $("deleteOutlineItemBtn").addEventListener("click", deleteOutlineSelection);
   $("generateChapterOutlinesBtn").addEventListener("click", generateChapterOutlines);
   $("chapterStartInput").addEventListener("input", updateOutlineGenerateControls);
   $("clearLogBtn").addEventListener("click", clearRunLogs);
@@ -1027,7 +1052,6 @@ function renderOutlineEditor() {
   const editor = $("outlineEditor");
   const selection = state.outlineSelection || { type: "full" };
   editor.innerHTML = "";
-  $("deleteOutlineItemBtn").style.visibility = selection.type === "full" ? "hidden" : "visible";
   if (selection.type === "full") {
     $("outlineEditorTitle").textContent = "全书大纲";
     $("outlineEditorHint").textContent = "";
@@ -1279,81 +1303,6 @@ async function generateChapterOutlines() {
     else showError(error);
   } finally {
     finishTask("chapterOutlines");
-  }
-}
-
-function addVolume() {
-  commitOutlineEditor();
-  const next = Math.max(0, ...state.outline.volume_outline.map((v) => Number(v.volume_number || 0))) + 1;
-  state.outline.volume_outline.push({
-    volume_number: next,
-    title: `第${next}卷`,
-    target_chapters: "",
-    min_chapters: "",
-    soft_max_chapters: "",
-    hard_max_chapters: "",
-    entry_condition: "",
-    exit_condition: "",
-    required_milestones: [],
-    goal: "",
-    main_conflict: "",
-    turning_points: [],
-    ending: "",
-  });
-  state.outlineTargetVolume = next;
-  ensureExpanded(next);
-  state.outlineSelection = { type: "volume", index: state.outline.volume_outline.length - 1 };
-  renderOutlineTree();
-  renderOutlineEditor();
-  updateOutlineGenerateControls();
-  updateProgress();
-}
-
-function addChapter() {
-  commitOutlineEditor();
-  const next = Math.max(0, ...state.outline.chapters.map((c) => Number(c.chapter_number || 0))) + 1;
-  const volumeNumber = Number(state.outlineTargetVolume || volumeForChapter({ chapter_number: next }));
-  const chapter = { chapter_number: next, volume_number: volumeNumber, title: `第${next}章`, outline: "", ending_hook: "", scene_cards: [] };
-  state.outline.chapters.push(chapter);
-  state.outlineSelection = { type: "chapter", chapter_number: next, index: state.outline.chapters.length - 1 };
-  state.outlineTargetVolume = volumeNumber;
-  ensureExpanded(volumeNumber);
-  renderOutlineTree();
-  renderOutlineEditor();
-  renderChapterLists();
-  setNextChapterStart();
-  updateProgress();
-}
-
-async function deleteOutlineSelection() {
-  const selection = state.outlineSelection;
-  if (!selection || selection.type === "full") return;
-  if (selection.type === "volume") {
-    const ok = await confirmAction("确定删除当前分卷吗？", "删除分卷", "删除");
-    if (!ok) return;
-    const deleted = state.outline.volume_outline[selection.index] || {};
-    const deletedNumber = Number(deleted.volume_number || selection.index + 1);
-    state.outline.volume_outline.splice(selection.index, 1);
-    const fallbackVolume = state.outline.volume_outline[Math.min(selection.index, state.outline.volume_outline.length - 1)];
-    const fallbackNumber = Number(fallbackVolume?.volume_number || 1);
-    for (const chapter of state.outline.chapters || []) {
-      if (Number(chapter.volume_number || volumeForChapter(chapter)) === deletedNumber) {
-        chapter.volume_number = fallbackNumber;
-      }
-    }
-    state.outlineExpandedVolumes = state.outlineExpandedVolumes.filter((number) => Number(number) !== deletedNumber);
-    state.outlineTargetVolume = state.outline.volume_outline.length ? fallbackNumber : 1;
-    ensureExpanded(state.outlineTargetVolume);
-    state.outlineSelection = { type: "full" };
-    renderOutlineTree();
-    renderOutlineEditor();
-    updateOutlineGenerateControls();
-    updateProgress();
-    notify("分卷已删除，记得保存当前大纲。", "success");
-    return;
-  }
-  if (selection.type === "chapter") {
-    await deleteChapterByNumber(selection.chapter_number);
   }
 }
 

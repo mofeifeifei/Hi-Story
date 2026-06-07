@@ -6,7 +6,10 @@ import socket
 import subprocess
 import sys
 import threading
+import traceback
+import uuid
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -16,7 +19,7 @@ from app.core.contracts import normalize_work_plan
 from app.exporters.export_docx import export_chapter_docx, export_docx, export_range_docx
 from app.exporters.export_txt import export_chapter_txt, export_range_txt, export_txt
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
-from app.utils.config import RESOURCE_DIR, ROOT_DIR, load_config, save_config
+from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, save_config
 from app.utils.formatters import (
     format_context_readable,
     format_memory_readable,
@@ -25,6 +28,7 @@ from app.utils.formatters import (
     format_review_readable,
 )
 from app.utils.json_parser import json_dumps, parse_json_object
+from app.utils.text_cleaner import strip_chapter_heading
 from app.web.config_api import public_config, sanitize_config_update
 from app.web.state import STATE
 
@@ -63,6 +67,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
+            _log_server_error(method, path, exc)
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
     def _route_api(self, method: str, parts: list[str], body: dict[str, Any]) -> Any:
@@ -386,8 +391,25 @@ def _available_port(host: str, start: int) -> int:
     raise RuntimeError("没有找到可用的本地端口。")
 
 
+def _log_server_error(method: str, path: str, exc: Exception) -> None:
+    log_dir = DATA_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    message = [
+        "=" * 80,
+        datetime.now().isoformat(timespec="seconds"),
+        f"{method} {path}",
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
+        "",
+    ]
+    try:
+        with (log_dir / "server.log").open("a", encoding="utf-8") as f:
+            f.write("\n".join(message))
+    except OSError:
+        return
+
+
 def _task_id(body: dict[str, Any]) -> str:
-    return str(body.get("task_id") or "").strip()
+    return str(body.get("task_id") or "").strip() or f"task-{uuid.uuid4().hex}"
 
 
 def _raise_if_stopped(task_id: str, message: str) -> None:
@@ -521,7 +543,7 @@ def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -
 def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     title = str(body.get("title") or chapter.get("title") or f"第{chapter_number}章").strip()
-    text = str(body.get("final_text") or "")
+    text = strip_chapter_heading(str(body.get("final_text") or ""), chapter_number, title)
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
     STATE.repo.save_final_after_manual_edit(
@@ -580,7 +602,7 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
         outline=outline_json["outline"],
         ending_hook=outline_json["ending_hook"],
         outline_json=outline_json,
-        protect_written=False,
+        protect_written=True,
     )
     return _chapter_state(work_id, chapter_number)
 
@@ -642,6 +664,7 @@ def _revise_chapter_with_instruction(
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：修订稿已返回，但未写入界面。")
     revised = STATE.workflow.normalize_output_names(work_id, revised)
+    revised = strip_chapter_heading(revised, chapter_number, chapter.get("title"))
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
     STATE.repo.log_agent_run(
         work_id=work_id,
@@ -682,6 +705,8 @@ def _save_outline(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
 
 def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
     fmt = str(body.get("format") or "txt").lower()
+    if fmt not in {"txt", "docx"}:
+        raise ValueError("暂不支持该导出格式。请选择 TXT 或 DOCX。")
     scope = str(body.get("scope") or "book")
     include_draft = bool(body.get("include_draft", False))
     work = STATE.repo.get_work(work_id)

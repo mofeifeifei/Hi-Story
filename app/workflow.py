@@ -21,6 +21,7 @@ from app.utils.outline_utils import (
     repeat_risk_warnings,
 )
 from app.utils.text_check import DEFAULT_TEMPLATE_BLACKLIST, blacklist_for_prompt, repeated_text_warnings
+from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.word_target import chapter_word_target_from_style
 
 
@@ -421,6 +422,7 @@ class NovelWorkflow:
         context = self.build_chapter_context(work_id, chapter_number)
 
         draft = self.writer.write_chapter(context)
+        draft = strip_chapter_heading(draft, chapter_number, chapter.get("title"))
         if stop_requested():
             raise RuntimeError("任务已停止：第 {0} 章初稿已返回，但未保存。".format(chapter_number))
         draft_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, draft)
@@ -461,6 +463,7 @@ class NovelWorkflow:
         final_text = draft
         if do_revise and review is not None:
             final_text = self.reviser.revise_chapter(context, draft, review)
+            final_text = strip_chapter_heading(final_text, chapter_number, chapter.get("title"))
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章修订稿已返回，但未保存最终稿。".format(chapter_number))
             final_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, final_text)

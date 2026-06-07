@@ -22,12 +22,35 @@ from app.utils.history import (
     is_historical_inputs,
 )
 from app.utils.json_parser import as_list, json_dumps
-from app.utils.name_normalizer import aliases_to_official_map, normalize_names
+from app.utils.name_normalizer import (
+    aliases_to_official_map,
+    character_identity_key,
+    normalize_character_name,
+    normalize_names,
+)
 from app.utils.outline_utils import chapter_outline_json
 
 
 def now_text() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _parse_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _duration_seconds(start: Any, end: Any = "", *, now: datetime | None = None) -> int | None:
+    start_time = _parse_time(start)
+    if start_time is None:
+        return None
+    end_time = _parse_time(end) or now or datetime.now()
+    return max(0, int((end_time - start_time).total_seconds()))
 
 
 INDEX_SCHEMA = """
@@ -633,6 +656,7 @@ class Repository:
 
     def upsert_character(self, work_id: int, data: dict[str, Any]) -> int:
         timestamp = now_text()
+        data = self._normalize_character_data(data)
         character_id = int(data.get("id") or 0)
         with connect(self._db_path_for_work(work_id)) as conn:
             if character_id:
@@ -640,88 +664,49 @@ class Repository:
                     "SELECT * FROM characters WHERE id = ? AND work_id = ?",
                     (character_id, work_id),
                 ).fetchone()
-                old_name = str(row["name"] or "").strip() if row is not None else ""
-                new_name = str(data.get("name", "") or "").strip()
-                aliases = self._aliases_with_old_name(data.get("aliases"), old_name, new_name)
-                conn.execute(
-                    """
-                    UPDATE characters
-                    SET name = ?, role = ?, aliases = ?, personality = ?, goal = ?, secret = ?,
-                        speaking_style = ?, relationship = ?, locked_rules = ?,
-                        current_goal = ?, current_fear = ?, current_state = ?,
-                        relationship_stage = ?, secret_exposure = ?, arc_stage = ?,
-                        arc_notes = ?, last_changed_chapter = ?, updated_at = ?
-                    WHERE id = ? AND work_id = ?
-                    """,
-                    (
-                        data.get("name", ""),
-                        data.get("role", ""),
-                        json_dumps(aliases),
-                        data.get("personality", ""),
-                        data.get("goal", ""),
-                        data.get("secret", ""),
-                        data.get("speaking_style", ""),
-                        data.get("relationship", ""),
-                        data.get("locked_rules", ""),
-                        data.get("current_goal", ""),
-                        data.get("current_fear", ""),
-                        data.get("current_state", ""),
-                        data.get("relationship_stage", ""),
-                        data.get("secret_exposure", ""),
-                        data.get("arc_stage", ""),
-                        data.get("arc_notes", ""),
-                        self._optional_int(data.get("last_changed_chapter")),
-                        timestamp,
-                        character_id,
-                        work_id,
-                    ),
-                )
-                if old_name and new_name and old_name != new_name:
-                    self._sync_character_rename_references(
-                        conn,
-                        work_id=work_id,
-                        character_id=character_id,
-                        old_name=old_name,
-                        new_name=new_name,
-                        timestamp=timestamp,
-                    )
-                conn.commit()
-                return character_id
+                if row is not None:
+                    duplicate = self._find_character_row_by_identity(conn, work_id, data, exclude_id=character_id)
+                    if duplicate is not None:
+                        target = self._merge_character_rows(dict(duplicate), dict(row), timestamp)
+                        target = self._merge_character_rows(target, data, timestamp)
+                        self._save_character_update(conn, work_id, int(duplicate["id"]), target, timestamp)
+                        old_name = str(row["name"] or "").strip()
+                        new_name = str(target.get("name") or duplicate["name"] or "").strip()
+                        self._sync_character_rename_references(
+                            conn,
+                            work_id=work_id,
+                            character_id=int(duplicate["id"]),
+                            old_name=old_name,
+                            new_name=new_name,
+                            timestamp=timestamp,
+                        )
+                        conn.execute("DELETE FROM characters WHERE id = ? AND work_id = ?", (character_id, work_id))
+                        conn.commit()
+                        return int(duplicate["id"])
+                    old_name = str(row["name"] or "").strip()
+                    new_name = str(data.get("name", "") or "").strip()
+                    aliases = self._aliases_with_old_name(data.get("aliases"), old_name, new_name)
+                    data["aliases"] = aliases
+                    self._save_character_update(conn, work_id, character_id, data, timestamp)
+                    if old_name and new_name and old_name != new_name:
+                        self._sync_character_rename_references(
+                            conn,
+                            work_id=work_id,
+                            character_id=character_id,
+                            old_name=old_name,
+                            new_name=new_name,
+                            timestamp=timestamp,
+                        )
+                    conn.commit()
+                    return character_id
 
-            aliases = self._aliases_with_old_name(data.get("aliases"), "", str(data.get("name", "") or "").strip())
-            cur = conn.execute(
-                """
-                INSERT INTO characters (
-                  work_id, name, role, aliases, personality, goal, secret,
-                  speaking_style, relationship, locked_rules,
-                  current_goal, current_fear, current_state,
-                  relationship_stage, secret_exposure, arc_stage,
-                  arc_notes, last_changed_chapter, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    work_id,
-                    data.get("name", ""),
-                    data.get("role", ""),
-                    json_dumps(aliases),
-                    data.get("personality", ""),
-                    data.get("goal", ""),
-                    data.get("secret", ""),
-                    data.get("speaking_style", ""),
-                    data.get("relationship", ""),
-                    data.get("locked_rules", ""),
-                    data.get("current_goal", ""),
-                    data.get("current_fear", ""),
-                    data.get("current_state", ""),
-                    data.get("relationship_stage", ""),
-                    data.get("secret_exposure", ""),
-                    data.get("arc_stage", ""),
-                    data.get("arc_notes", ""),
-                    self._optional_int(data.get("last_changed_chapter")),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            existing = self._find_character_row_by_identity(conn, work_id, data)
+            if existing is not None:
+                merged = self._merge_character_rows(dict(existing), data, timestamp)
+                self._save_character_update(conn, work_id, int(existing["id"]), merged, timestamp)
+                conn.commit()
+                return int(existing["id"])
+            cur = self._insert_character(conn, work_id, data, timestamp)
             conn.commit()
             return int(cur.lastrowid)
 
@@ -1232,23 +1217,10 @@ class Repository:
             for item in as_list(memory.get("character_state_updates")):
                 if not isinstance(item, dict):
                     continue
-                name = str(item.get("name", "") or "").strip()
+                name = normalize_character_name(item.get("name"))
                 if not name:
                     continue
-                row = conn.execute(
-                    """
-                    SELECT *
-                    FROM characters
-                    WHERE work_id = ?
-                      AND (
-                        name = ?
-                        OR aliases LIKE ?
-                      )
-                    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, id
-                    LIMIT 1
-                    """,
-                    (work_id, name, f'%"{name}"%', name),
-                ).fetchone()
+                row = self._find_character_row_by_identity(conn, work_id, {"name": name})
                 if row is None:
                     continue
                 current = dict(row)
@@ -1572,7 +1544,17 @@ class Repository:
                 """,
                 (work_id, max(1, int(limit))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        now = datetime.now()
+        result = []
+        for row in rows:
+            item = dict(row)
+            if item.get("status") in {"running", "cancelling"}:
+                end_time = ""
+            else:
+                end_time = item.get("finished_at") or item.get("updated_at") or ""
+            item["duration_seconds"] = _duration_seconds(item.get("created_at"), end_time, now=now)
+            result.append(item)
+        return result
 
     def work_dir(self, work_id: int) -> Path:
         return self._work_dir_from_record(self._work_record(work_id))
@@ -1734,6 +1716,7 @@ class Repository:
                 try:
                     self._repair_chapter_memory_statuses(db_path)
                     self._repair_work_style_controls(db_path)
+                    self._repair_duplicate_characters(db_path, int(record["id"]))
                     self._repair_official_names(db_path, int(record["id"]))
                 except (OSError, sqlite3.Error):
                     pass
@@ -1768,6 +1751,60 @@ class Repository:
                         "UPDATE works SET style = ?, locked_facts = ?, updated_at = ? WHERE id = ?",
                         (normalized, json_dumps(locked_facts), now_text(), int(row["id"])),
                     )
+            conn.commit()
+
+    @staticmethod
+    def _repair_duplicate_characters(db_path: Path, work_id: int) -> None:
+        with connect(db_path) as conn:
+            rows = [dict(row) for row in conn.execute("SELECT * FROM characters WHERE work_id = ? ORDER BY id", (work_id,)).fetchall()]
+            if not rows:
+                return
+            timestamp = now_text()
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                key = character_identity_key(row.get("name"))
+                if key:
+                    groups.setdefault(key, []).append(row)
+
+            for group in groups.values():
+                keep = group[0]
+                keep_id = int(keep["id"])
+                keep_name = normalize_character_name(keep.get("name")) or str(keep.get("name") or "").strip()
+                merged = Repository._normalize_character_data({**keep, "name": keep_name})
+                old_keep_name = str(keep.get("name") or "").strip()
+                if old_keep_name and old_keep_name != keep_name:
+                    Repository._sync_character_rename_references(
+                        conn,
+                        work_id=work_id,
+                        character_id=keep_id,
+                        old_name=old_keep_name,
+                        new_name=keep_name,
+                        timestamp=timestamp,
+                    )
+                for duplicate in group[1:]:
+                    duplicate_id = int(duplicate["id"])
+                    duplicate_name = str(duplicate.get("name") or "").strip()
+                    merged = Repository._merge_character_rows(merged, duplicate, timestamp)
+                    if duplicate_name and duplicate_name != keep_name:
+                        Repository._sync_character_rename_references(
+                            conn,
+                            work_id=work_id,
+                            character_id=keep_id,
+                            old_name=duplicate_name,
+                            new_name=keep_name,
+                            timestamp=timestamp,
+                        )
+                    conn.execute(
+                        """
+                        UPDATE sync_events
+                        SET target_id = ?, target_name = ?
+                        WHERE work_id = ? AND target_type = 'character' AND target_id = ?
+                        """,
+                        (keep_id, keep_name, work_id, duplicate_id),
+                    )
+                    conn.execute("DELETE FROM characters WHERE id = ? AND work_id = ?", (duplicate_id, work_id))
+                merged["name"] = keep_name
+                Repository._save_character_update(conn, work_id, keep_id, merged, timestamp)
             conn.commit()
 
     @staticmethod
@@ -2575,13 +2612,146 @@ class Repository:
         return "\n".join(lines)
 
     @staticmethod
-    def _insert_character(conn: sqlite3.Connection, work_id: int, data: dict[str, Any], timestamp: str) -> None:
+    def _normalize_character_data(data: dict[str, Any]) -> dict[str, Any]:
+        result = dict(data)
+        raw_name = str(result.get("name", "") or "").strip()
+        normalized_name = normalize_character_name(raw_name)
+        result["name"] = normalized_name
+        aliases = Repository._aliases_with_old_name(result.get("aliases"), raw_name, normalized_name)
+        normalized_aliases: list[str] = []
+        for alias in aliases:
+            alias = str(alias or "").strip()
+            if alias and alias != normalized_name and alias not in normalized_aliases:
+                normalized_aliases.append(alias)
+            cleaned = normalize_character_name(alias)
+            if cleaned and cleaned != normalized_name and cleaned not in normalized_aliases:
+                normalized_aliases.append(cleaned)
+        result["aliases"] = normalized_aliases
+        return result
+
+    @staticmethod
+    def _character_identity_values(data: dict[str, Any]) -> set[str]:
+        values = {character_identity_key(data.get("name"))}
+        for alias in Repository._load_json_list(data.get("aliases")):
+            values.add(character_identity_key(alias))
+        return {value for value in values if value}
+
+    @staticmethod
+    def _find_character_row_by_identity(
+        conn: sqlite3.Connection,
+        work_id: int,
+        data: dict[str, Any],
+        *,
+        exclude_id: int = 0,
+    ) -> sqlite3.Row | None:
+        target_keys = Repository._character_identity_values(data)
+        if not target_keys:
+            return None
+        rows = conn.execute(
+            "SELECT * FROM characters WHERE work_id = ? ORDER BY id",
+            (work_id,),
+        ).fetchall()
+        for row in rows:
+            if exclude_id and int(row["id"]) == int(exclude_id):
+                continue
+            row_data = dict(row)
+            if target_keys.intersection(Repository._character_identity_values(row_data)):
+                return row
+        return None
+
+    @staticmethod
+    def _merge_character_rows(base: dict[str, Any], incoming: dict[str, Any], timestamp: str) -> dict[str, Any]:
+        result = Repository._normalize_character_data(base)
+        incoming = Repository._normalize_character_data(incoming)
+        for key in [
+            "role",
+            "personality",
+            "goal",
+            "secret",
+            "speaking_style",
+            "relationship",
+            "locked_rules",
+            "current_goal",
+            "current_fear",
+            "current_state",
+            "relationship_stage",
+            "secret_exposure",
+            "arc_stage",
+            "arc_notes",
+        ]:
+            current = str(result.get(key) or "").strip()
+            new_value = str(incoming.get(key) or "").strip()
+            if (not current or current == "待补充") and new_value:
+                result[key] = new_value
+        current_chapter = Repository._optional_int(result.get("last_changed_chapter"))
+        incoming_chapter = Repository._optional_int(incoming.get("last_changed_chapter"))
+        result["last_changed_chapter"] = max(current_chapter or 0, incoming_chapter or 0) or ""
+        aliases: list[str] = []
+        for value in [
+            base.get("name"),
+            incoming.get("name"),
+            *Repository._load_json_list(base.get("aliases")),
+            *Repository._load_json_list(incoming.get("aliases")),
+        ]:
+            value = str(value or "").strip()
+            if value and value != result.get("name") and value not in aliases:
+                aliases.append(value)
+        result["aliases"] = aliases
+        result["updated_at"] = timestamp
+        return result
+
+    @staticmethod
+    def _save_character_update(
+        conn: sqlite3.Connection,
+        work_id: int,
+        character_id: int,
+        data: dict[str, Any],
+        timestamp: str,
+    ) -> None:
+        data = Repository._normalize_character_data(data)
+        conn.execute(
+            """
+            UPDATE characters
+            SET name = ?, role = ?, aliases = ?, personality = ?, goal = ?, secret = ?,
+                speaking_style = ?, relationship = ?, locked_rules = ?,
+                current_goal = ?, current_fear = ?, current_state = ?,
+                relationship_stage = ?, secret_exposure = ?, arc_stage = ?,
+                arc_notes = ?, last_changed_chapter = ?, updated_at = ?
+            WHERE id = ? AND work_id = ?
+            """,
+            (
+                data.get("name", ""),
+                data.get("role", ""),
+                json_dumps(data.get("aliases", [])),
+                data.get("personality", ""),
+                data.get("goal", ""),
+                data.get("secret", ""),
+                data.get("speaking_style", ""),
+                data.get("relationship", ""),
+                data.get("locked_rules", ""),
+                data.get("current_goal", ""),
+                data.get("current_fear", ""),
+                data.get("current_state", ""),
+                data.get("relationship_stage", ""),
+                data.get("secret_exposure", ""),
+                data.get("arc_stage", ""),
+                data.get("arc_notes", ""),
+                Repository._optional_int(data.get("last_changed_chapter")),
+                timestamp,
+                character_id,
+                work_id,
+            ),
+        )
+
+    @staticmethod
+    def _insert_character(conn: sqlite3.Connection, work_id: int, data: dict[str, Any], timestamp: str) -> sqlite3.Cursor:
+        data = Repository._normalize_character_data(data)
         aliases = Repository._aliases_with_old_name(
             data.get("aliases"),
             "",
             str(data.get("name", "") or "").strip(),
         )
-        conn.execute(
+        return conn.execute(
             """
             INSERT INTO characters (
               work_id, name, role, aliases, personality, goal, secret,
@@ -2617,6 +2787,7 @@ class Repository:
 
     @staticmethod
     def _upsert_plan_character(conn: sqlite3.Connection, work_id: int, data: dict[str, Any], timestamp: str) -> None:
+        data = Repository._normalize_character_data(data)
         name = str(data.get("name", "") or "").strip()
         if not name:
             return
@@ -2630,39 +2801,9 @@ class Repository:
         ).fetchone()
         old_name = str(old_row["name"] or "").strip() if old_row is not None else ""
         aliases = Repository._aliases_with_old_name(data.get("aliases"), old_name, name)
-        conn.execute(
-            """
-            UPDATE characters
-            SET name = ?, role = ?, aliases = ?, personality = ?, goal = ?, secret = ?,
-                speaking_style = ?, relationship = ?, locked_rules = ?,
-                current_goal = ?, current_fear = ?, current_state = ?,
-                relationship_stage = ?, secret_exposure = ?, arc_stage = ?,
-                arc_notes = ?, last_changed_chapter = ?, updated_at = ?
-            WHERE id = ? AND work_id = ?
-            """,
-            (
-                name,
-                data.get("role", ""),
-                json_dumps(aliases),
-                data.get("personality", ""),
-                data.get("goal", ""),
-                data.get("secret", ""),
-                data.get("speaking_style", ""),
-                data.get("relationship", ""),
-                data.get("locked_rules", ""),
-                data.get("current_goal", ""),
-                data.get("current_fear", ""),
-                data.get("current_state", ""),
-                data.get("relationship_stage", ""),
-                data.get("secret_exposure", ""),
-                data.get("arc_stage", ""),
-                data.get("arc_notes", ""),
-                Repository._optional_int(data.get("last_changed_chapter")),
-                timestamp,
-                row["id"],
-                work_id,
-            ),
-        )
+        data["aliases"] = aliases
+        merged = Repository._merge_character_rows(dict(old_row), data, timestamp) if old_row is not None else data
+        Repository._save_character_update(conn, work_id, int(row["id"]), merged, timestamp)
         if old_name and old_name != name:
             Repository._sync_character_rename_references(
                 conn,
@@ -2691,47 +2832,15 @@ class Repository:
         work_id: int,
         data: dict[str, Any],
     ) -> sqlite3.Row | None:
-        name = str(data.get("name", "") or "").strip()
-        aliases = [alias for alias in Repository._load_json_list(data.get("aliases")) if alias and alias != name]
         row = None
         character_id = Repository._optional_int(data.get("id"))
         if character_id:
             row = conn.execute(
-                "SELECT id, name, role FROM characters WHERE work_id = ? AND id = ?",
+                "SELECT * FROM characters WHERE work_id = ? AND id = ?",
                 (work_id, character_id),
             ).fetchone()
-        if row is None and name:
-            row = conn.execute(
-                "SELECT id, name, role FROM characters WHERE work_id = ? AND name = ?",
-                (work_id, name),
-            ).fetchone()
-        if row is None and name:
-            row = conn.execute(
-                """
-                SELECT id, name, role
-                FROM characters
-                WHERE work_id = ?
-                  AND aliases LIKE ?
-                ORDER BY id
-                LIMIT 1
-                """,
-                (work_id, f'%"{name}"%'),
-            ).fetchone()
-        if row is None and aliases:
-            for alias in aliases:
-                row = conn.execute(
-                    """
-                    SELECT id, name, role
-                    FROM characters
-                    WHERE work_id = ?
-                      AND (name = ? OR aliases LIKE ?)
-                    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, id
-                    LIMIT 1
-                    """,
-                    (work_id, alias, f'%"{alias}"%', alias),
-                ).fetchone()
-                if row is not None:
-                    break
+        if row is None:
+            row = Repository._find_character_row_by_identity(conn, work_id, data)
         if row is None and Repository._role_contains(data, "主角"):
             row = conn.execute(
                 """
@@ -2758,20 +2867,13 @@ class Repository:
         timestamp = now_text()
         with connect(self._db_path_for_work(work_id)) as conn:
             for name in names:
-                row = conn.execute(
-                    """
-                    SELECT id
-                    FROM characters
-                    WHERE work_id = ?
-                      AND (name = ? OR aliases LIKE ?)
-                    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, id
-                    LIMIT 1
-                    """,
-                    (work_id, name, f'%"{name}"%', name),
-                ).fetchone()
+                name = normalize_character_name(name)
+                if not name:
+                    continue
+                row = self._find_character_row_by_identity(conn, work_id, {"name": name})
                 if row is not None:
                     continue
-                self._insert_character(
+                cur = self._insert_character(
                     conn,
                     work_id,
                     {
@@ -2783,10 +2885,6 @@ class Repository:
                     },
                     timestamp,
                 )
-                row = conn.execute(
-                    "SELECT id FROM characters WHERE work_id = ? AND name = ?",
-                    (work_id, name),
-                ).fetchone()
                 self._insert_sync_event(
                     conn,
                     work_id=work_id,
@@ -2794,7 +2892,7 @@ class Repository:
                     chapter_number=self._optional_int(outline.get("chapter_number")),
                     source="chapter_outline",
                     target_type="character",
-                    target_id=int(row["id"]) if row else None,
+                    target_id=int(cur.lastrowid),
                     target_name=name,
                     action="create_outline_character",
                     details={"name": name},

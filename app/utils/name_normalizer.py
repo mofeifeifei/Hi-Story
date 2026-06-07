@@ -1,8 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any
+
+
+ROLE_LABEL_PATTERN = r"主角|配角|反派|男主|女主|男配|女配|主人公|人物|角色|待补充|protagonist|supporting|villain"
+
+
+def normalize_character_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    name = re.sub(r"[（(【\[].*?[）)】\]]", "", name)
+    name = re.sub(rf"^\s*(?:{ROLE_LABEL_PATTERN})\s*[:：\-—·、\s]+", "", name, flags=re.IGNORECASE)
+    name = re.sub(rf"[:：\-—·、\s]+(?:{ROLE_LABEL_PATTERN})\s*$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+", "", name)
+    return name.strip("：:，,。；;、-—·")
+
+
+def character_identity_key(value: Any) -> str:
+    return normalize_character_name(value).casefold()
 
 
 def aliases_to_official_map(characters: list[dict[str, Any]]) -> dict[str, str]:
@@ -10,13 +29,19 @@ def aliases_to_official_map(characters: list[dict[str, Any]]) -> dict[str, str]:
     for character in characters:
         if not isinstance(character, dict):
             continue
-        official = str(character.get("name") or "").strip()
+        raw_official = str(character.get("name") or "").strip()
+        official = normalize_character_name(raw_official)
         if not official:
             continue
+        if raw_official and raw_official != official:
+            mapping[raw_official] = official
         for alias in _alias_values(character.get("aliases")):
             alias = str(alias or "").strip()
             if alias and alias != official:
                 mapping[alias] = official
+            normalized_alias = normalize_character_name(alias)
+            if normalized_alias and normalized_alias != official:
+                mapping[normalized_alias] = official
     return mapping
 
 
