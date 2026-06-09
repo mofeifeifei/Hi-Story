@@ -14,7 +14,7 @@ class MemoryAgent(BaseAgent):
 
     def make_memory_card(self, context: dict[str, Any], final_text: str) -> dict[str, Any]:
         chapter = context.get("chapter", {})
-        history_section = history_prompt_section(context)
+        history_section = history_prompt_section(context, task="memory")
         user_prompt = (
             "请根据最终稿生成章节记忆卡，输出供程序解析的合法 JSON。\n\n"
             "重点：handoff 必须生成可让下一章第一段直接承接的章节交接口，不能只写抽象悬念或氛围总结。\n\n"

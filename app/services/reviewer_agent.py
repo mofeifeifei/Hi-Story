@@ -15,7 +15,7 @@ class ReviewerAgent(BaseAgent):
 
     def review_chapter(self, context: dict[str, Any], draft: str) -> dict[str, Any]:
         template_hits = detect_template_phrases(draft)
-        history_section = history_prompt_section(context)
+        history_section = history_prompt_section(context, task="reviewer")
         historical_hits = (
             detect_historical_anachronisms(draft)
             if context.get("history_specialist", {}).get("enabled")

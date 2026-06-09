@@ -35,6 +35,12 @@ def now_text() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _estimate_tokens_from_chars(chars: int) -> int:
+    if chars <= 0:
+        return 0
+    return max(1, round(chars / 1.8))
+
+
 def _parse_time(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -856,6 +862,54 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def upsert_historical_fact(self, work_id: int, data: dict[str, Any]) -> int:
+        timestamp = now_text()
+        fact_id = int(data.get("id") or 0)
+        values = (
+            self._optional_int(data.get("chapter_number")),
+            data.get("category", ""),
+            data.get("name", ""),
+            data.get("content", ""),
+            data.get("source_type", ""),
+            data.get("certainty", ""),
+            1 if data.get("fictionalized") in (True, 1, "1", "true", "True", "是") else 0,
+            data.get("chapter_impact", ""),
+            data.get("future_constraint", ""),
+            timestamp,
+        )
+        with connect(self._db_path_for_work(work_id)) as conn:
+            if fact_id:
+                conn.execute(
+                    """
+                    UPDATE historical_facts
+                    SET chapter_number = ?, category = ?, name = ?, content = ?,
+                        source_type = ?, certainty = ?, fictionalized = ?,
+                        chapter_impact = ?, future_constraint = ?, updated_at = ?
+                    WHERE id = ? AND work_id = ?
+                    """,
+                    (*values, fact_id, work_id),
+                )
+                conn.commit()
+                return fact_id
+
+            cur = conn.execute(
+                """
+                INSERT INTO historical_facts (
+                  work_id, chapter_number, category, name, content,
+                  source_type, certainty, fictionalized, chapter_impact,
+                  future_constraint, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (work_id, *values[:9], timestamp, timestamp),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def delete_historical_fact(self, work_id: int, fact_id: int) -> None:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            conn.execute("DELETE FROM historical_facts WHERE id = ? AND work_id = ?", (fact_id, work_id))
+            conn.commit()
+
     def delete_world_rule(self, work_id: int, rule_id: int) -> None:
         with connect(self._db_path_for_work(work_id)) as conn:
             conn.execute("DELETE FROM world_rules WHERE id = ? AND work_id = ?", (rule_id, work_id))
@@ -1371,17 +1425,23 @@ class Repository:
                 cur = conn.execute(
                     """
                     INSERT INTO historical_facts (
-                      work_id, chapter_number, category, content,
-                      chapter_impact, future_constraint, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                      work_id, chapter_number, category, name, content,
+                      source_type, certainty, fictionalized, chapter_impact,
+                      future_constraint, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         work_id,
                         chapter_number,
                         item.get("category", ""),
+                        item.get("name", ""),
                         content,
+                        item.get("source_type", "memory_card") or "memory_card",
+                        item.get("certainty", ""),
+                        1 if item.get("fictionalized") in (True, 1, "1", "true", "True", "是") else 0,
                         item.get("chapter_impact", ""),
                         item.get("future_constraint", ""),
+                        timestamp,
                         timestamp,
                     ),
                 )
@@ -1432,16 +1492,29 @@ class Repository:
         output: str,
         status: str = "ok",
         error: str = "",
+        input_chars: int = 0,
+        output_chars: int = 0,
+        estimated_input_tokens: int = 0,
+        estimated_output_tokens: int = 0,
+        estimated_total_tokens: int = 0,
+        elapsed_seconds: float = 0,
     ) -> int:
         if work_id is None:
             return 0
+        input_chars = int(input_chars or len(input_preview or ""))
+        output_chars = int(output_chars or len(output or ""))
+        estimated_input_tokens = int(estimated_input_tokens or _estimate_tokens_from_chars(input_chars))
+        estimated_output_tokens = int(estimated_output_tokens or _estimate_tokens_from_chars(output_chars))
+        estimated_total_tokens = int(estimated_total_tokens or estimated_input_tokens + estimated_output_tokens)
         with connect(self._db_path_for_work(work_id)) as conn:
             cur = conn.execute(
                 """
                 INSERT INTO agent_runs (
                   work_id, chapter_id, agent_name, model, prompt_name,
-                  input_preview, output, status, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  input_preview, output, input_chars, output_chars,
+                  estimated_input_tokens, estimated_output_tokens, estimated_total_tokens,
+                  elapsed_seconds, status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     work_id,
@@ -1451,6 +1524,12 @@ class Repository:
                     prompt_name,
                     input_preview[:2000],
                     output,
+                    input_chars,
+                    output_chars,
+                    estimated_input_tokens,
+                    estimated_output_tokens,
+                    estimated_total_tokens,
+                    float(elapsed_seconds or 0),
                     status,
                     error,
                     now_text(),
@@ -3200,45 +3279,22 @@ class Repository:
         timestamp: str,
     ) -> None:
         profile = compact_historical_profile(profile)
+        columns = ["work_id", *HISTORICAL_PROFILE_FIELDS, "created_at", "updated_at"]
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ",\n              ".join(
+            f"{column} = excluded.{column}"
+            for column in [*HISTORICAL_PROFILE_FIELDS, "updated_at"]
+        )
         conn.execute(
-            """
-            INSERT INTO historical_profiles (
-              work_id, dynasty, period, year_range, political_context,
-              official_system, military_system, social_order, daily_life,
-              language_style, taboo_words, allowed_fiction, locked_facts,
-              source_notes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            f"""
+            INSERT INTO historical_profiles ({", ".join(columns)})
+            VALUES ({placeholders})
             ON CONFLICT(work_id) DO UPDATE SET
-              dynasty = excluded.dynasty,
-              period = excluded.period,
-              year_range = excluded.year_range,
-              political_context = excluded.political_context,
-              official_system = excluded.official_system,
-              military_system = excluded.military_system,
-              social_order = excluded.social_order,
-              daily_life = excluded.daily_life,
-              language_style = excluded.language_style,
-              taboo_words = excluded.taboo_words,
-              allowed_fiction = excluded.allowed_fiction,
-              locked_facts = excluded.locked_facts,
-              source_notes = excluded.source_notes,
-              updated_at = excluded.updated_at
+              {updates}
             """,
             (
                 work_id,
-                profile.get("dynasty", ""),
-                profile.get("period", ""),
-                profile.get("year_range", ""),
-                profile.get("political_context", ""),
-                profile.get("official_system", ""),
-                profile.get("military_system", ""),
-                profile.get("social_order", ""),
-                profile.get("daily_life", ""),
-                profile.get("language_style", ""),
-                profile.get("taboo_words", ""),
-                profile.get("allowed_fiction", ""),
-                profile.get("locked_facts", ""),
-                profile.get("source_notes", ""),
+                *(profile.get(key, "") for key in HISTORICAL_PROFILE_FIELDS),
                 timestamp,
                 timestamp,
             ),

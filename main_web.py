@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import traceback
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,7 @@ if __name__ == "__main__":
     try:
         from app.web.server import run
 
-        run()
+        run(open_browser="--no-browser" not in sys.argv)
     except Exception as exc:  # noqa: BLE001
         log_dir = Path(__file__).resolve().parent / "data" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)

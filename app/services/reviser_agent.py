@@ -12,7 +12,7 @@ class ReviserAgent(BaseAgent):
     prompt_file = "reviser_prompt.md"
 
     def revise_chapter(self, context: dict[str, Any], draft: str, review: dict[str, Any]) -> str:
-        history_section = history_prompt_section(context)
+        history_section = history_prompt_section(context, task="reviser")
         user_prompt = (
             "请根据审稿意见修订章节正文，只输出修订后的正文。\n\n"
             "修订时必须保留并兑现章节目的词、目标情绪、读者期待和本章回报；必要事实以 minimal_memory_pack 为准。\n\n"
@@ -25,7 +25,7 @@ class ReviserAgent(BaseAgent):
         return self.complete(user_prompt, mock_hint={"draft": draft, "review": review}).strip()
 
     def revise_with_instruction(self, context: dict[str, Any], draft: str, instruction: str) -> str:
-        history_section = history_prompt_section(context)
+        history_section = history_prompt_section(context, task="reviser")
         user_prompt = (
             "请根据用户修改意见修订章节正文，只输出修订后的正文。\n"
             "用户意见优先级最高；在不违背锁定设定、细纲和上下文的前提下，尽量保留当前正文中可用的段落、对白和事件，"

@@ -29,6 +29,7 @@ from app.utils.formatters import (
 )
 from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.text_cleaner import strip_chapter_heading
+from app.utils.text_check import manuscript_quality_report, quality_summary
 from app.web.config_api import public_config, sanitize_config_update
 from app.web.state import STATE
 
@@ -151,6 +152,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     prompt_name="planner_prompt.md",
                     input_preview=json_dumps(inputs),
                     output=json_dumps(plan),
+                    **STATE.workflow.client.last_usage("planner"),
                 )
                 return _work_state(work_id)
 
@@ -172,6 +174,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
 
             if len(parts) == 4 and parts[3] == "chapter-outlines" and method == "POST":
                 task_id = _task_id(body)
+                output_preview = ""
                 _start_task(task_id, work_id, kind="chapterOutlines", title="生成章节细纲", stage="chapter_outline", input_data=body)
                 try:
                     start = max(1, int(body.get("start_chapter") or 1))
@@ -184,13 +187,20 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         volume_number=volume_number,
                         should_stop=lambda: STATE.task_cancelled(task_id),
                     )
-                    return {"generated_chapters": chapters, **_work_state(work_id)}
+                    if chapters:
+                        first = chapters[0].get("chapter_number")
+                        last = chapters[-1].get("chapter_number")
+                        output_preview = f"生成 {len(chapters)} 章细纲：第 {first} 章至第 {last} 章。"
+                    partial_warning = ""
+                    if len(chapters) < count:
+                        partial_warning = f"AI 本次只返回了 {len(chapters)}/{count} 章细纲，已先保存可用章节。"
+                    return {"generated_chapters": chapters, "partial_warning": partial_warning, **_work_state(work_id)}
                 except Exception as exc:
                     _finish_task_error(task_id, exc, work_id=work_id)
                     raise
                 finally:
                     if not STATE.task_status(task_id).get("finished_at"):
-                        _finish_task(task_id, work_id)
+                        _finish_task(task_id, work_id, output_preview=output_preview)
 
             if len(parts) == 4 and parts[3] == "export" and method == "POST":
                 return _export_work(work_id, body)
@@ -238,6 +248,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 if len(parts) == 6 and parts[5] == "generate" and method == "POST":
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
+                    output_preview = ""
                     _start_task(
                         task_id,
                         work_id,
@@ -257,13 +268,14 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                             do_memory=bool(body.get("do_memory", False)),
                             should_stop=lambda: STATE.task_cancelled(task_id),
                         )
+                        output_preview = _chapter_task_preview(result)
                         return _chapter_result(work_id, chapter_number, result)
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id, chapter_id=chapter_id)
                         raise
                     finally:
                         if not STATE.task_status(task_id).get("finished_at"):
-                            _finish_task(task_id, work_id, chapter_id=chapter_id)
+                            _finish_task(task_id, work_id, chapter_id=chapter_id, output_preview=output_preview)
                 if len(parts) == 6 and parts[5] == "memory" and method == "POST":
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
@@ -375,9 +387,16 @@ def run(host: str = "127.0.0.1", port: int = 8765, *, open_browser: bool = True)
     actual_port = _available_port(host, port)
     server = ThreadingHTTPServer((host, actual_port), HiStoryWebHandler)
     url = f"http://{host}:{actual_port}/"
+    _write_server_url(url)
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     server.serve_forever()
+
+
+def _write_server_url(url: str) -> None:
+    log_dir = DATA_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "server.url").write_text(url, encoding="utf-8")
 
 
 def _available_port(host: str, start: int) -> int:
@@ -447,6 +466,7 @@ def _finish_task(
     status: str = "done",
     error: str = "",
     chapter_id: int | None = None,
+    output_preview: str = "",
 ) -> None:
     STATE.finish_task(task_id, status=status, error=error)
     task = STATE.task_status(task_id) or {}
@@ -455,6 +475,7 @@ def _finish_task(
         work_id=work_id,
         chapter_id=chapter_id,
         status=str(task.get("status") or status),
+        output_preview=output_preview,
         error=str(task.get("error") or error),
         finished_at=str(task.get("finished_at") or ""),
     )
@@ -536,14 +557,39 @@ def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -
         "review_readable": format_review_readable(result.get("review")),
         "memory": result.get("memory"),
         "memory_readable": format_memory_readable(result.get("memory")),
+        "quality_gate": result.get("quality_gate", {}),
         "work_state": _work_state(work_id),
     }
+
+
+def _chapter_task_preview(result: dict[str, Any]) -> str:
+    quality = result.get("quality_gate")
+    if not isinstance(quality, dict):
+        return ""
+    final = quality.get("final")
+    if not isinstance(final, dict):
+        return str(quality.get("summary") or "")[:300]
+    blockers = final.get("blockers") or []
+    warnings = final.get("warnings") or []
+    chars = final.get("visible_chars") or 0
+    return f"质量检查：终稿约 {chars} 字符，阻断 {len(blockers)} 项，警告 {len(warnings)} 项。"
 
 
 def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     title = str(body.get("title") or chapter.get("title") or f"第{chapter_number}章").strip()
     text = strip_chapter_heading(str(body.get("final_text") or ""), chapter_number, title)
+    try:
+        context = STATE.workflow.build_chapter_context(work_id, chapter_number)
+    except Exception:  # noqa: BLE001
+        context = {}
+    quality = manuscript_quality_report(
+        text,
+        context,
+        chapter_number=chapter_number,
+        chapter_title=title,
+        stage="手动保存稿",
+    )
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
     STATE.repo.save_final_after_manual_edit(
@@ -556,7 +602,14 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
         memory_json=chapter.get("memory_json") or "",
         invalidate_memory=bool(body.get("invalidate_memory", False)),
     )
-    return _chapter_state(work_id, chapter_number)
+    return {
+        **_chapter_state(work_id, chapter_number),
+        "quality_gate": {
+            "manual": quality,
+            "summary": quality_summary(quality),
+            "warning_only": True,
+        },
+    }
 
 
 def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -636,6 +689,7 @@ def _generate_memory(
         prompt_name="memory_prompt.md",
         input_preview=json_dumps({"context": context, "final_text": final_text[:3000]}),
         output=json_dumps(memory),
+        **STATE.workflow.client.last_usage("memory"),
     )
     return {
         **_chapter_state(work_id, chapter_number),
@@ -674,6 +728,7 @@ def _revise_chapter_with_instruction(
         prompt_name="reviser_prompt.md",
         input_preview=json_dumps({"context": context, "instruction": instruction, "current_text": current_text[:3000]}),
         output=revised,
+        **STATE.workflow.client.last_usage("reviser"),
     )
     return {**_chapter_state(work_id, chapter_number), "revised_text": revised}
 
@@ -818,6 +873,8 @@ def _save_library_item(work_id: int, kind: str, body: dict[str, Any]) -> dict[st
     elif kind == "historical_profile":
         STATE.repo.upsert_historical_profile(work_id, body)
         item_id = work_id
+    elif kind == "historical_facts":
+        item_id = STATE.repo.upsert_historical_fact(work_id, body)
     else:
         raise ValueError("该资料类型暂不支持保存。")
     return {"id": item_id, **_library_state(work_id)}
@@ -834,6 +891,8 @@ def _delete_library_item(work_id: int, kind: str, item_id: int) -> dict[str, Any
         STATE.repo.delete_timeline_event(work_id, item_id)
     elif kind == "chapter_notes":
         STATE.repo.delete_chapter_note(work_id, item_id)
+    elif kind == "historical_facts":
+        STATE.repo.delete_historical_fact(work_id, item_id)
     else:
         raise ValueError("该资料类型暂不支持删除。")
     return _library_state(work_id)

@@ -445,9 +445,12 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
     if historical_facts:
         _section(lines, "已落地历史事实")
         for item in historical_facts[-20:]:
+            name = f" / {_text(item.get('name'))}" if _text(item.get("name")) else ""
+            certainty = f" / {_text(item.get('certainty'))}" if _text(item.get("certainty")) else ""
+            fictionalized = " / 虚构" if str(item.get("fictionalized") or "") in {"1", "true", "True"} else ""
             lines.append(
                 f"- 第{_text(item.get('chapter_number'), '?')}章"
-                f"【{_text(item.get('category'), '未分类')}】：{_text(item.get('content'))}"
+                f"【{_text(item.get('category'), '未分类')}{name}{certainty}{fictionalized}】：{_text(item.get('content'))}"
                 f"；后续约束：{_text(item.get('future_constraint'))}"
             )
 
@@ -588,6 +591,20 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
         lines.append(f"第一段任务：{_text(transition.get('required_first_paragraph'))}")
         lines.append(f"必须使用锚点：{_text(transition.get('must_use_concrete_anchor'))}")
         lines.append(f"禁用开头：{_text(transition.get('forbidden_opening'))}")
+
+    opening_policy = context.get("opening_variation_policy")
+    openings = [item for item in as_list(context.get("recent_chapter_openings")) if isinstance(item, dict)]
+    _section(lines, "章首避重")
+    if isinstance(opening_policy, dict):
+        lines.append(f"本章策略：{_text(opening_policy.get('instruction'))}")
+    if openings:
+        for item in openings:
+            lines.append(
+                f"第{_text(item.get('chapter_number'))}章章首："
+                f"{_text(item.get('pattern'))}｜{_text(item.get('opening'))}"
+            )
+    else:
+        lines.append("暂无最近章首记录。")
 
     _section(lines, "最近三章摘要")
     summaries = [item for item in as_list(context.get("recent_three_chapter_summaries")) if isinstance(item, dict)]

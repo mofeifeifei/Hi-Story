@@ -21,18 +21,32 @@ const state = {
   taskRuns: [],
   task: null,
   taskSerial: 0,
+  styleExtraLines: [],
   confirmResolver: null,
 };
 
 const $ = (id) => document.getElementById(id);
 
-const STYLE_SELECT_OPTIONS = {
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+const STYLE_SELECT_WHITELIST = {
   pace: ["快节奏", "稳推进", "慢热", "强反转", "群像推进"],
-  language: ["白话凝练", "古意克制", "幽默轻松", "压迫冷峻", "细腻沉浸"],
-  mood: ["热血", "苍凉", "轻松", "压迫", "群像"],
   pov: ["第三人称有限视角", "第三人称多视角", "第一人称", "全知视角"],
   chapter_words: ["2000字左右", "3000字左右", "5000字左右", "按剧情自然分配"],
   payoff: ["低", "中", "高"],
+};
+
+const STYLE_LABELS = {
+  pace: "叙事节奏",
+  language: "语言风格",
+  mood: "情绪底色",
+  pov: "叙事视角",
+  chapter_words: "单章字数",
+  payoff: "爽点密度",
 };
 
 const CHAPTER_FIELDS = [
@@ -116,6 +130,58 @@ const LIBRARY_CATEGORIES = {
       ["story_time", "故事时间", "input"],
       ["event", "事件", "textarea"],
       ["characters_involved", "涉及人物", "input"],
+    ],
+  },
+  historical_profile: {
+    label: "历史设定卡",
+    title: (item) => item.dynasty || item.period || "历史设定卡",
+    readonly: false,
+    single: true,
+    fields: [
+      ["dynasty", "朝代", "input"],
+      ["period", "具体时期", "input"],
+      ["year_range", "年份范围", "input"],
+      ["current_ruler", "当前君主/政权", "input"],
+      ["historical_stage", "历史阶段", "textarea"],
+      ["political_context", "政局背景", "textarea"],
+      ["official_system", "官制/爵位/行政总览", "textarea"],
+      ["central_official_system", "中央官制", "textarea"],
+      ["local_administration", "地方行政", "textarea"],
+      ["noble_titles", "爵位体系", "textarea"],
+      ["exam_system", "科举/选官", "textarea"],
+      ["military_system", "军制/兵制", "textarea"],
+      ["military_ranks", "军阶/军令", "textarea"],
+      ["weapons", "武器装备", "textarea"],
+      ["social_order", "阶层/宗族/礼法", "textarea"],
+      ["daily_life", "衣食住行", "textarea"],
+      ["currency", "货币", "textarea"],
+      ["measurements", "度量衡", "textarea"],
+      ["geo_notes", "地理与古今地名", "textarea"],
+      ["travel_speed", "交通速度", "textarea"],
+      ["communication_speed", "通信速度", "textarea"],
+      ["language_style", "语言风格", "textarea"],
+      ["address_terms", "称谓规则", "textarea"],
+      ["taboo_words", "禁用现代词/后世词", "textarea"],
+      ["allowed_fiction", "允许虚构范围", "textarea"],
+      ["fiction_boundary", "虚构边界", "textarea"],
+      ["locked_facts", "不可改历史事实", "textarea"],
+      ["source_notes", "资料备注", "textarea"],
+    ],
+  },
+  historical_facts: {
+    label: "历史事实",
+    title: (item) => item.name || item.content || "未命名历史事实",
+    readonly: false,
+    fields: [
+      ["chapter_number", "来源章节", "number"],
+      ["category", "分类", "input"],
+      ["name", "名称", "input"],
+      ["content", "事实内容", "textarea"],
+      ["source_type", "来源类型", "input"],
+      ["certainty", "可信度", "input"],
+      ["fictionalized", "是否虚构", "checkbox"],
+      ["chapter_impact", "本章影响", "textarea"],
+      ["future_constraint", "后续约束", "textarea"],
     ],
   },
 };
@@ -224,6 +290,7 @@ function renderTaskRuns() {
       <div class="log-message">${escapeHtml(run.title || "未命名任务")} · ${escapeHtml(statusText(run.status || ""))}</div>
       ${duration ? `<div class="log-meta">${escapeHtml(duration)}</div>` : ""}
       ${meta ? `<div class="log-meta">${escapeHtml(meta)}</div>` : ""}
+      ${run.output_preview ? `<div class="log-meta">${escapeHtml(run.output_preview)}</div>` : ""}
       ${run.error ? `<div class="log-meta">错误：${escapeHtml(run.error)}</div>` : ""}
     `;
     list.appendChild(item);
@@ -253,14 +320,39 @@ function renderAgentRuns() {
     const item = document.createElement("div");
     item.className = `log-entry ${run.status === "ok" ? "success" : "error"}`;
     const chapter = run.chapter_number ? `章节：第 ${run.chapter_number} 章` : "章节：全书/项目";
+    const usage = agentUsageText(run);
     item.innerHTML = `
       <div class="log-time">${escapeHtml(run.created_at || "")}</div>
       <div class="log-message">${escapeHtml(run.agent_name || "未知 Agent")} · ${escapeHtml(run.status || "未知状态")}</div>
       <div class="log-meta">${escapeHtml(chapter)} · 模型：${escapeHtml(run.model || "未记录")} · 提示词：${escapeHtml(run.prompt_name || "未记录")}</div>
+      ${usage ? `<div class="log-meta">${escapeHtml(usage)}</div>` : ""}
       ${run.error ? `<div class="log-meta">错误：${escapeHtml(run.error)}</div>` : ""}
     `;
     list.appendChild(item);
   }
+}
+
+function agentUsageText(run) {
+  const inputChars = Number(run.input_chars || 0);
+  const outputChars = Number(run.output_chars || 0);
+  const inputTokens = Number(run.estimated_input_tokens || 0);
+  const outputTokens = Number(run.estimated_output_tokens || 0);
+  const totalTokens = Number(run.estimated_total_tokens || inputTokens + outputTokens);
+  const elapsed = Number(run.elapsed_seconds || 0);
+  if (!inputChars && !outputChars && !totalTokens) return "";
+  const parts = [
+    `输入：${formatNumber(inputChars)} 字符 / 约 ${formatNumber(inputTokens)} token`,
+    `输出：${formatNumber(outputChars)} 字符 / 约 ${formatNumber(outputTokens)} token`,
+    `合计：约 ${formatNumber(totalTokens)} token`,
+  ];
+  if (elapsed > 0) parts.push(`耗时：${formatDurationSeconds(elapsed)}`);
+  return parts.join(" · ");
+}
+
+function formatNumber(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "0";
+  return Math.round(number).toLocaleString("zh-CN");
 }
 
 async function refreshRecords(options = {}) {
@@ -630,6 +722,7 @@ function clearWorkState() {
   state.libraryItem = null;
   state.agentRuns = [];
   state.taskRuns = [];
+  state.styleExtraLines = [];
   $("currentTitle").textContent = "未选择文章";
   fillWorkForm();
   fillBookContractForm();
@@ -654,15 +747,9 @@ function splitStyle(style) {
     pov: "",
     chapter_words: "",
     payoff: "",
+    extra: [],
   };
-  const map = {
-    "叙事节奏": "pace",
-    "语言风格": "language",
-    "情绪底色": "mood",
-    "叙事视角": "pov",
-    "单章字数": "chapter_words",
-    "爽点密度": "payoff",
-  };
+  const map = Object.fromEntries(Object.entries(STYLE_LABELS).map(([key, label]) => [label, key]));
   const extra = [];
   for (const line of String(style || "").split(/\r?\n/)) {
     const text = line.trim();
@@ -674,24 +761,24 @@ function splitStyle(style) {
       extra.push(text);
     }
   }
-  if (!result.pace && extra.length === 1 && STYLE_SELECT_OPTIONS.pace.includes(extra[0])) {
+  if (!result.pace && extra.length === 1 && STYLE_SELECT_WHITELIST.pace.includes(extra[0])) {
     result.pace = extra[0];
     extra.length = 0;
   }
-  const customAllowed = new Set(["language", "mood"]);
-  for (const key of ["pace", "language", "mood", "pov", "chapter_words", "payoff"]) {
-    if (result[key] && !STYLE_SELECT_OPTIONS[key].includes(result[key])) {
-      if (customAllowed.has(key)) continue;
-      extra.push(`${Object.keys(map).find((label) => map[label] === key)}：${result[key]}`);
+  for (const key of Object.keys(STYLE_SELECT_WHITELIST)) {
+    if (result[key] && !STYLE_SELECT_WHITELIST[key].includes(result[key])) {
+      extra.push(`${STYLE_LABELS[key]}：${result[key]}`);
       result[key] = "";
     }
   }
+  result.extra = extra;
   return result;
 }
 
 function fillWorkForm() {
   const work = state.work || {};
   const style = splitStyle(work.style || "");
+  state.styleExtraLines = style.extra || [];
   $("titleInput").value = work.title || "";
   $("ideaInput").value = work.idea || "";
   $("genreInput").value = work.genre || "";
@@ -793,19 +880,33 @@ function collectWorkForm() {
     ["单章字数", $("chapterWordsInput").value.trim()],
     ["爽点密度", $("payoffInput").value.trim()],
   ].filter(([, value]) => value);
+  const filledLabels = new Set(styleParts.map(([label]) => label));
+  const preservedExtra = (state.styleExtraLines || []).filter((line) => {
+    const label = styleLineLabel(line);
+    return !label || !filledLabels.has(label);
+  });
+  const styleLines = [
+    ...styleParts.map(([label, value]) => `${label}：${value}`),
+    ...preservedExtra,
+  ];
   return {
     title: $("titleInput").value.trim(),
     idea: $("ideaInput").value.trim(),
     genre: $("genreInput").value.trim(),
     platform: $("platformInput").value.trim(),
     target_words: Number($("targetWordsInput").value || 0),
-    style: styleParts.map(([label, value]) => `${label}：${value}`).join("\n"),
+    style: styleLines.join("\n"),
     forbidden_tropes: "",
     protagonist_preference: "",
     reader_profile: "",
     locked_facts: $("absoluteRedLinesInput").value.trim(),
     writing_controls: "",
   };
+}
+
+function styleLineLabel(line) {
+  const match = String(line || "").trim().match(/^([^：:]+)[：:]/);
+  return match ? match[1].trim() : "";
 }
 
 async function createWork() {
@@ -1296,8 +1397,13 @@ async function generateChapterOutlines() {
     renderOutlineTree();
     setNextChapterStart();
     updateOutlineGenerateControls();
-    log("章节细纲已生成。");
-    notify("章节细纲已生成。", "success");
+    if (data.partial_warning) {
+      log(data.partial_warning);
+      notify(data.partial_warning, "warning");
+    } else {
+      log("章节细纲已生成。");
+      notify("章节细纲已生成。", "success");
+    }
   } catch (error) {
     if (taskWasStopped(task)) notify("章节细纲生成已停止。", "warning");
     else showError(error);
@@ -1570,6 +1676,21 @@ async function generateChapter() {
   }
 }
 
+function manualQualityIssues(qualityGate) {
+  const report = qualityGate?.manual;
+  if (!report) return [];
+  return [...(report.blockers || []), ...(report.warnings || [])].filter(Boolean);
+}
+
+function showManualQualityNotice(qualityGate) {
+  const issues = manualQualityIssues(qualityGate);
+  if (!issues.length) return false;
+  const message = issues.slice(0, 3).join("；");
+  log(`手动保存质量提示：${message}`);
+  notify(`已保存，但有质量提示：${message}`, "warning");
+  return true;
+}
+
 async function saveChapterText() {
   if (!requireWork()) return;
   const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
@@ -1594,6 +1715,9 @@ async function saveChapterText() {
       },
     });
     fillChapter(data);
+    if (!showManualQualityNotice(data.quality_gate)) {
+      notify(`第 ${chapterNumber} 章最终稿已保存。`, "success");
+    }
     log(`第 ${chapterNumber} 章最终稿已保存。`);
   } catch (error) {
     showError(error);
@@ -1717,6 +1841,8 @@ function renderLibraryFromWork(data) {
     world_rules: data.world_rules || [],
     plot_threads: data.plot_threads || [],
     timeline: data.timeline || [],
+    historical_profile: [{ ...(data.historical_profile || {}), id: data.historical_profile?.id || state.selectedWorkId }],
+    historical_facts: data.historical_facts || [],
   };
   renderLibraryList();
   renderLibraryEditor();
@@ -1798,6 +1924,10 @@ function renderLibraryEditor() {
 
 function fieldHtml(key, label, value, type = "input", readonly = false) {
   const attr = readonly ? "readonly disabled" : "";
+  if (type === "checkbox") {
+    const checked = value === true || value === 1 || value === "1" || value === "true" || value === "是";
+    return `<label class="check-row"><input data-lib-field="${key}" type="checkbox" ${checked ? "checked" : ""} ${readonly ? "disabled" : ""}>${label}</label>`;
+  }
   if (type === "textarea") {
     return `<label>${label}<textarea data-lib-field="${key}" rows="4" ${attr}>${escapeHtml(value || "")}</textarea></label>`;
   }
@@ -1826,7 +1956,11 @@ async function saveLibraryItem() {
   }
   const body = { ...(state.libraryItem || {}) };
   $("libraryEditor").querySelectorAll("[data-lib-field]").forEach((node) => {
-    body[node.dataset.libField] = node.type === "number" && node.value ? Number(node.value) : node.value;
+    if (node.type === "checkbox") {
+      body[node.dataset.libField] = node.checked ? 1 : 0;
+    } else {
+      body[node.dataset.libField] = node.type === "number" && node.value ? Number(node.value) : node.value;
+    }
   });
   try {
     const data = await api(`/api/works/${state.selectedWorkId}/library/${kind}`, { method: "POST", body });
@@ -1930,8 +2064,8 @@ function fillConfigForm() {
   $("reviserModelInput").value = agents.reviser || "";
   $("memoryModelInput").value = agents.memory || "";
   $("apiKeyInput").value = config.api_key || "";
-  $("timeoutInput").value = config.timeout || 300;
-  $("maxRetriesInput").value = config.max_retries || 0;
+  $("timeoutInput").value = clampNumber(config.timeout || 300, 10, 1800, 300);
+  $("maxRetriesInput").value = clampNumber(config.max_retries || 0, 0, 5, 0);
   $("maxOutputTokensInput").value = config.max_output_tokens || 12000;
   $("contextWindowInput").value = config.model_context_window || 1000000;
   $("autoCompactInput").value = config.model_auto_compact_token_limit || 900000;
@@ -1982,8 +2116,8 @@ function collectConfigForm() {
     review_model: single ? mainModel : $("reviewModelInput").value.trim(),
     model_reasoning_effort: $("reasoningEffortInput").value,
     disable_response_storage: $("disableStorageInput").checked,
-    timeout: Number($("timeoutInput").value || 300),
-    max_retries: Number($("maxRetriesInput").value || 0),
+    timeout: clampNumber($("timeoutInput").value, 10, 1800, 300),
+    max_retries: clampNumber($("maxRetriesInput").value, 0, 5, 0),
     max_output_tokens: Number($("maxOutputTokensInput").value || 12000),
     model_context_window: Number($("contextWindowInput").value || 1000000),
     model_auto_compact_token_limit: Number($("autoCompactInput").value || 900000),

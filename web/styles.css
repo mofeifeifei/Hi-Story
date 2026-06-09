@@ -476,6 +476,19 @@ textarea {
   line-height: 1.65;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink);
+}
+
+.check-row input {
+  width: auto;
+  min-height: auto;
+  margin: 0;
+}
+
 .search {
   margin: 0 0 11px;
 }

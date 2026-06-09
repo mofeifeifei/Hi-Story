@@ -42,6 +42,15 @@ def init_db(db_path: Path) -> None:
         _ensure_column(conn, "chapters", "outline_json", "TEXT")
         _ensure_column(conn, "chapters", "scene_cards_json", "TEXT")
         for column, definition in [
+            ("input_chars", "INTEGER DEFAULT 0"),
+            ("output_chars", "INTEGER DEFAULT 0"),
+            ("estimated_input_tokens", "INTEGER DEFAULT 0"),
+            ("estimated_output_tokens", "INTEGER DEFAULT 0"),
+            ("estimated_total_tokens", "INTEGER DEFAULT 0"),
+            ("elapsed_seconds", "REAL DEFAULT 0"),
+        ]:
+            _ensure_column(conn, "agent_runs", column, definition)
+        for column, definition in [
             ("payoff_score", "INTEGER"),
             ("hook_score", "INTEGER"),
             ("historical_score", "INTEGER"),
@@ -72,6 +81,24 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        for column, definition in [
+            ("current_ruler", "TEXT"),
+            ("historical_stage", "TEXT"),
+            ("central_official_system", "TEXT"),
+            ("local_administration", "TEXT"),
+            ("noble_titles", "TEXT"),
+            ("exam_system", "TEXT"),
+            ("military_ranks", "TEXT"),
+            ("weapons", "TEXT"),
+            ("currency", "TEXT"),
+            ("measurements", "TEXT"),
+            ("geo_notes", "TEXT"),
+            ("travel_speed", "TEXT"),
+            ("communication_speed", "TEXT"),
+            ("address_terms", "TEXT"),
+            ("fiction_boundary", "TEXT"),
+        ]:
+            _ensure_column(conn, "historical_profiles", column, definition)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS historical_facts (
@@ -87,6 +114,14 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        for column, definition in [
+            ("name", "TEXT"),
+            ("source_type", "TEXT"),
+            ("certainty", "TEXT"),
+            ("fictionalized", "INTEGER DEFAULT 0"),
+            ("updated_at", "TEXT"),
+        ]:
+            _ensure_column(conn, "historical_facts", column, definition)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sync_events (

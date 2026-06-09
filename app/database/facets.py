@@ -76,6 +76,12 @@ class RunLogRepository:
         output: str,
         status: str = "ok",
         error: str = "",
+        input_chars: int = 0,
+        output_chars: int = 0,
+        estimated_input_tokens: int = 0,
+        estimated_output_tokens: int = 0,
+        estimated_total_tokens: int = 0,
+        elapsed_seconds: float = 0,
     ) -> int:
         return self.repo.log_agent_run(
             work_id=work_id,
@@ -87,6 +93,12 @@ class RunLogRepository:
             output=output,
             status=status,
             error=error,
+            input_chars=input_chars,
+            output_chars=output_chars,
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_output_tokens=estimated_output_tokens,
+            estimated_total_tokens=estimated_total_tokens,
+            elapsed_seconds=elapsed_seconds,
         )
 
     def list(self, work_id: int, limit: int = 100) -> list[dict[str, Any]]:

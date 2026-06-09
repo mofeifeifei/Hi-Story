@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from difflib import SequenceMatcher
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 
 DEFAULT_TEMPLATE_BLACKLIST = [
@@ -98,6 +98,113 @@ DEFAULT_HISTORICAL_ANACHRONISMS = [
     "加班",
 ]
 
+EMPTY_ENDING_PHRASES = [
+    "一切才刚刚开始",
+    "事情才刚刚开始",
+    "真正的危险还在后面",
+    "夜色更深了",
+    "没人知道",
+    "改变了一切",
+    "他终于明白",
+    "她终于明白",
+    "命运的齿轮开始转动",
+]
+
+_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:[#＃]+\s*)?(?:第\s*[\d一二三四五六七八九十百千万〇零两]+\s*[章节回集卷幕]|章节名\s*[：:]|标题\s*[：:])"
+)
+
+OPENING_TIME_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:卯|辰|巳|午|未|申|酉|戌|亥|子|丑|寅)时"
+    r"|[一二三四五六七八九十半三两]+更"
+    r"|翌日|次日|清晨|晨间|天色|天刚亮|黄昏|入夜|深夜|夜里|黎明|拂晓"
+    r"|日头|月上|鸡鸣|晨钟|暮鼓|街鼓|钟声|鼓声|漏声"
+    r")"
+)
+OPENING_PLACE_RE = re.compile(
+    r"^\s*[\u4e00-\u9fff]{1,12}(?:"
+    r"门外|门前|门内|城外|城中|城内|街上|巷口|府中|府外|府衙|县衙|官署|"
+    r"书房|院中|殿内|殿外|宫中|营中|船上|渡口|码头|堂前|廊下|案前"
+    r")"
+)
+OPENING_ENV_RE = re.compile(
+    r"^\s*(?:"
+    r"晨雾|薄雾|雨声|风声|雪|霜|雾|日光|阳光|月色|夜色|灯火|烛火|天光|"
+    r"暮色|寒意|热气|尘土|檐雨|雨丝|风从"
+    r")"
+)
+OPENING_ATMOSPHERE_WORDS = [
+    "晨雾",
+    "薄雾",
+    "雨声",
+    "风声",
+    "日光",
+    "夜色",
+    "街鼓",
+    "钟声",
+    "鼓声",
+    "漏声",
+    "卯时",
+    "辰时",
+    "巳时",
+    "午时",
+    "未时",
+    "申时",
+    "酉时",
+    "戌时",
+    "亥时",
+]
+
+
+def first_paragraph(text: str, *, max_chars: int = 220) -> str:
+    for part in re.split(r"\n\s*\n|\r\n\s*\r\n", str(text or "").strip()):
+        compact = part.strip()
+        if compact:
+            return compact[:max_chars]
+    return ""
+
+
+def opening_pattern_flags(opening: str) -> list[str]:
+    first = first_paragraph(opening, max_chars=160)
+    first_sentence = re.split(r"[。！？!?]\s*", first, maxsplit=1)[0].strip()
+    flags: list[str] = []
+    if OPENING_TIME_RE.search(first_sentence):
+        flags.append("时间/时辰")
+    if OPENING_PLACE_RE.search(first_sentence):
+        flags.append("地点陈列")
+    if OPENING_ENV_RE.search(first_sentence):
+        flags.append("天气/环境")
+    if any(word in first_sentence[:80] for word in OPENING_ATMOSPHERE_WORDS):
+        flags.append("古装氛围词")
+    return _dedupe(flags)
+
+
+def opening_pattern_label(opening: str) -> str:
+    flags = opening_pattern_flags(opening)
+    return " + ".join(flags) if flags else "动作/对白/冲突"
+
+
+def chapter_opening_warning(text: str, context: dict[str, Any]) -> str:
+    current_flags = opening_pattern_flags(text)
+    if not current_flags:
+        return ""
+    recent = context.get("recent_chapter_openings")
+    if not isinstance(recent, list):
+        recent = []
+    recent_flag_sets = []
+    for item in recent[-3:]:
+        if isinstance(item, dict):
+            flags = item.get("pattern_flags") or opening_pattern_flags(str(item.get("opening") or ""))
+            if flags:
+                recent_flag_sets.append(set(str(flag) for flag in flags))
+    repeated = sorted(set(current_flags).intersection(*recent_flag_sets)) if len(recent_flag_sets) >= 2 else []
+    if repeated:
+        return "章首连续使用" + "、".join(repeated) + "开头，AI味明显；请改为人物动作、对白、证据、威胁或上一章后果切入。"
+    if len(current_flags) >= 2:
+        return "章首使用时间/地点/环境式静态开场，建议改为动作、对白、物件变化、证据或冲突后果切入。"
+    return ""
+
 
 def detect_template_phrases(
     text: str,
@@ -125,6 +232,88 @@ def detect_historical_anachronisms(
         if count:
             counter[f"历史穿帮：{phrase}"] = count
     return [{"phrase": phrase, "count": count} for phrase, count in counter.items()]
+
+
+def manuscript_quality_report(
+    text: str,
+    context: dict[str, Any] | None = None,
+    *,
+    chapter_number: int | None = None,
+    chapter_title: Any = "",
+    stage: str = "正文",
+) -> dict[str, Any]:
+    context = context or {}
+    cleaned = str(text or "").strip()
+    visible_chars = _visible_length(cleaned)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    risk_flags: list[str] = []
+
+    if not cleaned:
+        blockers.append(f"{stage}为空，不能保存。")
+    first_line = _first_nonempty_line(cleaned)
+    if first_line and _looks_like_heading(first_line, chapter_number, chapter_title):
+        blockers.append("正文第一行仍然包含章节号、章节名或标题行。")
+    if _looks_like_structured_leak(cleaned):
+        blockers.append("正文疑似混入 JSON、Markdown 代码块或结构化协议内容。")
+    if _looks_like_summary(cleaned, visible_chars):
+        blockers.append("正文像章节摘要或提纲，不像完整章节。")
+
+    length_problem = _length_problem(visible_chars, context.get("chapter_word_target"))
+    if length_problem:
+        if length_problem.startswith("严重"):
+            blockers.append(length_problem)
+        else:
+            warnings.append(length_problem)
+
+    ending_problem = _ending_problem(cleaned)
+    if ending_problem:
+        blockers.append(ending_problem)
+
+    template_hits = detect_template_phrases(cleaned)
+    if template_hits:
+        warnings.append("正文命中模板句或机器味表达。")
+        risk_flags.extend(_hit_labels(template_hits))
+
+    historical_hits: list[dict[str, int | str]] = []
+    if _history_enabled(context):
+        historical_hits = detect_historical_anachronisms(cleaned)
+        if historical_hits:
+            warnings.append("历史类作品中疑似出现现代词或时代违和词。")
+            risk_flags.extend(_hit_labels(historical_hits))
+
+    transition_warning = _transition_warning(cleaned, context)
+    if transition_warning:
+        warnings.append(transition_warning)
+
+    opening_warning = chapter_opening_warning(cleaned, context)
+    if opening_warning:
+        if stage in {"修订稿", "最终稿"} and opening_warning.startswith("章首连续使用"):
+            blockers.append(opening_warning)
+        else:
+            warnings.append(opening_warning)
+
+    return {
+        "stage": stage,
+        "blockers": _dedupe(blockers),
+        "warnings": _dedupe(warnings),
+        "template_hits": template_hits,
+        "historical_hits": historical_hits,
+        "risk_flags": _dedupe(risk_flags),
+        "length_problem": "" if length_problem and length_problem.startswith("严重") else length_problem,
+        "visible_chars": visible_chars,
+    }
+
+
+def quality_summary(report: dict[str, Any] | None) -> str:
+    if not isinstance(report, dict):
+        return ""
+    parts = [f"{report.get('stage') or '正文'}：{report.get('visible_chars') or 0} 字符"]
+    blockers = report.get("blockers") or []
+    warnings = report.get("warnings") or []
+    parts.append(f"阻断 {len(blockers)} 项")
+    parts.append(f"警告 {len(warnings)} 项")
+    return "，".join(parts)
 
 
 def blacklist_for_prompt() -> str:
@@ -155,6 +344,137 @@ def repeated_text_warnings(
             number = chapter.get("chapter_number") or "前文"
             warnings.append(f"与第{number}章正文相似度过高（{ratio:.0%}）")
     return warnings
+
+
+def _visible_length(text: str) -> int:
+    return len(re.sub(r"\s+", "", text or ""))
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _looks_like_heading(line: str, chapter_number: int | None, chapter_title: Any) -> bool:
+    compact = _signature(line)
+    title = _signature(str(chapter_title or ""))
+    if title and compact == title:
+        return True
+    if _HEADING_LINE_RE.match(line) and len(compact) <= 40:
+        return True
+    if chapter_number is not None and re.match(rf"^\s*第\s*{int(chapter_number)}\s*章", line):
+        return True
+    return False
+
+
+def _looks_like_structured_leak(text: str) -> bool:
+    head = text.lstrip()[:300]
+    if head.startswith(("```", "{", "[")):
+        return True
+    return any(marker in head for marker in ['"chapter_number"', '"summary"', '"handoff"', "```json"])
+
+
+def _looks_like_summary(text: str, visible_chars: int) -> bool:
+    head = text[:160]
+    summary_markers = [
+        "本章主要",
+        "这一章主要",
+        "本章讲述",
+        "本章内容",
+        "本章摘要",
+        "章节摘要",
+        "章节细纲",
+        "本章细纲",
+        "任务单",
+        "本章目标",
+        "核心冲突",
+        "出场人物",
+    ]
+    if visible_chars < 260:
+        return any(phrase in head for phrase in summary_markers)
+    return visible_chars < 900 and any(phrase in head for phrase in summary_markers[:6])
+
+
+def _length_problem(visible_chars: int, target: Any) -> str:
+    if not isinstance(target, dict):
+        return "正文长度偏短，可能不像完整章节。" if visible_chars < 800 else ""
+    minimum = _int_or_none(target.get("min"))
+    maximum = _int_or_none(target.get("max"))
+    strict = bool(target.get("strict"))
+    if strict and minimum and visible_chars < int(minimum * 0.55):
+        return f"严重字数不足：当前约 {visible_chars} 字符，建议至少 {minimum}。"
+    if minimum and visible_chars < int(minimum * 0.85):
+        return f"字数偏低：当前约 {visible_chars} 字符，建议范围下限 {minimum}。"
+    if maximum and visible_chars > int(maximum * 1.35):
+        return f"字数明显偏高：当前约 {visible_chars} 字符，建议范围上限 {maximum}。"
+    if not minimum and visible_chars < 800:
+        return "正文长度偏短，可能不像完整章节。"
+    return ""
+
+
+def _ending_problem(text: str) -> str:
+    tail = text[-240:]
+    for phrase in EMPTY_ENDING_PHRASES:
+        if phrase in tail:
+            return f"章末使用空泛收束：{phrase}。"
+    return ""
+
+
+def _transition_warning(text: str, context: dict[str, Any]) -> str:
+    contract = context.get("chapter_transition_contract")
+    if not isinstance(contract, dict) or not contract:
+        return ""
+    anchor = str(contract.get("must_use_concrete_anchor") or "").strip()
+    if not anchor:
+        return ""
+    first = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0][:360]
+    tokens = _anchor_tokens(anchor)
+    if tokens and not any(token in first for token in tokens):
+        return "开篇可能没有接住上一章接力棒中的具体锚点。"
+    return ""
+
+
+def _anchor_tokens(anchor: str) -> list[str]:
+    chunks = re.split(r"[，,。！？；;：:\s、]+", anchor)
+    tokens = [chunk.strip("“”\"'") for chunk in chunks if 2 <= len(chunk.strip("“”\"'")) <= 16]
+    return tokens[:5]
+
+
+def _history_enabled(context: dict[str, Any]) -> bool:
+    specialist = context.get("history_specialist")
+    return isinstance(specialist, dict) and bool(specialist.get("enabled"))
+
+
+def _hit_labels(hits: list[dict[str, int | str]]) -> list[str]:
+    labels = []
+    for item in hits:
+        phrase = str(item.get("phrase") or "").strip()
+        count = item.get("count")
+        if phrase:
+            labels.append(f"{phrase}×{count}")
+    return labels
+
+
+def _dedupe(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _signature(text: str) -> str:

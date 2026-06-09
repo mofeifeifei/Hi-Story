@@ -72,14 +72,17 @@ output_contract: 结构化数据
 `historical_profile` 必须尽量写清：
 
 - 朝代、具体时期、年份范围；
+- 当前君主/政权、历史阶段；
 - 政局背景；
-- 官制、爵位、行政体系；
-- 军制、兵制；
+- 中央官制、地方行政、爵位体系、科举/选官；
+- 军制、军阶、军令、武器装备；
 - 阶层、宗族、礼法；
-- 衣食住行；
-- 称谓和语言风格；
+- 衣食住行、货币、度量衡；
+- 地理与古今地名、交通速度、通信速度；
+- 称谓规则和语言风格；
 - 禁用现代词或后世词；
 - 允许虚构范围；
+- 本书虚构边界；
 - 不可改历史事实；
 - 资料备注。
 
@@ -177,14 +180,29 @@ output_contract: 结构化数据
     "dynasty": "",
     "period": "",
     "year_range": "",
+    "current_ruler": "",
+    "historical_stage": "",
     "political_context": "",
     "official_system": "",
+    "central_official_system": "",
+    "local_administration": "",
+    "noble_titles": "",
+    "exam_system": "",
     "military_system": "",
+    "military_ranks": "",
+    "weapons": "",
     "social_order": "",
     "daily_life": "",
+    "currency": "",
+    "measurements": "",
+    "geo_notes": "",
+    "travel_speed": "",
+    "communication_speed": "",
     "language_style": "",
+    "address_terms": "",
     "taboo_words": "",
     "allowed_fiction": "",
+    "fiction_boundary": "",
     "locked_facts": "",
     "source_notes": ""
   },

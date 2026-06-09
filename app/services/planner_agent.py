@@ -60,7 +60,7 @@ class PlannerAgent(BaseAgent):
         return parsed
 
     def generate_outline(self, work_bundle: dict[str, Any]) -> dict[str, Any]:
-        history_section = history_prompt_section(work_bundle)
+        history_section = history_prompt_section(work_bundle, task="outline")
         user_prompt = (
             "请根据作品资料生成全书大纲和分卷大纲，输出供程序解析的合法 JSON。\n"
             "这不是宣传简介，要像真正能指导长篇连载的编辑部大纲。\n"
@@ -90,7 +90,7 @@ class PlannerAgent(BaseAgent):
         count: int = 30,
         volume_number: int | None = None,
     ) -> dict[str, Any]:
-        history_section = history_prompt_section(work_bundle)
+        history_section = history_prompt_section(work_bundle, task="chapter_outlines")
         target_volume_number = int(volume_number or work_bundle.get("target_volume_number") or 0)
         volume_instruction = ""
         if target_volume_number:

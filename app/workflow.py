@@ -15,12 +15,22 @@ from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.name_normalizer import aliases_to_official_map, normalize_bundle_names, normalize_names
 from app.utils.outline_utils import (
     blocking_outline_issues,
+    duplicate_outline_groups,
     parse_outline_detail,
     normalize_chapter_outline,
     outline_text_for_prompt,
     repeat_risk_warnings,
 )
-from app.utils.text_check import DEFAULT_TEMPLATE_BLACKLIST, blacklist_for_prompt, repeated_text_warnings
+from app.utils.text_check import (
+    DEFAULT_TEMPLATE_BLACKLIST,
+    blacklist_for_prompt,
+    first_paragraph,
+    manuscript_quality_report,
+    opening_pattern_flags,
+    opening_pattern_label,
+    quality_summary,
+    repeated_text_warnings,
+)
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.word_target import chapter_word_target_from_style
 
@@ -46,6 +56,7 @@ class NovelWorkflow:
             prompt_name="planner_prompt.md",
             input_preview=json_dumps(inputs),
             output=json_dumps(plan),
+            **self.client.last_usage("planner"),
         )
         return work_id, plan
 
@@ -69,6 +80,7 @@ class NovelWorkflow:
             prompt_name="planner_prompt.md",
             input_preview=json_dumps(bundle),
             output=json_dumps(outline),
+            **self.client.last_usage("planner"),
         )
 
     def generate_chapter_outlines(
@@ -111,18 +123,35 @@ class NovelWorkflow:
         volume_number: int | None = None,
     ) -> list[dict[str, Any]]:
         result = self.normalize_output_names(work_id, result)
-        chapters = result.get("chapters", [])
+        chapters = [dict(item) for item in result.get("chapters", []) if isinstance(item, dict)]
+        if not chapters:
+            raise ValueError("AI 没有返回可保存的章节细纲，请重新生成。")
         volume_state = self._volume_state(work_id)
-        saved: list[dict[str, Any]] = []
-        for item in chapters:
-            chapter_number = int(item.get("chapter_number") or len(saved) + start_chapter)
+        prepared: list[dict[str, Any]] = []
+        for offset, item in enumerate(chapters[:count]):
+            chapter_number = start_chapter + offset
+            item["chapter_number"] = chapter_number
             item = self._merge_chapter_outline_fields(work_id, chapter_number, item)
+            item["chapter_number"] = chapter_number
             item["volume_number"] = self._assign_volume_number(
                 volume_state,
                 chapter_number,
                 int(item.get("volume_number") or 0),
                 explicit_volume=volume_number,
             )
+            blockers = blocking_outline_issues(item)
+            if blockers:
+                raise ValueError(f"第 {chapter_number} 章细纲未通过结构校验：" + "；".join(blockers))
+            prepared.append(item)
+            self._advance_volume_state(volume_state, chapter_number, int(item["volume_number"]))
+        duplicate_groups = duplicate_outline_groups(prepared)
+        if duplicate_groups:
+            labels = ["、".join(f"第{number}章" for number in group) for group in duplicate_groups]
+            raise ValueError("本批细纲存在重复章节结构：" + "；".join(labels))
+
+        saved: list[dict[str, Any]] = []
+        for item in prepared:
+            chapter_number = int(item["chapter_number"])
             chapter_id = self.repo.upsert_chapter_outline(
                 work_id=work_id,
                 chapter_number=chapter_number,
@@ -134,7 +163,6 @@ class NovelWorkflow:
             )
             item["id"] = chapter_id
             saved.append(item)
-            self._advance_volume_state(volume_state, chapter_number, int(item["volume_number"]))
         self.repo.log_agent_run(
             work_id=work_id,
             chapter_id=None,
@@ -150,6 +178,7 @@ class NovelWorkflow:
                 }
             ),
             output=json_dumps(result),
+            **self.client.last_usage("planner"),
         )
         return saved
 
@@ -429,6 +458,8 @@ class NovelWorkflow:
         if draft_repeat_warnings:
             raise ValueError("本章初稿疑似重复，已停止保存：" + "；".join(draft_repeat_warnings))
         draft = self.normalize_output_names(work_id, draft)
+        draft_quality = self._manuscript_quality_report("初稿", context, chapter, draft)
+        self._raise_quality_blockers(chapter_number, draft_quality)
         if str(chapter.get("memory_json") or "").strip():
             self.repo.clear_chapter_memory(work_id, chapter["id"])
             chapter = self.repo.get_chapter(work_id, chapter_number)
@@ -441,6 +472,7 @@ class NovelWorkflow:
             prompt_name="writer_prompt.md",
             input_preview=json_dumps(context),
             output=draft,
+            **self.client.last_usage("writer"),
         )
 
         review: dict[str, Any] | None = None
@@ -449,6 +481,7 @@ class NovelWorkflow:
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章审稿已返回，但未继续修订。".format(chapter_number))
             review = self.normalize_output_names(work_id, review)
+            review = self._merge_quality_report_into_review(review, draft_quality)
             self.repo.save_review(work_id, chapter["id"], review)
             self.repo.log_agent_run(
                 work_id=work_id,
@@ -458,6 +491,7 @@ class NovelWorkflow:
                 prompt_name="reviewer_prompt.md",
                 input_preview=json_dumps({"context": context, "draft": draft[:3000]}),
                 output=json_dumps(review),
+                **self.client.last_usage("reviewer"),
             )
 
         final_text = draft
@@ -470,6 +504,8 @@ class NovelWorkflow:
             if final_repeat_warnings:
                 raise ValueError("本章修订稿疑似重复，已停止保存：" + "；".join(final_repeat_warnings))
             final_text = self.normalize_output_names(work_id, final_text)
+            final_quality = self._manuscript_quality_report("修订稿", context, chapter, final_text)
+            self._raise_quality_blockers(chapter_number, final_quality)
             self.repo.log_agent_run(
                 work_id=work_id,
                 chapter_id=chapter["id"],
@@ -478,7 +514,10 @@ class NovelWorkflow:
                 prompt_name="reviser_prompt.md",
                 input_preview=json_dumps({"context": context, "review": review, "draft": draft[:3000]}),
                 output=final_text,
+                **self.client.last_usage("reviser"),
             )
+        else:
+            final_quality = draft_quality
 
         self.repo.save_final(work_id, chapter["id"], final_text)
 
@@ -503,6 +542,7 @@ class NovelWorkflow:
                 prompt_name="memory_prompt.md",
                 input_preview=json_dumps({"context": refreshed_context, "final_text": final_text[:3000]}),
                 output=json_dumps(memory_card),
+                **self.client.last_usage("memory"),
             )
 
         return {
@@ -511,11 +551,90 @@ class NovelWorkflow:
             "review": review,
             "final_text": final_text,
             "memory": memory_card,
+            "quality_gate": {
+                "draft": draft_quality,
+                "final": final_quality,
+                "summary": "；".join(
+                    item
+                    for item in [quality_summary(draft_quality), quality_summary(final_quality)]
+                    if item
+                ),
+            },
         }
 
     def _repeated_text_warnings(self, work_id: int, chapter_number: int, text: str) -> list[str]:
         recent_texts = self.repo.get_recent_chapter_texts(work_id, chapter_number, limit=5)
         return repeated_text_warnings(text, recent_texts)
+
+    def _manuscript_quality_report(
+        self,
+        stage: str,
+        context: dict[str, Any],
+        chapter: dict[str, Any],
+        text: str,
+    ) -> dict[str, Any]:
+        return manuscript_quality_report(
+            text,
+            context,
+            chapter_number=int(chapter.get("chapter_number") or 0) or None,
+            chapter_title=chapter.get("title", ""),
+            stage=stage,
+        )
+
+    @staticmethod
+    def _raise_quality_blockers(chapter_number: int, report: dict[str, Any]) -> None:
+        blockers = [str(item) for item in report.get("blockers") or [] if str(item).strip()]
+        if blockers:
+            raise ValueError(f"第 {chapter_number} 章未通过质量闸门：" + "；".join(blockers))
+
+    @staticmethod
+    def _merge_quality_report_into_review(review: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(review or {})
+        warnings = [str(item) for item in report.get("warnings") or [] if str(item).strip()]
+        blockers = [str(item) for item in report.get("blockers") or [] if str(item).strip()]
+        if warnings or blockers:
+            merged["problems"] = NovelWorkflow._dedupe_texts([*NovelWorkflow._as_list(merged.get("problems")), *blockers, *warnings])
+            merged["suggestions"] = NovelWorkflow._dedupe_texts(
+                [
+                    *NovelWorkflow._as_list(merged.get("suggestions")),
+                    "按质量闸门提示检查开篇承接、章末钩子、字数、模板句和历史违和词。",
+                ]
+            )
+        if report.get("length_problem"):
+            merged["length_problem"] = str(report.get("length_problem") or "")
+        merged["template_hits"] = NovelWorkflow._dedupe_review_items(
+            [*NovelWorkflow._as_list(merged.get("template_hits")), *NovelWorkflow._as_list(report.get("template_hits"))]
+        )
+        merged["risk_flags"] = NovelWorkflow._dedupe_texts(
+            [*NovelWorkflow._as_list(merged.get("risk_flags")), *NovelWorkflow._as_list(report.get("risk_flags"))]
+        )
+        return merged
+
+    @staticmethod
+    def _as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else ([] if value in (None, "") else [value])
+
+    @staticmethod
+    def _dedupe_texts(values: list[Any]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _dedupe_review_items(values: list[Any]) -> list[Any]:
+        seen: set[str] = set()
+        result: list[Any] = []
+        for value in values:
+            key = json_dumps(value) if isinstance(value, dict) else str(value)
+            if key not in seen:
+                seen.add(key)
+                result.append(value)
+        return result
 
     def generate_chapters(
         self,
@@ -550,6 +669,7 @@ class NovelWorkflow:
         bundle = filter_chapter_bundle(self.normalized_work_bundle(work_id), outline_detail)
         recent_outlines = self.repo.get_recent_chapter_outlines(work_id, chapter_number, limit=5)
         previous_chapter = self.repo.get_previous_chapter_context(work_id, chapter_number)
+        recent_openings = self._recent_chapter_openings(work_id, chapter_number)
         context = {
             **bundle,
             "chapter": {
@@ -563,6 +683,8 @@ class NovelWorkflow:
             },
             "recent_three_chapter_summaries": self.repo.get_recent_summaries(work_id, chapter_number, limit=3),
             "recent_chapter_outlines": recent_outlines,
+            "recent_chapter_openings": recent_openings,
+            "opening_variation_policy": self._opening_variation_policy(recent_openings),
             "repeat_risk_warnings": repeat_risk_warnings(outline_detail, recent_outlines),
             "chapter_notes": self.repo.list_chapter_notes(work_id, chapter_number),
             "previous_chapter": previous_chapter,
@@ -574,11 +696,55 @@ class NovelWorkflow:
                 "per_chapter_memory_loop": "每章生成后必须审稿、修订、生成记忆卡，再进入下一章。",
                 "locked_fact_rule": "锁定设定、人物档案、世界观规则不能擅自修改。",
                 "revision_layers": "修订时按结构、情绪、语言三层内部检查，只输出最终正文。",
+                "quality_gate": "程序会在保存前检查章节标题泄漏、短摘要、字数偏差、空泛章尾、模板句、历史违和词和开篇接力棒。",
             },
         }
         context["chapter_word_target"] = chapter_word_target_from_style((bundle.get("work") or {}).get("style", ""))
         context["history_specialist"] = historical_context_for_bundle(context)
         return self.normalize_output_names(work_id, context)
+
+    def _recent_chapter_openings(self, work_id: int, chapter_number: int, limit: int = 5) -> list[dict[str, Any]]:
+        rows = list(reversed(self.repo.get_recent_chapter_texts(work_id, chapter_number, limit=limit)))
+        openings: list[dict[str, Any]] = []
+        for row in rows:
+            text = str(row.get("final_text") or row.get("draft") or "")
+            opening = first_paragraph(text)
+            if not opening:
+                continue
+            flags = opening_pattern_flags(opening)
+            openings.append(
+                {
+                    "chapter_number": row.get("chapter_number"),
+                    "title": row.get("title", ""),
+                    "opening": opening,
+                    "pattern": opening_pattern_label(opening),
+                    "pattern_flags": flags,
+                }
+            )
+        return openings
+
+    @staticmethod
+    def _opening_variation_policy(openings: list[dict[str, Any]]) -> dict[str, Any]:
+        recent = openings[-3:]
+        flag_sets = [set(item.get("pattern_flags") or []) for item in recent if item.get("pattern_flags")]
+        repeated_flags = sorted(set.intersection(*flag_sets)) if len(flag_sets) >= 2 else []
+        if repeated_flags:
+            instruction = (
+                "最近章节章首已经连续出现"
+                + "、".join(repeated_flags)
+                + "开头。本章第一句禁止再用时辰、地名、天气、晨雾、钟鼓、日光、夜色等静态信息起笔；"
+                "必须从上一章留下的人物动作、对白、证据、威胁、物件变化或冲突后果直接切入。"
+            )
+        else:
+            instruction = (
+                "章首优先从人物动作、对白、证据、威胁、物件变化或冲突后果切入；"
+                "不要为了古风氛围先写时辰、地点、天气或环境陈列。"
+            )
+        return {
+            "recent_opening_count": len(openings),
+            "repeated_opening_flags": repeated_flags,
+            "instruction": instruction,
+        }
 
     def _chapter_transition_contract(self, previous_chapter: dict[str, Any] | None) -> dict[str, Any]:
         if not previous_chapter:

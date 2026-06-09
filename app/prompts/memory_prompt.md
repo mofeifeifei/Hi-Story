@@ -139,6 +139,6 @@ output_contract: 结构化数据
 - `handoff.ending_style`：本章结尾类型，只能使用具体类型，不要写“意味悠长”。
 - `ability_changes`：记录本章真实发生的能力变化、代价变化、限制变化或使用后果；没有就返回空数组。
 - `relationship_changes`：记录本章真实发生的人物关系变化；没有就返回空数组。
-- `historical_updates`：只在历史类作品中记录本章真实落地、后续不知道就会写错的历史信息；非历史类作品返回空数组。`category` 可写官制、礼法、地名、交通、通信、服饰、器物、军制、宗族、刑律、称谓、虚构边界等。
+- `historical_updates`：只在历史类作品中记录本章真实落地、后续不知道就会写错的历史信息；非历史类作品返回空数组。每项必须尽量包含 `category`、`name`、`content`、`source_type`、`certainty`、`fictionalized`、`chapter_impact`、`future_constraint`。`category` 可写官制、礼法、地名、交通、通信、服饰、器物、军制、宗族、刑律、称谓、虚构边界等。`certainty` 可写锁定、可考、半架空、虚构；`fictionalized` 用布尔值表示是否经过本书架空改造。
 
 如果某类信息没有出现，返回空数组、空字符串或 `null`，不要编造。

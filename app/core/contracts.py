@@ -131,7 +131,24 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     memory.setdefault("ability_changes", [])
     memory.setdefault("relationship_changes", [])
     memory.setdefault("historical_updates", [])
+    if isinstance(memory["historical_updates"], list):
+        normalized_history = []
+        for item in memory["historical_updates"]:
+            if not isinstance(item, dict):
+                continue
+            update = dict(item)
+            update.setdefault("category", "")
+            update.setdefault("name", "")
+            update.setdefault("content", "")
+            update.setdefault("source_type", "memory_card")
+            update.setdefault("certainty", "")
+            update.setdefault("fictionalized", False)
+            update.setdefault("chapter_impact", "")
+            update.setdefault("future_constraint", "")
+            normalized_history.append(update)
+        memory["historical_updates"] = normalized_history
     memory.setdefault("ending_hook", "")
+    ending_hook = str(memory.get("ending_hook") or "").strip()
     handoff = memory.get("handoff")
     if not isinstance(handoff, dict):
         handoff = {}
@@ -149,6 +166,14 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     handoff.setdefault("next_first_paragraph_task", handoff.get("next_opening_must_continue", ""))
     handoff.setdefault("forbidden_opening", handoff.get("forbidden_jump", ""))
     handoff.setdefault("ending_style", "")
+    if ending_hook and not str(handoff.get("next_opening_must_continue") or "").strip():
+        handoff["next_opening_must_continue"] = f"承接本章结尾钩子：{ending_hook}"
+    if not str(handoff.get("next_first_paragraph_task") or "").strip():
+        handoff["next_first_paragraph_task"] = handoff.get("next_opening_must_continue", "")
+    if not str(handoff.get("forbidden_opening") or "").strip():
+        handoff["forbidden_opening"] = handoff.get("forbidden_jump") or "禁止跳过上一章结尾，禁止先写天气、时间跳转、回忆或背景说明。"
+    if not str(handoff.get("open_conflict") or "").strip():
+        handoff["open_conflict"] = handoff.get("current_conflict", "")
     memory["handoff"] = handoff
     return memory
 

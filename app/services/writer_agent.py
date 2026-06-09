@@ -13,7 +13,7 @@ class WriterAgent(BaseAgent):
 
     def write_chapter(self, context: dict[str, Any]) -> str:
         chapter = context.get("chapter", {})
-        history_section = history_prompt_section(context)
+        history_section = history_prompt_section(context, task="writer")
         user_prompt = (
             "请根据以下上下文生成本章正文。\n"
             "注意：必须优先执行 chapter.outline_task_sheet 中的本章目标、场景卡、核心冲突、线索推进、信息增量和接力棒。\n"
@@ -21,6 +21,7 @@ class WriterAgent(BaseAgent):
             "必须优先服从 book_bible、chapter_notes、人物动态状态和用户批注。\n"
             "必须读取 chapter_word_target，并按其中的动态目标字数、建议范围和规则生成完整章节。\n"
             "必须优先承接 chapter_transition_contract；第一段要直接接住上一章末尾的具体动作、对白、物件、证据或威胁。\n"
+            "必须读取 recent_chapter_openings 和 opening_variation_policy；如果最近章首已经出现时辰、地点、天气、晨雾、钟鼓等静态开场，本章第一句必须换成动作、对白、证据、威胁或上一章后果。\n"
             "章末必须留下可被下一章第一段承接的外部锚点；不能用意味悠长的空泛收束。\n"
             "不能擅自修改锁定设定；不要使用禁用模板句。\n"
             "如果细纲与前文冲突，优先服从前文和锁定设定，不要自行重启剧情。\n\n"

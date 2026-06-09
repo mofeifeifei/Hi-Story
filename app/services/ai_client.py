@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from math import ceil
 from typing import Any
 
 from app.utils.config import load_config
@@ -19,10 +20,21 @@ class AIClientError(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
+def estimate_tokens(text: str) -> int:
+    content = str(text or "")
+    compact = re.sub(r"\s+", "", content)
+    if not compact:
+        return 0
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", compact))
+    other_chars = max(0, len(compact) - cjk_chars)
+    return max(1, ceil(cjk_chars / 1.6 + other_chars / 4))
+
+
 class AIClient:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or load_config()
         self._session: Any | None = None
+        self._last_usage_by_agent: dict[str, dict[str, Any]] = {}
 
     def model_for(self, agent_name: str) -> str:
         agent_models = self.config.get("agent_models", {})
@@ -40,44 +52,72 @@ class AIClient:
         mock_hint: dict[str, Any] | None = None,
     ) -> str:
         api_key = self.config.get("api_key") or os.getenv("NOVEL_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        input_chars = len(system_prompt) + len(user_prompt)
+        input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
+        started = time.perf_counter()
         if self.config.get("mock_mode", True):
-            return self._mock_response(agent_name, user_prompt, json_mode=json_mode, hint=mock_hint or {})
+            output = self._mock_response(agent_name, user_prompt, json_mode=json_mode, hint=mock_hint or {})
+            self._record_usage(agent_name, input_chars, output, input_tokens, started)
+            return output
         if self.config.get("requires_openai_auth", True) and not api_key:
             raise AIClientError("缺少 API Key。请在工作台的“设置”页填写，或重新开启 mock 模式。")
 
         wire_api = str(self.config.get("wire_api", "chat_completions")).lower()
-        started = time.perf_counter()
         logger.info(
             "AI request start agent=%s model=%s wire=%s json=%s input_chars=%s",
             agent_name,
             self.model_for(agent_name),
             wire_api,
             json_mode,
-            len(system_prompt) + len(user_prompt),
+            input_chars,
         )
         try:
             if wire_api == "responses":
-                return self._call_responses_api(
+                output = self._call_responses_api(
                     agent_name=agent_name,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     api_key=api_key,
                     json_mode=json_mode,
                 )
-
-            return self._call_chat_completions(
-                agent_name=agent_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                api_key=api_key,
-                json_mode=json_mode,
-            )
+            else:
+                output = self._call_chat_completions(
+                    agent_name=agent_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    api_key=api_key,
+                    json_mode=json_mode,
+                )
+            self._record_usage(agent_name, input_chars, output, input_tokens, started)
+            return output
         finally:
             logger.info(
                 "AI request end agent=%s elapsed=%.1fs",
                 agent_name,
                 time.perf_counter() - started,
             )
+
+    def last_usage(self, agent_name: str) -> dict[str, Any]:
+        return dict(self._last_usage_by_agent.get(agent_name, {}))
+
+    def _record_usage(
+        self,
+        agent_name: str,
+        input_chars: int,
+        output: str,
+        input_tokens: int,
+        started: float,
+    ) -> None:
+        output_chars = len(output or "")
+        output_tokens = estimate_tokens(output or "")
+        self._last_usage_by_agent[agent_name] = {
+            "input_chars": input_chars,
+            "output_chars": output_chars,
+            "estimated_input_tokens": input_tokens,
+            "estimated_output_tokens": output_tokens,
+            "estimated_total_tokens": input_tokens + output_tokens,
+            "elapsed_seconds": round(time.perf_counter() - started, 1),
+        }
 
     def test_connection(self) -> dict[str, Any]:
         if self.config.get("mock_mode", True):
@@ -841,7 +881,11 @@ class AIClient:
             historical_updates = [
                 {
                     "category": "虚构边界",
+                    "name": "历史设定卡约束",
                     "content": "本章新增或沿用的历史细节必须继续服从当前历史设定卡，不能混入现代制度和现代器物。",
+                    "source_type": "mock_memory",
+                    "certainty": "半架空",
+                    "fictionalized": True,
                     "chapter_impact": "后续章节写同一场景、称谓、官制或生活细节时需要保持一致。",
                     "future_constraint": "下一章承接时优先检查称谓、交通、通信、器物和制度是否符合时代背景。",
                 }
