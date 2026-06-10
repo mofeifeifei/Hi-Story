@@ -241,10 +241,19 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     if method == "PUT":
                         return _save_chapter_text(work_id, chapter_number, body)
                     if method == "DELETE":
+                        _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
                         STATE.repo.delete_chapter(work_id, chapter_number, delete_related=True)
                         return _work_state(work_id)
                 if len(parts) == 6 and parts[5] == "outline" and method == "PUT":
                     return _save_chapter_outline(work_id, chapter_number, body)
+                if len(parts) == 6 and parts[5] == "clear-text" and method == "POST":
+                    _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
+                    STATE.repo.clear_chapter_text(work_id, chapter_number)
+                    return _work_state(work_id)
+                if len(parts) == 6 and parts[5] == "delete-from" and method == "DELETE":
+                    _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
+                    deleted = STATE.repo.delete_chapters_from(work_id, chapter_number, delete_related=True)
+                    return {**_work_state(work_id), "deleted_count": deleted}
                 if len(parts) == 6 and parts[5] == "generate" and method == "POST":
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
@@ -300,7 +309,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     finally:
                         if not STATE.task_status(task_id).get("finished_at"):
                             _finish_task(task_id, work_id, chapter_id=chapter_id)
-                if len(parts) == 6 and parts[5] == "revise" and method == "POST":
+                if len(parts) == 6 and parts[5] in {"revise", "revision"} and method == "POST":
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
                     _start_task(
@@ -577,6 +586,7 @@ def _chapter_task_preview(result: dict[str, Any]) -> str:
 
 def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     title = str(body.get("title") or chapter.get("title") or f"第{chapter_number}章").strip()
     text = strip_chapter_heading(str(body.get("final_text") or ""), chapter_number, title)
     try:
@@ -713,6 +723,7 @@ def _revise_chapter_with_instruction(
     if not current_text:
         raise ValueError("当前正文为空，无法按意见修订。")
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     context = STATE.workflow.build_chapter_context(work_id, chapter_number)
     revised = STATE.workflow.reviser.revise_with_instruction(context, current_text, instruction)
     if should_stop and should_stop():
@@ -929,6 +940,26 @@ def _inputs_from_work(work: dict[str, Any]) -> dict[str, Any]:
             "locked_facts": work.get("locked_facts", ""),
         }
     )
+
+
+def _validate_chapter_request(
+    work_id: int,
+    chapter_number: int,
+    body: dict[str, Any],
+    chapter: dict[str, Any] | None = None,
+    *,
+    require_identity: bool = False,
+) -> None:
+    chapter = chapter or STATE.repo.get_chapter(work_id, chapter_number)
+    request_chapter_id = body.get("chapter_id")
+    if require_identity and request_chapter_id in (None, ""):
+        raise ValueError("当前操作缺少章节身份信息，请重新载入章节后再操作。")
+    if request_chapter_id not in (None, "") and int(request_chapter_id) != int(chapter["id"]):
+        raise ValueError("当前编辑区与目标章节不一致，请重新载入章节后再操作。")
+    request_updated_at = str(body.get("updated_at") or "").strip()
+    current_updated_at = str(chapter.get("updated_at") or "").strip()
+    if request_updated_at and current_updated_at and request_updated_at != current_updated_at:
+        raise ValueError("该章节已被其他操作更新，请重新载入章节后再操作。")
 
 
 def _to_int(value: str, label: str) -> int:

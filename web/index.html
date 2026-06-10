@@ -260,7 +260,9 @@
             <button id="memoryBtn">生成记忆入库</button>
           </div>
           <div class="action-group danger-zone">
+            <button class="danger" id="clearWritingChapterBtn">清空正文</button>
             <button class="danger" id="deleteWritingChapterBtn">删除当前章</button>
+            <button class="danger" id="deleteWritingFromChapterBtn">删除本章及之后</button>
           </div>
         </div>
 
@@ -280,6 +282,12 @@
             <div class="revision-row">
               <textarea id="revisionInstructionInput" placeholder="修改意见：例如加强开头承接、减少解释、提高历史质感。"></textarea>
               <button id="reviseWithInstructionBtn">按意见修订</button>
+            </div>
+            <div class="pending-results" id="pendingResultPanel" hidden>
+              <div class="pending-results-head">
+                <strong>待处理结果</strong>
+              </div>
+              <div class="pending-result-list" id="pendingResultList"></div>
             </div>
           </section>
 

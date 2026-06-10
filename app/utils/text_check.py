@@ -119,6 +119,7 @@ OPENING_TIME_RE = re.compile(
     r"(?:卯|辰|巳|午|未|申|酉|戌|亥|子|丑|寅)时"
     r"|[一二三四五六七八九十半三两]+更"
     r"|翌日|次日|清晨|晨间|天色|天刚亮|黄昏|入夜|深夜|夜里|黎明|拂晓"
+    r"|天(?:尚未|还未|还没|未)?全?亮|天色(?:未明|微明|将明)|晨光|晨色"
     r"|日头|月上|鸡鸣|晨钟|暮鼓|街鼓|钟声|鼓声|漏声"
     r")"
 )
@@ -128,19 +129,34 @@ OPENING_PLACE_RE = re.compile(
     r"书房|院中|殿内|殿外|宫中|营中|船上|渡口|码头|堂前|廊下|案前"
     r")"
 )
+OPENING_PLACE_NEAR_RE = re.compile(
+    r"[\u4e00-\u9fff]{1,12}(?:"
+    r"门外|门前|门内|城外|城中|城内|街上|巷口|坊巷|巷里|一带|府中|府外|府衙|县衙|官署|"
+    r"书房|院中|殿内|殿外|宫中|营中|船上|渡口|码头|堂前|廊下|案前"
+    r")"
+)
 OPENING_ENV_RE = re.compile(
     r"^\s*(?:"
-    r"晨雾|薄雾|雨声|风声|雪|霜|雾|日光|阳光|月色|夜色|灯火|烛火|天光|"
+    r"晨雾|薄雾|雾气|雨声|风声|雪|霜|雾|日光|阳光|月色|夜色|灯火|烛火|天光|"
     r"暮色|寒意|热气|尘土|檐雨|雨丝|风从"
     r")"
+)
+OPENING_ENV_NEAR_RE = re.compile(
+    r"(?:晨雾|薄雾|雾气|雨声|风声|雪|霜|日光|阳光|月色|夜色|灯火|烛火|天光|暮色|寒意|檐雨|雨丝)"
 )
 OPENING_ATMOSPHERE_WORDS = [
     "晨雾",
     "薄雾",
+    "雾气",
     "雨声",
     "风声",
     "日光",
     "夜色",
+    "天尚未全亮",
+    "天色未明",
+    "天未亮",
+    "晨光",
+    "晨色",
     "街鼓",
     "钟声",
     "鼓声",
@@ -171,9 +187,9 @@ def opening_pattern_flags(opening: str) -> list[str]:
     flags: list[str] = []
     if OPENING_TIME_RE.search(first_sentence):
         flags.append("时间/时辰")
-    if OPENING_PLACE_RE.search(first_sentence):
+    if OPENING_PLACE_RE.search(first_sentence) or OPENING_PLACE_NEAR_RE.search(first_sentence[:90]):
         flags.append("地点陈列")
-    if OPENING_ENV_RE.search(first_sentence):
+    if OPENING_ENV_RE.search(first_sentence) or OPENING_ENV_NEAR_RE.search(first_sentence[:90]):
         flags.append("天气/环境")
     if any(word in first_sentence[:80] for word in OPENING_ATMOSPHERE_WORDS):
         flags.append("古装氛围词")
@@ -288,7 +304,7 @@ def manuscript_quality_report(
 
     opening_warning = chapter_opening_warning(cleaned, context)
     if opening_warning:
-        if stage in {"修订稿", "最终稿"} and opening_warning.startswith("章首连续使用"):
+        if opening_warning.startswith("章首连续使用"):
             blockers.append(opening_warning)
         else:
             warnings.append(opening_warning)

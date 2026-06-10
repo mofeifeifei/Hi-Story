@@ -776,6 +776,56 @@ textarea {
   margin: 0;
 }
 
+.pending-results {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--surface-muted);
+}
+
+.pending-results-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.pending-result-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pending-result-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--surface);
+}
+
+.pending-result-title {
+  font-weight: 700;
+}
+
+.pending-result-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pending-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.pending-result-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+}
+
 .mini-tabs,
 .category-tabs {
   display: flex;

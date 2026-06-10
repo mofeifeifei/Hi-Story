@@ -652,6 +652,46 @@ class Repository:
             conn.commit()
         return True
 
+    def delete_chapters_from(self, work_id: int, start_chapter: int, *, delete_related: bool = True) -> int:
+        self.init()
+        chapters = [
+            int(chapter["chapter_number"])
+            for chapter in self.list_chapters(work_id)
+            if int(chapter.get("chapter_number") or 0) >= start_chapter
+        ]
+        deleted = 0
+        for chapter_number in sorted(chapters, reverse=True):
+            if self.delete_chapter(work_id, chapter_number, delete_related=delete_related):
+                deleted += 1
+        return deleted
+
+    def clear_chapter_text(self, work_id: int, chapter_number: int) -> bool:
+        self.init()
+        timestamp = now_text()
+        with connect(self._db_path_for_work(work_id)) as conn:
+            row = conn.execute(
+                "SELECT id FROM chapters WHERE work_id = ? AND chapter_number = ?",
+                (work_id, chapter_number),
+            ).fetchone()
+            if row is None:
+                return False
+            chapter_id = int(row["id"])
+            self._clear_chapter_memory_side_effects(conn, work_id, chapter_number, timestamp)
+            conn.execute("DELETE FROM reviews WHERE chapter_id = ?", (chapter_id,))
+            conn.execute("DELETE FROM versions WHERE chapter_id = ?", (chapter_id,))
+            conn.execute("DELETE FROM agent_runs WHERE chapter_id = ?", (chapter_id,))
+            conn.execute(
+                """
+                UPDATE chapters
+                SET draft = '', final_text = '', summary = '', handoff = '',
+                    memory_json = '', status = 'outline', updated_at = ?
+                WHERE id = ? AND work_id = ?
+                """,
+                (timestamp, chapter_id, work_id),
+            )
+            conn.commit()
+        return True
+
     def list_characters(self, work_id: int) -> list[dict[str, Any]]:
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(

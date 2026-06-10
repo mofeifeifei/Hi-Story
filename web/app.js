@@ -6,6 +6,9 @@ const state = {
   selectedChapter: 1,
   currentChapter: null,
   currentChapterWordTarget: null,
+  editor: { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" },
+  chapterLoadSeq: 0,
+  workLoadSeq: 0,
   pendingPlan: null,
   pendingPlanWorkId: null,
   config: null,
@@ -21,6 +24,8 @@ const state = {
   taskRuns: [],
   task: null,
   taskSerial: 0,
+  pendingChapterResults: [],
+  pendingResultSerial: 0,
   styleExtraLines: [],
   confirmResolver: null,
 };
@@ -219,14 +224,14 @@ async function api(path, options = {}) {
   return payload.data;
 }
 
-function log(message, type = "info") {
+function log(message, type = "info", meta = {}) {
   const entry = {
     time: new Date(),
     message,
     type,
-    work: state.work?.title || "",
-    chapter: state.selectedChapter || "",
-    task: state.task?.title || "",
+    work: meta.work ?? state.work?.title ?? "",
+    chapter: meta.chapter ?? state.task?.chapterNumber ?? state.selectedChapter ?? "",
+    task: meta.task ?? state.task?.title ?? "",
   };
   state.runLogs.unshift(entry);
   if (state.runLogs.length > 200) state.runLogs.length = 200;
@@ -280,10 +285,12 @@ function renderTaskRuns() {
     const item = document.createElement("div");
     item.className = `log-entry ${run.status === "done" ? "success" : run.status === "failed" ? "error" : "info"}`;
     const duration = taskDurationText(run);
+    const deletedNote = deletedChapterRunNote(run);
     const meta = [
       run.kind ? `类型：${run.kind}` : "",
       run.stage ? `阶段：${run.stage}` : "",
       run.chapter_id ? `章节 ID：${run.chapter_id}` : "",
+      deletedNote,
     ].filter(Boolean).join(" · ");
     item.innerHTML = `
       <div class="log-time">${escapeHtml(run.updated_at || run.created_at || "")}</div>
@@ -330,6 +337,15 @@ function renderAgentRuns() {
     `;
     list.appendChild(item);
   }
+}
+
+function deletedChapterRunNote(run) {
+  const title = String(run?.title || "");
+  const match = title.match(/第\s*(\d+)\s*章/);
+  if (!match) return "";
+  const chapterNumber = Number(match[1]);
+  if (!chapterNumber || chapterByNumber(chapterNumber)) return "";
+  return "该章节已删除，仅保留历史运行记录";
 }
 
 function agentUsageText(run) {
@@ -394,7 +410,10 @@ function showError(error) {
     notify("当前生成已停止。", "warning");
     return;
   }
-  const message = error?.message || String(error);
+  let message = error?.message || String(error);
+  if (message === "未知接口。") {
+    message = "未知接口。前端与后台服务版本可能不一致，请关闭旧后台后重新启动 Hi Story.bat。";
+  }
   log(`失败：${message}`);
   notify(message, "error");
 }
@@ -424,10 +443,21 @@ function closeConfirmModal(result) {
   state.confirmResolver = null;
 }
 
-function startTask(kind, title, detail) {
+function startTask(kind, title, detail, meta = {}) {
   const controller = new AbortController();
   const id = `${Date.now()}-${++state.taskSerial}-${kind}`;
-  state.task = { id, kind, title, detail, controller, startedAt: Date.now(), status: "running", stopped: false };
+  state.task = {
+    id,
+    kind,
+    title,
+    detail,
+    controller,
+    startedAt: Date.now(),
+    status: "running",
+    stopped: false,
+    workId: meta.workId ?? state.selectedWorkId,
+    chapterNumber: meta.chapterNumber ?? null,
+  };
   updateTaskUI();
   return state.task;
 }
@@ -563,6 +593,7 @@ function bindEvents() {
   $("outlineCollapseAllBtn").addEventListener("click", collapseAllVolumes);
   $("generateChapterOutlinesBtn").addEventListener("click", generateChapterOutlines);
   $("chapterStartInput").addEventListener("input", updateOutlineGenerateControls);
+  $("chapterCountInput").addEventListener("input", updateOutlineGenerateControls);
   $("clearLogBtn").addEventListener("click", clearRunLogs);
   $("refreshRecordsBtn").addEventListener("click", refreshRecords);
   $("chapterSearchInput").addEventListener("input", renderChapterLists);
@@ -571,8 +602,11 @@ function bindEvents() {
   $("generateChapterBtn").addEventListener("click", generateChapter);
   $("saveChapterBtn").addEventListener("click", saveChapterText);
   $("memoryBtn").addEventListener("click", generateMemory);
+  $("clearWritingChapterBtn").addEventListener("click", clearCurrentChapterText);
   $("deleteWritingChapterBtn").addEventListener("click", deleteCurrentChapter);
+  $("deleteWritingFromChapterBtn").addEventListener("click", deleteChaptersFromCurrent);
   $("reviseWithInstructionBtn").addEventListener("click", reviseWithInstruction);
+  $("pendingResultList").addEventListener("click", handlePendingResultClick);
   $("inspectorTabs").addEventListener("click", switchInspector);
   $("refreshLibraryBtn").addEventListener("click", refreshLibrary);
   $("librarySearchInput").addEventListener("input", renderLibraryList);
@@ -662,7 +696,9 @@ function renderWorks() {
 }
 
 async function selectWork(workId, writeLog = true) {
+  const seq = ++state.workLoadSeq;
   const data = await api(`/api/works/${workId}`);
+  if (seq !== state.workLoadSeq) return;
   applyWorkState(data);
   if (writeLog) log(`已切换到《${state.work.title || "未命名文章"}》。`);
 }
@@ -675,9 +711,11 @@ function applyWorkState(data) {
   state.agentRuns = data.agent_runs || [];
   state.taskRuns = data.task_runs || [];
   state.selectedWorkId = state.work ? state.work.id : null;
-  if (previousWorkId && state.selectedWorkId !== previousWorkId) {
+  const workChanged = previousWorkId && Number(state.selectedWorkId) !== Number(previousWorkId);
+  if (workChanged) {
     state.pendingPlan = null;
     state.pendingPlanWorkId = null;
+    state.pendingChapterResults = state.pendingChapterResults.filter((item) => Number(item.workId) === Number(state.selectedWorkId));
   }
   if (state.pendingPlanWorkId && state.pendingPlanWorkId !== state.selectedWorkId) {
     state.pendingPlan = null;
@@ -687,6 +725,12 @@ function applyWorkState(data) {
   state.outline.volume_outline = state.outline.volume_outline || [];
   state.outline.chapters = state.outline.chapters || [];
   ensureChapterVolumeNumbers();
+  if (workChanged) {
+    state.selectedChapter = Number((state.outline.chapters || [])[0]?.chapter_number || 1);
+    clearEditor();
+  } else if (state.editor.chapterNumber && !chapterByNumber(state.editor.chapterNumber)) {
+    clearEditor();
+  }
   if (!state.outlineSelection) state.outlineSelection = { type: "full" };
   ensureOutlineExpandedVolumes();
   setNextChapterStart();
@@ -702,6 +746,7 @@ function applyWorkState(data) {
   renderLibraryFromWork(data);
   renderAgentRuns();
   renderTaskRuns();
+  renderPendingChapterResults();
   updateExportDir(data);
   $("currentTitle").textContent = state.work ? `《${state.work.title || "未命名文章"}》` : "未选择文章";
   updateProgress();
@@ -713,8 +758,11 @@ function clearWorkState() {
   state.selectedWorkId = null;
   state.currentChapter = null;
   state.currentChapterWordTarget = null;
+  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
+  state.chapterLoadSeq += 1;
   state.pendingPlan = null;
   state.pendingPlanWorkId = null;
+  state.pendingChapterResults = [];
   state.outline = { full_outline: "", volume_outline: [], chapters: [] };
   state.outlineSelection = { type: "full" };
   state.outlineExpandedVolumes = [];
@@ -734,6 +782,8 @@ function clearWorkState() {
   renderLibraryFromWork({});
   renderAgentRuns();
   renderTaskRuns();
+  renderPendingChapterResults();
+  clearEditor();
   updateExportDir({});
   updateOutlineGenerateControls();
   updateProgress();
@@ -1022,17 +1072,23 @@ async function generatePlan() {
   }
   if (!state.selectedWorkId) await saveWork();
   if (!state.selectedWorkId) return;
-  const task = startTask("plan", "生成设定草稿", "策划 AI 正在整理书名、简介、人物、世界观和主线方向。");
+  const workId = state.selectedWorkId;
+  const task = startTask("plan", "生成设定草稿", "策划 AI 正在整理书名、简介、人物、世界观和主线方向。", { workId });
   try {
     log("策划 AI 正在生成设定草稿...");
-    const data = await api(`/api/works/${state.selectedWorkId}/plan-draft`, {
+    const data = await api(`/api/works/${workId}/plan-draft`, {
       method: "POST",
       body: { ...collectWorkForm(), task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (Number(state.selectedWorkId) !== Number(workId)) {
+      notify("设定草稿已生成，但当前已切换文章，结果未写入当前界面。", "warning");
+      log("设定草稿已生成，但当前已切换文章，结果未写入当前界面。", "warning", { work: "" });
+      return;
+    }
     state.pendingPlan = data.plan;
-    state.pendingPlanWorkId = state.selectedWorkId;
+    state.pendingPlanWorkId = workId;
     renderPlanBrowser();
     $("planPreview").textContent = data.readable || formatAny(data.plan);
     log("设定草稿已生成。");
@@ -1303,15 +1359,20 @@ async function generateOutline() {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
   }
-  const task = startTask("outline", "生成全书大纲", "策划 AI 正在梳理全书主线、分卷目标和阶段推进。");
+  const workId = state.selectedWorkId;
+  const task = startTask("outline", "生成全书大纲", "策划 AI 正在梳理全书主线、分卷目标和阶段推进。", { workId });
   try {
     log("策划 AI 正在生成全书大纲...");
-    const data = await api(`/api/works/${state.selectedWorkId}/outline`, {
+    const data = await api(`/api/works/${workId}/outline`, {
       method: "POST",
       body: { task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (Number(state.selectedWorkId) !== Number(workId)) {
+      notify("全书大纲已生成，但当前已切换文章，结果未刷新到当前界面。", "warning");
+      return;
+    }
     applyWorkState(data);
     log("全书大纲已生成。");
     notify("全书大纲已生成。", "success");
@@ -1325,21 +1386,22 @@ async function generateOutline() {
 
 async function saveOutline() {
   if (!requireWork()) return;
+  const workId = state.selectedWorkId;
   commitOutlineEditor();
   try {
-    const data = await persistOutline();
-    applyWorkState(data);
+    const data = await persistOutline(workId);
+    if (Number(state.selectedWorkId) === Number(workId)) applyWorkState(data);
     log("大纲已保存。");
   } catch (error) {
     showError(error);
   }
 }
 
-async function persistOutline() {
+async function persistOutline(workId = state.selectedWorkId) {
   for (const chapter of state.outline.chapters || []) {
-    await saveChapterOutlineData(chapter);
+    await saveChapterOutlineData(chapter, workId);
   }
-  return api(`/api/works/${state.selectedWorkId}/outline`, {
+  return api(`/api/works/${workId}/outline`, {
     method: "PUT",
     body: {
       full_outline: state.outline.full_outline || "",
@@ -1348,9 +1410,9 @@ async function persistOutline() {
   });
 }
 
-async function saveChapterOutlineData(chapter) {
+async function saveChapterOutlineData(chapter, workId = state.selectedWorkId) {
   if (!chapter) return;
-  await api(`/api/works/${state.selectedWorkId}/chapters/${Number(chapter.chapter_number)}/outline`, {
+  await api(`/api/works/${workId}/chapters/${Number(chapter.chapter_number)}/outline`, {
     method: "PUT",
     body: chapterPayload(chapter),
   });
@@ -1375,21 +1437,35 @@ async function generateChapterOutlines() {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
   }
+  const workId = state.selectedWorkId;
   commitOutlineEditor();
   updateOutlineGenerateControls();
   const start = Number($("chapterStartInput").value || 1);
   const count = Number($("chapterCountInput").value || 3);
-  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成第 ${start} 章起的 ${count} 章任务单，系统会校验所属分卷。`);
+  const existing = existingChaptersInRange(start, count);
+  if (existing.length) {
+    const ok = await confirmAction(
+      `第 ${existing.join("、")} 章已经存在。继续生成会覆盖这些章节的细纲，但不会自动删除正文。是否继续？`,
+      "覆盖已有细纲",
+      "继续生成"
+    );
+    if (!ok) return;
+  }
+  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成第 ${start} 章起的 ${count} 章任务单，系统会校验所属分卷。`, { workId });
   try {
-    await persistOutline();
+    await persistOutline(workId);
     if (taskWasStopped(task)) return;
     log(`策划 AI 正在生成第 ${start} 章起的 ${count} 章细纲，系统会校验所属分卷...`);
-    const data = await api(`/api/works/${state.selectedWorkId}/chapter-outlines`, {
+    const data = await api(`/api/works/${workId}/chapter-outlines`, {
       method: "POST",
       body: { start_chapter: start, count, task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (Number(state.selectedWorkId) !== Number(workId)) {
+      notify("章节细纲已生成，但当前已切换文章，结果未刷新到当前界面。", "warning");
+      return;
+    }
     applyWorkState(data);
     const generatedVolumes = new Set((data.generated_chapters || []).map((chapter) => Number(chapter.volume_number || 0)).filter(Boolean));
     for (const volumeNumber of generatedVolumes) ensureExpanded(volumeNumber);
@@ -1476,7 +1552,44 @@ function collapseAllVolumes() {
 }
 
 function nextChapterNumber() {
-  return Math.max(0, ...(state.outline.chapters || []).map((chapter) => Number(chapter.chapter_number || 0))) + 1;
+  const numbers = new Set((state.outline.chapters || []).map((chapter) => Number(chapter.chapter_number || 0)).filter((number) => number > 0));
+  let next = 1;
+  while (numbers.has(next)) next += 1;
+  return next;
+}
+
+function maxChapterNumber() {
+  return Math.max(0, ...(state.outline.chapters || []).map((chapter) => Number(chapter.chapter_number || 0)));
+}
+
+function missingChapterRanges() {
+  const max = maxChapterNumber();
+  if (!max) return [];
+  const numbers = new Set((state.outline.chapters || []).map((chapter) => Number(chapter.chapter_number || 0)).filter((number) => number > 0));
+  const ranges = [];
+  let start = null;
+  for (let number = 1; number <= max; number += 1) {
+    if (!numbers.has(number)) {
+      if (start === null) start = number;
+    } else if (start !== null) {
+      ranges.push([start, number - 1]);
+      start = null;
+    }
+  }
+  if (start !== null) ranges.push([start, max]);
+  return ranges;
+}
+
+function formatChapterRanges(ranges) {
+  return ranges.map(([start, end]) => (start === end ? `第 ${start} 章` : `第 ${start}-${end} 章`)).join("、");
+}
+
+function existingChaptersInRange(start, count) {
+  const end = Number(start) + Number(count) - 1;
+  return (state.outline.chapters || [])
+    .map((chapter) => Number(chapter.chapter_number || 0))
+    .filter((number) => number >= start && number <= end)
+    .sort((a, b) => a - b);
 }
 
 function setNextChapterStart() {
@@ -1485,15 +1598,20 @@ function setNextChapterStart() {
 }
 
 function updateOutlineGenerateControls() {
-  const start = nextChapterNumber();
+  const recommendedStart = nextChapterNumber();
+  const inputStart = Number($("chapterStartInput")?.value || recommendedStart);
+  const count = Number($("chapterCountInput")?.value || 1);
+  const gaps = missingChapterRanges();
   const target = $("outlineTargetText");
   if (target) {
     if (!state.selectedWorkId) {
       target.textContent = "生成目标：未选择文章";
     } else if (!(state.outline.volume_outline || []).length) {
       target.textContent = "生成目标：暂无分卷";
+    } else if (gaps.length) {
+      target.textContent = `生成目标：本次从第 ${inputStart} 章生成 ${count} 章；检测到缺口：${formatChapterRanges(gaps)}；建议先补第 ${recommendedStart} 章。`;
     } else {
-      target.textContent = `生成目标：从第 ${start} 章继续；所属分卷由分卷状态机校验`;
+      target.textContent = `生成目标：本次从第 ${inputStart} 章生成 ${count} 章；下一章建议第 ${recommendedStart} 章。`;
     }
   }
   const button = $("generateChapterOutlinesBtn");
@@ -1525,8 +1643,11 @@ function outlineText(chapter) {
 
 async function loadChapter(chapterNumber, targetTab) {
   if (!requireWork()) return;
+  const workId = state.selectedWorkId;
+  const seq = ++state.chapterLoadSeq;
   try {
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}`);
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}`);
+    if (seq !== state.chapterLoadSeq || Number(state.selectedWorkId) !== Number(workId)) return;
     state.selectedChapter = chapterNumber;
     state.currentChapter = data.chapter;
     fillChapter(data);
@@ -1536,6 +1657,36 @@ async function loadChapter(chapterNumber, targetTab) {
   } catch (error) {
     showError(error);
   }
+}
+
+function setEditorOwner(chapter) {
+  state.editor = {
+    workId: state.selectedWorkId,
+    chapterId: chapter?.id ?? null,
+    chapterNumber: Number(chapter?.chapter_number || 0) || null,
+    updatedAt: chapter?.updated_at || "",
+  };
+}
+
+function clearEditor() {
+  state.currentChapter = null;
+  state.currentChapterWordTarget = null;
+  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
+  if ($("writingChapterNumberInput")) $("writingChapterNumberInput").value = state.selectedChapter || 1;
+  if ($("chapterTitleInput")) $("chapterTitleInput").value = "";
+  if ($("chapterTextInput")) $("chapterTextInput").value = "";
+  if ($("chapterOutlinePreview")) $("chapterOutlinePreview").textContent = "未载入章节。";
+  if ($("contextPreview")) $("contextPreview").textContent = "未载入章节。";
+  if ($("reviewPreview")) $("reviewPreview").textContent = "暂无审稿结果。";
+  if ($("memoryPreview")) $("memoryPreview").textContent = "暂无记忆卡。";
+  if ($("draftPreview")) $("draftPreview").textContent = "暂无初稿。";
+  updateChapterWordStatus();
+}
+
+function editorMatches(workId, chapterNumber) {
+  return Number(state.editor.workId) === Number(workId)
+    && Number(state.editor.chapterNumber) === Number(chapterNumber)
+    && Number(state.currentChapter?.id || 0) === Number(state.editor.chapterId || 0);
 }
 
 function renderChapterLists() {
@@ -1564,6 +1715,7 @@ function renderChapterLists() {
 function fillChapter(data) {
   const chapter = data.chapter || {};
   state.currentChapter = chapter;
+  setEditorOwner(chapter);
   state.currentChapterWordTarget = data.context?.chapter_word_target || null;
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
@@ -1633,6 +1785,116 @@ function formatPreviewObject(value, readable, emptyText) {
   return readable || emptyText;
 }
 
+function editorChapterNumber() {
+  return Number(state.editor.chapterNumber || state.currentChapter?.chapter_number || 0);
+}
+
+function editorIsShowing(workId, chapterNumber) {
+  return editorMatches(workId, chapterNumber);
+}
+
+function loadedEditorTarget() {
+  const workId = Number(state.editor.workId || 0);
+  const chapterNumber = Number(state.editor.chapterNumber || 0);
+  const chapterId = Number(state.editor.chapterId || 0);
+  if (!workId || !chapterNumber || !chapterId || Number(state.selectedWorkId) !== workId) return null;
+  if (Number(state.currentChapter?.id || 0) !== chapterId) return null;
+  return {
+    workId,
+    chapterNumber,
+    chapterId,
+    updatedAt: state.editor.updatedAt || "",
+  };
+}
+
+function addPendingChapterResult(result) {
+  if (!result?.text) return;
+  const item = {
+    id: `pending-${Date.now()}-${++state.pendingResultSerial}`,
+    workId: result.workId,
+    chapterNumber: Number(result.chapterNumber),
+    title: result.title || "",
+    kind: result.kind || "revise",
+    text: result.text,
+    createdAt: new Date(),
+  };
+  state.pendingChapterResults = state.pendingChapterResults.filter(
+    (existing) => !(Number(existing.workId) === Number(item.workId)
+      && Number(existing.chapterNumber) === Number(item.chapterNumber)
+      && existing.kind === item.kind)
+  );
+  state.pendingChapterResults.unshift(item);
+  renderPendingChapterResults();
+}
+
+function renderPendingChapterResults() {
+  const panel = $("pendingResultPanel");
+  const list = $("pendingResultList");
+  if (!panel || !list) return;
+  const items = state.pendingChapterResults.filter((item) => Number(item.workId) === Number(state.selectedWorkId));
+  panel.hidden = !items.length;
+  list.innerHTML = "";
+  for (const item of items) {
+    const node = document.createElement("div");
+    node.className = "pending-result-item";
+    node.innerHTML = `
+      <div class="pending-result-title">第 ${escapeHtml(item.chapterNumber)} 章修订结果</div>
+      <div class="pending-result-meta">${escapeHtml(item.title || "未命名章节")} · ${escapeHtml(item.createdAt.toLocaleString())}</div>
+      <div class="pending-result-actions">
+        <button data-pending-action="view" data-pending-id="${escapeHtml(item.id)}">查看</button>
+        <button class="primary" data-pending-action="apply" data-pending-id="${escapeHtml(item.id)}">应用到本章</button>
+        <button class="danger" data-pending-action="discard" data-pending-id="${escapeHtml(item.id)}">丢弃</button>
+      </div>
+    `;
+    list.appendChild(node);
+  }
+}
+
+function pendingResultById(id) {
+  return state.pendingChapterResults.find((item) => item.id === id);
+}
+
+function removePendingResult(id) {
+  state.pendingChapterResults = state.pendingChapterResults.filter((item) => item.id !== id);
+  renderPendingChapterResults();
+}
+
+async function handlePendingResultClick(event) {
+  const button = event.target.closest("button[data-pending-action]");
+  if (!button) return;
+  const item = pendingResultById(button.dataset.pendingId);
+  if (!item) return;
+  const action = button.dataset.pendingAction;
+  if (action === "discard") {
+    removePendingResult(item.id);
+    notify(`已丢弃第 ${item.chapterNumber} 章暂存结果。`, "info");
+    return;
+  }
+  if (Number(item.workId) !== Number(state.selectedWorkId)) {
+    notify("该暂存结果不属于当前文章。", "warning");
+    return;
+  }
+  await loadChapter(item.chapterNumber, "writing");
+  if (!editorIsShowing(item.workId, item.chapterNumber)) {
+    notify(`无法定位第 ${item.chapterNumber} 章，暂存结果未应用。`, "warning");
+    return;
+  }
+  if (action === "view") {
+    $("draftPreview").textContent = item.text;
+    document.querySelectorAll("#inspectorTabs button").forEach((node) => node.classList.toggle("active", node.dataset.inspector === "draft"));
+    document.querySelectorAll(".inspector-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === "draft"));
+    notify(`已在初稿面板显示第 ${item.chapterNumber} 章修订结果。`, "success");
+    return;
+  }
+  if (action === "apply") {
+    $("chapterTextInput").value = item.text;
+    $("revisionInstructionInput").value = "";
+    updateChapterWordStatus();
+    removePendingResult(item.id);
+    notify(`已把修订结果载入第 ${item.chapterNumber} 章编辑区，确认后请保存最终稿。`, "success");
+  }
+}
+
 function switchInspector(event) {
   const button = event.target.closest("button[data-inspector]");
   if (!button) return;
@@ -1643,20 +1905,27 @@ function switchInspector(event) {
 
 async function generateChapter() {
   if (!requireWork()) return;
+  const workId = state.selectedWorkId;
   const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
   if (state.task) {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
   }
-  const task = startTask("chapter", "生成当前章", `写稿 AI 正在处理第 ${chapterNumber} 章。`);
+  const task = startTask("chapter", "生成当前章", `写稿 AI 正在处理第 ${chapterNumber} 章。`, { workId, chapterNumber });
   try {
-    log(`写稿 AI 正在处理第 ${chapterNumber} 章...`);
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}/generate`, {
+    log(`写稿 AI 正在处理第 ${chapterNumber} 章...`, "info", { chapter: chapterNumber, task: task.title });
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/generate`, {
       method: "POST",
       body: { mode: $("generateModeInput").value, do_memory: false, task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (!editorIsShowing(workId, chapterNumber)) {
+      if (data.work_state && Number(state.selectedWorkId) === Number(workId)) applyWorkState(data.work_state);
+      log(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success");
+      return;
+    }
     if (data.final_text || data.draft) $("chapterTextInput").value = data.final_text || data.draft;
     updateChapterWordStatus();
     $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
@@ -1664,6 +1933,11 @@ async function generateChapter() {
     $("draftPreview").textContent = data.draft || "暂无初稿。";
     if (data.work_state) applyWorkState(data.work_state);
     await loadChapter(chapterNumber, "writing");
+    if (!editorIsShowing(workId, chapterNumber)) {
+      log(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success");
+      return;
+    }
     $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, $("memoryPreview").textContent || "暂无记忆卡。");
     log(`第 ${chapterNumber} 章生成完成。`);
@@ -1693,7 +1967,12 @@ function showManualQualityNotice(qualityGate) {
 
 async function saveChapterText() {
   if (!requireWork()) return;
-  const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("当前编辑区没有绑定到已载入章节，请先载入要保存的章节。", "warning");
+    return;
+  }
+  const { workId, chapterNumber, chapterId, updatedAt } = target;
   const currentText = $("chapterTextInput").value;
   const previousText = state.currentChapter?.final_text || "";
   const hasMemory = Boolean(String(state.currentChapter?.memory_json || "").trim());
@@ -1706,15 +1985,20 @@ async function saveChapterText() {
     );
   }
   try {
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}`, {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}`, {
       method: "PUT",
       body: {
+        chapter_id: chapterId,
+        updated_at: updatedAt,
         title: $("chapterTitleInput").value.trim(),
         final_text: currentText,
         invalidate_memory: invalidateMemory,
       },
     });
-    fillChapter(data);
+    if (Number(state.selectedWorkId) !== Number(workId)) return;
+    if (editorIsShowing(workId, chapterNumber)) {
+      fillChapter(data);
+    }
     if (!showManualQualityNotice(data.quality_gate)) {
       notify(`第 ${chapterNumber} 章最终稿已保存。`, "success");
     }
@@ -1726,8 +2010,15 @@ async function saveChapterText() {
 
 async function reviseWithInstruction() {
   if (!requireWork()) return;
-  const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("请先载入要修订的章节。", "warning");
+    return;
+  }
+  const { workId, chapterNumber, chapterId, updatedAt } = target;
   const instruction = $("revisionInstructionInput").value.trim();
+  const sourceText = $("chapterTextInput").value;
+  const chapterTitle = $("chapterTitleInput").value.trim();
   if (!instruction) {
     notify("请先填写修改意见。", "warning");
     return;
@@ -1736,16 +2027,29 @@ async function reviseWithInstruction() {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
   }
-  const task = startTask("revise", "按意见修订", `修订 AI 正在修改第 ${chapterNumber} 章。`);
+  const task = startTask("revise", "按意见修订", `修订 AI 正在修改第 ${chapterNumber} 章。`, { workId, chapterNumber });
   try {
     log("修订 AI 正在按意见修改正文...");
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}/revise`, {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/revise`, {
       method: "POST",
-      body: { instruction, current_text: $("chapterTextInput").value, task_id: task.id },
+      body: { instruction, current_text: sourceText, chapter_id: chapterId, updated_at: updatedAt, task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
-    $("chapterTextInput").value = data.revised_text || $("chapterTextInput").value;
+    const revisedText = data.revised_text || sourceText;
+    if (!editorIsShowing(workId, chapterNumber)) {
+      addPendingChapterResult({
+        workId,
+        chapterNumber,
+        title: chapterTitle,
+        kind: "revise",
+        text: revisedText,
+      });
+      log(`第 ${chapterNumber} 章修订完成，结果已暂存。`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章修订完成，结果已暂存。`, "success");
+      return;
+    }
+    $("chapterTextInput").value = revisedText;
     updateChapterWordStatus();
     $("revisionInstructionInput").value = "";
     log("修订完成，满意后请保存最终稿。");
@@ -1760,22 +2064,34 @@ async function reviseWithInstruction() {
 
 async function generateMemory() {
   if (!requireWork()) return;
-  const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("请先载入要生成记忆的章节。", "warning");
+    return;
+  }
+  const { workId, chapterNumber, chapterId, updatedAt } = target;
   if (state.task) {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
   }
-  const task = startTask("memory", "生成章节记忆", `记忆 AI 正在整理第 ${chapterNumber} 章的接力信息。`);
+  const task = startTask("memory", "生成章节记忆", `记忆 AI 正在整理第 ${chapterNumber} 章的接力信息。`, { workId, chapterNumber });
   try {
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}/memory`, {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/memory`, {
       method: "POST",
       body: { task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    if (!editorIsShowing(workId, chapterNumber)) {
+      if (data.work_state && Number(state.selectedWorkId) === Number(workId)) applyWorkState(data.work_state);
+      log(`第 ${chapterNumber} 章记忆已入库。`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章记忆已入库。`, "success");
+      return;
+    }
     if (data.work_state) applyWorkState(data.work_state);
     state.selectedChapter = chapterNumber;
     state.currentChapter = data.chapter || state.currentChapter;
+    if (data.chapter) setEditorOwner(data.chapter);
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "记忆卡已入库。");
     renderChapterLists();
     updateProgress();
@@ -1790,22 +2106,120 @@ async function generateMemory() {
 }
 
 async function deleteCurrentChapter() {
-  const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
-  await deleteChapterByNumber(chapterNumber);
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("请先载入要删除的章节。", "warning");
+    return;
+  }
+  await deleteChapterByNumber(target);
+}
+
+async function clearCurrentChapterText() {
+  if (!requireWork()) return;
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("请先载入要清空的章节。", "warning");
+    return;
+  }
+  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const ok = await confirmAction(
+    `确定清空第 ${chapterNumber} 章正文吗？细纲和章节行会保留，审稿、版本和记忆入库副作用会清理。`,
+    "清空正文",
+    "清空"
+  );
+  if (!ok) return;
+  try {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/clear-text`, {
+      method: "POST",
+      body: { chapter_id: chapterId, updated_at: updatedAt },
+    });
+    if (Number(state.selectedWorkId) !== Number(workId)) return;
+    applyWorkState(data);
+    if (editorIsShowing(workId, chapterNumber)) {
+      await loadChapter(chapterNumber, "writing");
+    }
+    log(`第 ${chapterNumber} 章正文已清空。`);
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function deleteChapterByNumber(chapterNumber) {
   if (!requireWork()) return;
-  const ok = await confirmAction(`确定删除第 ${chapterNumber} 章吗？相关正文、记忆和资料副作用也会清理。`, "删除章节", "删除");
+  const target = typeof chapterNumber === "object" ? chapterNumber : null;
+  const workId = target?.workId || state.selectedWorkId;
+  const targetChapterNumber = Number(target?.chapterNumber || chapterNumber);
+  const ok = await confirmAction(`确定删除第 ${targetChapterNumber} 章吗？相关正文、记忆和资料副作用也会清理。`, "删除章节", "删除");
   if (!ok) return;
   try {
-    const data = await api(`/api/works/${state.selectedWorkId}/chapters/${chapterNumber}`, { method: "DELETE" });
+    const body = target ? { chapter_id: target.chapterId, updated_at: target.updatedAt } : undefined;
+    const data = await api(`/api/works/${workId}/chapters/${targetChapterNumber}`, { method: "DELETE", body });
+    if (Number(state.selectedWorkId) !== Number(workId)) return;
     state.outlineSelection = { type: "full" };
     applyWorkState(data);
-    log(`第 ${chapterNumber} 章已删除。`);
+    if (Number(state.editor.workId) === Number(workId) && Number(state.editor.chapterNumber) === Number(targetChapterNumber)) clearEditor();
+    log(`第 ${targetChapterNumber} 章已删除。`);
   } catch (error) {
     showError(error);
   }
+}
+
+async function deleteChaptersFromCurrent() {
+  if (!requireWork()) return;
+  const target = loadedEditorTarget();
+  if (!target) {
+    notify("请先载入要删除的起始章节。", "warning");
+    return;
+  }
+  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const affected = (state.outline.chapters || [])
+    .map((chapter) => Number(chapter.chapter_number || 0))
+    .filter((number) => number >= chapterNumber)
+    .sort((a, b) => a - b);
+  if (!affected.length) {
+    notify(`第 ${chapterNumber} 章及之后没有可删除章节。`, "warning");
+    return;
+  }
+  const ok = await confirmAction(
+    `确定删除第 ${chapterNumber} 章及之后所有章节吗？将删除：${formatChapterRanges(toRanges(affected))}。相关正文、记忆和资料副作用也会清理。`,
+    "删除本章及之后",
+    "删除"
+  );
+  if (!ok) return;
+  try {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/delete-from`, {
+      method: "DELETE",
+      body: { chapter_id: chapterId, updated_at: updatedAt },
+    });
+    if (Number(state.selectedWorkId) !== Number(workId)) return;
+    state.outlineSelection = { type: "full" };
+    applyWorkState(data);
+    if (Number(state.editor.workId) === Number(workId) && Number(state.editor.chapterNumber) >= Number(chapterNumber)) clearEditor();
+    log(`已删除第 ${chapterNumber} 章及之后 ${data.deleted_count || affected.length} 个章节。`);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function toRanges(numbers) {
+  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+  const ranges = [];
+  let start = null;
+  let previous = null;
+  for (const number of sorted) {
+    if (start === null) {
+      start = number;
+      previous = number;
+    } else if (number === previous + 1) {
+      previous = number;
+    } else {
+      ranges.push([start, previous]);
+      start = number;
+      previous = number;
+    }
+  }
+  if (start !== null) ranges.push([start, previous]);
+  return ranges;
 }
 
 function buildLibraryTabs() {
