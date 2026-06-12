@@ -10,6 +10,18 @@ from app.utils.json_parser import json_dumps, parse_json_object
 CHAPTER_OUTLINE_FIELDS: list[tuple[str, str]] = [
     ("story_time", "故事时间"),
     ("opening_hook", "开篇钩子"),
+    ("continuity_debt", "承接债"),
+    ("debt_type", "承接类型"),
+    ("opening_mode", "开头方式"),
+    ("opening_subject", "开头主体"),
+    ("opening_trigger", "开头触发事件"),
+    ("time_or_environment_function", "时间/环境功能"),
+    ("previous_anchor", "上一章锚点"),
+    ("first_screen_conflict", "第一屏冲突"),
+    ("forbidden_opening", "禁止开头"),
+    ("reader_question_in", "入章问题"),
+    ("reader_answer_out", "本章回答"),
+    ("new_question_out", "新问题"),
     ("chapter_goal", "本章目标"),
     ("reader_expectation", "读者期待"),
     ("conflict", "核心冲突"),
@@ -22,6 +34,9 @@ CHAPTER_OUTLINE_FIELDS: list[tuple[str, str]] = [
     ("foreshadowing", "伏笔安排"),
     ("emotional_turn", "情绪转折"),
     ("emotional_rhythm", "情绪节奏"),
+    ("ending_external_anchor", "结尾外部锚点"),
+    ("next_opening_action", "下一章开场动作"),
+    ("next_continuity_debt", "下一章承接债"),
     ("handoff", "下一章接力棒"),
     ("forbidden", "本章禁止事项"),
 ]
@@ -201,6 +216,20 @@ def outline_quality_issues(chapter: dict[str, Any]) -> list[str]:
         issues.append("章节场景卡少于 3 个")
     if not detail.get("opening_hook", "").strip():
         issues.append("缺少开篇钩子")
+    if not detail.get("continuity_debt", "").strip() and int(detail.get("chapter_number") or 1) > 1:
+        issues.append("缺少承接债")
+    if not detail.get("opening_mode", "").strip():
+        issues.append("缺少开头方式")
+    if not detail.get("opening_trigger", "").strip():
+        issues.append("缺少开头触发事件")
+    if not detail.get("reader_question_in", "").strip():
+        issues.append("缺少入章问题")
+    if not detail.get("reader_answer_out", "").strip():
+        issues.append("缺少本章回答")
+    if not detail.get("new_question_out", "").strip():
+        issues.append("缺少新问题")
+    if not detail.get("next_continuity_debt", "").strip():
+        issues.append("缺少下一章承接债")
     if not detail.get("handoff", "").strip():
         issues.append("缺少下一章接力棒")
     generic_hits = [phrase for phrase in GENERIC_OUTLINE_PHRASES if phrase in combined]
@@ -213,7 +242,23 @@ def blocking_outline_issues(chapter: dict[str, Any]) -> list[str]:
     issues = outline_quality_issues(chapter)
     blockers = []
     for issue in issues:
-        if issue.startswith(("细纲为空", "细纲过短", "缺少结尾钩子", "缺少章节场景卡", "章节场景卡少于", "缺少开篇钩子", "缺少下一章接力棒", "细纲包含过多")):
+        if issue.startswith((
+            "细纲为空",
+            "细纲过短",
+            "缺少结尾钩子",
+            "缺少章节场景卡",
+            "章节场景卡少于",
+            "缺少开篇钩子",
+            "缺少承接债",
+            "缺少开头方式",
+            "缺少开头触发事件",
+            "缺少入章问题",
+            "缺少本章回答",
+            "缺少新问题",
+            "缺少下一章承接债",
+            "缺少下一章接力棒",
+            "细纲包含过多",
+        )):
             blockers.append(issue)
     return blockers
 

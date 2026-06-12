@@ -1230,6 +1230,7 @@ details.panel summary {
   background: #fffefa;
   box-shadow: 0 14px 28px rgba(23, 35, 38, 0.14);
   line-height: 1.5;
+  white-space: pre-line;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 

@@ -37,9 +37,16 @@ output_contract: 结构化数据
 - `handoff.active_object` 必须记录下一章可以直接拿来承接的物件、证据、命令、威胁、伤口、电话、书信、尸体、兵器、名单等；没有就写空字符串，不要编造。
 - `handoff.next_first_paragraph_task` 必须写成下一章第一段可以直接落笔的具体动作、对话、物件、威胁或现场状态。
 - `handoff.next_opening_must_continue` 和 `handoff.next_first_paragraph_task` 必须互相一致。
+- `handoff.next_continuity_debt` 必须写成下一章必须承接的具体未闭合内容，可以是对白、动作、物件、威胁、选择、证据、关系、缺席或环境异常；不要写“继续调查”“处理余波”“推进主线”。
+- `handoff.suggested_opening_modes` 写 2 到 4 个适合下一章的开头功能，例如物件、对白、异常、后果、反应、命令、缺席、冲突、时间压力、环境异常、人物动作。不要固定成一种。
+- `handoff.forbidden_next_opening` 必须结合本章结尾和最近章首，写出下一章禁止重复的开头方式，尤其防止“时辰/天气/环境铺垫”和“人物名 + 普通动作”变成模板。
 - 禁止把接力棒写成“继续调查”“处理余波”“承接冲突”“推进主线”这类抽象表达。
 - 如果本章结尾是情绪钩子，接力棒也必须落成具体外部动作，不能只写人物心情或意味悠长的判断。
 - `handoff.ending_style` 必须标注结尾类型，优先使用“动作中断、证据出现、关系逼问、威胁抵达、代价落地、选择逼近”等具体类型，不要使用“意味悠长”。
+- `handoff.last_visible_anchor` 必须记录最终稿最后一段附近最清楚的可见锚点，可以是外部动作、物件、证据、对白、威胁、命令、伤口、现场变化；不能写人物心情、命运感或氛围。
+- `handoff.next_opening_action` 必须写成下一章第一段可以直接执行的动作、对白、证据处理、威胁应对或关系逼问，并且要承接 `last_visible_anchor`。
+- `handoff.ending_anchor_type` 只能写具体结尾类型，例如证据出现、动作中断、威胁抵达、关系逼问、代价落地、选择逼近、命令抵达、现场异变。不要写“意味悠长”“氛围收束”“命运倒计时”。
+- 如果正文最后一段只有心理、氛围或抽象旁白，你必须从最后一个真实场景里提取一个可见锚点写入 `last_visible_anchor` 和 `next_opening_action`；如果文本里没有足够锚点，不要编造未来剧情，只记录最后已出现的具体人、物、话或动作。
 - `handoff.unresolved_questions` 应记录成下一章可承接的具体问题，不要写成抽象口号。
 - `handoff.current_conflict`、`handoff.open_conflict` 和 `handoff.active_object` 要优先服务下一章开头承接，不能只是章节总结。
 - 如果本章完成了某种情绪回报，也只在摘要中用事实体现，不要写营销式评价。
@@ -110,7 +117,13 @@ output_contract: 结构化数据
     "open_conflict": "",
     "next_first_paragraph_task": "",
     "forbidden_opening": "",
-    "ending_style": ""
+    "ending_style": "",
+    "last_visible_anchor": "",
+    "next_opening_action": "",
+    "ending_anchor_type": "",
+    "next_continuity_debt": "",
+    "suggested_opening_modes": [],
+    "forbidden_next_opening": ""
   }
 }
 ```
@@ -137,6 +150,12 @@ output_contract: 结构化数据
 - `handoff.next_first_paragraph_task`：下一章第一段必须执行的具体写作任务，必须比 `next_opening_must_continue` 更可落笔。
 - `handoff.forbidden_opening`：下一章禁止使用的开头方式，例如禁止跳到次日、禁止先写天气、禁止先写回忆。
 - `handoff.ending_style`：本章结尾类型，只能使用具体类型，不要写“意味悠长”。
+- `handoff.last_visible_anchor`：本章最后可见的外部锚点，只能写动作、对白、物件、证据、威胁、命令、伤势或现场变化。
+- `handoff.next_opening_action`：下一章第一段要直接执行的动作、对白、证据处理、威胁应对或关系逼问。
+- `handoff.ending_anchor_type`：结尾锚点类型，只能写证据出现、动作中断、威胁抵达、关系逼问、代价落地、选择逼近、命令抵达、现场异变等具体类型。
+- `handoff.next_continuity_debt`：下一章必须承接的未闭合内容，必须具体到人、物、话、证据、威胁、选择或现场变化。
+- `handoff.suggested_opening_modes`：下一章可选开头功能数组，写 2 到 4 个中文短词；不要只给“人物动作”。
+- `handoff.forbidden_next_opening`：下一章禁止重复的开头方式，用中文写清楚。
 - `ability_changes`：记录本章真实发生的能力变化、代价变化、限制变化或使用后果；没有就返回空数组。
 - `relationship_changes`：记录本章真实发生的人物关系变化；没有就返回空数组。
 - `historical_updates`：只在历史类作品中记录本章真实落地、后续不知道就会写错的历史信息；非历史类作品返回空数组。每项必须尽量包含 `category`、`name`、`content`、`source_type`、`certainty`、`fictionalized`、`chapter_impact`、`future_constraint`。`category` 可写官制、礼法、地名、交通、通信、服饰、器物、军制、宗族、刑律、称谓、虚构边界等。`certainty` 可写锁定、可考、半架空、虚构；`fictionalized` 用布尔值表示是否经过本书架空改造。

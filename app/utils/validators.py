@@ -25,6 +25,8 @@ def validate_work_plan(data: Any) -> list[str]:
     issues: list[str] = []
     if not isinstance(data.get("book_bible"), dict):
         issues.append("缺少 book_bible")
+    if not isinstance(data.get("book_contract"), dict):
+        issues.append("missing book_contract")
     if not _is_list(data.get("title_candidates"), 1):
         issues.append("缺少 title_candidates")
     if not _is_text(data.get("summary"), 20):
@@ -102,7 +104,23 @@ def validate_chapter_outlines(data: Any) -> list[str]:
             issues.append(f"第 {index} 章缺少 title")
         if not _is_text(chapter.get("outline"), 30):
             issues.append(f"第 {index} 章 outline 过短")
-        for key in ["story_time", "opening_hook", "reader_expectation", "conflict", "new_information", "chapter_payoff", "handoff"]:
+        for key in [
+            "story_time",
+            "opening_hook",
+            "continuity_debt",
+            "debt_type",
+            "opening_mode",
+            "opening_trigger",
+            "reader_question_in",
+            "reader_answer_out",
+            "new_question_out",
+            "next_continuity_debt",
+            "reader_expectation",
+            "conflict",
+            "new_information",
+            "chapter_payoff",
+            "handoff",
+        ]:
             if not _is_text(chapter.get(key)):
                 issues.append(f"第 {index} 章缺少 {key}")
         scene_cards = chapter.get("scene_cards")
@@ -178,7 +196,9 @@ def validate_memory_card(data: Any) -> list[str]:
         issues.append("handoff.next_opening_must_continue 不能为空")
     if not _is_text(handoff.get("forbidden_jump")):
         issues.append("handoff.forbidden_jump 不能为空")
-    for key in ["last_external_action", "open_conflict", "next_first_paragraph_task", "forbidden_opening"]:
+    for key in ["last_external_action", "open_conflict", "next_first_paragraph_task", "forbidden_opening", "next_continuity_debt", "forbidden_next_opening"]:
         if not _is_text(handoff.get(key)):
             issues.append(f"handoff.{key} 不能为空")
+    if not isinstance(handoff.get("suggested_opening_modes"), list):
+        issues.append("handoff.suggested_opening_modes 必须是数组")
     return issues

@@ -166,6 +166,12 @@ MEMORY_FIELD_LABELS = {
     "next_first_paragraph_task": "下一章第一段任务",
     "forbidden_opening": "禁用开头",
     "ending_style": "结尾类型",
+    "last_visible_anchor": "末尾可见锚点",
+    "next_opening_action": "下一章开场动作",
+    "ending_anchor_type": "结尾锚点类型",
+    "next_continuity_debt": "下一章承接债",
+    "suggested_opening_modes": "建议开头方式",
+    "forbidden_next_opening": "下一章禁用开头",
     "relationship_stage": "关系阶段",
     "secret_exposure": "秘密暴露",
     "arc_stage": "成长阶段",
@@ -306,6 +312,19 @@ def _format_book_bible(bible: dict[str, Any]) -> list[str]:
     return [f"{label}：{_text(bible.get(key))}" for label, key in fields]
 
 
+def _format_book_contract(contract: dict[str, Any]) -> list[str]:
+    fields = [
+        ("题材核心", "genre_core"),
+        ("读者承诺", "reader_promise"),
+        ("冲突发动机", "conflict_engine"),
+        ("章节回报", "chapter_payoff"),
+        ("开头偏好", "opening_preference"),
+        ("避雷", "avoid"),
+        ("语言质感", "language_texture"),
+    ]
+    return [f"{label}：{_text(contract.get(key))}" for label, key in fields]
+
+
 def _has_historical_profile(profile: Any) -> bool:
     return isinstance(profile, dict) and any(str(profile.get(key) or "").strip() for key in HISTORICAL_PROFILE_FIELDS)
 
@@ -395,6 +414,10 @@ def format_plan_readable(plan: dict[str, Any]) -> str:
     if isinstance(bible, dict) and bible:
         _section(lines, "作品圣经")
         lines.extend(_format_book_bible(bible))
+    contract = plan.get("book_contract")
+    if isinstance(contract, dict) and contract:
+        _section(lines, "题材契约卡")
+        lines.extend(_format_book_contract(contract))
     return "\n".join(lines).strip()
 
 
@@ -418,6 +441,10 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
     if isinstance(bible, dict) and bible:
         _section(lines, "作品圣经")
         lines.extend(_format_book_bible(bible))
+    contract = bundle.get("book_contract")
+    if isinstance(contract, dict) and contract:
+        _section(lines, "题材契约卡")
+        lines.extend(_format_book_contract(contract))
 
     characters = [item for item in as_list(bundle.get("characters")) if isinstance(item, dict)]
     _section(lines, "人物资料")
@@ -560,6 +587,10 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
     if isinstance(bible, dict) and bible:
         _section(lines, "作品圣经")
         lines.extend(_format_book_bible(bible))
+    contract = context.get("genre_contract")
+    if isinstance(contract, dict) and contract:
+        _section(lines, "题材契约卡")
+        lines.extend(_format_book_contract(contract))
     history_specialist = context.get("history_specialist")
     if isinstance(history_specialist, dict) and history_specialist.get("enabled"):
         _section(lines, "历史专项")
@@ -772,6 +803,12 @@ def format_memory_readable(memory: dict[str, Any] | None) -> str:
             ("禁止跳过", "forbidden_jump"),
             ("禁用开头", "forbidden_opening"),
             ("结尾类型", "ending_style"),
+            ("末尾可见锚点", "last_visible_anchor"),
+            ("下一章开场动作", "next_opening_action"),
+            ("结尾锚点类型", "ending_anchor_type"),
+            ("下一章承接债", "next_continuity_debt"),
+            ("建议开头方式", "suggested_opening_modes"),
+            ("下一章禁用开头", "forbidden_next_opening"),
         ]
         for label, key in labels:
             value = handoff.get(key)

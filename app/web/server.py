@@ -27,6 +27,7 @@ from app.utils.formatters import (
     format_project_readable,
     format_review_readable,
 )
+from app.utils.context_filter import context_for_memory, context_for_reviser
 from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.text_check import manuscript_quality_report, quality_summary
@@ -567,6 +568,7 @@ def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -
         "memory": result.get("memory"),
         "memory_readable": format_memory_readable(result.get("memory")),
         "quality_gate": result.get("quality_gate", {}),
+        "problem_draft": bool(result.get("problem_draft")),
         "work_state": _work_state(work_id),
     }
 
@@ -575,13 +577,35 @@ def _chapter_task_preview(result: dict[str, Any]) -> str:
     quality = result.get("quality_gate")
     if not isinstance(quality, dict):
         return ""
+    if quality.get("problem_draft"):
+        draft = quality.get("draft") if isinstance(quality.get("draft"), dict) else {}
+        blockers = quality.get("blockers") or draft.get("blockers") or []
+        warnings = draft.get("warnings") or []
+        chars = draft.get("visible_chars") or 0
+        issues = _quality_issue_lines([*blockers, *warnings])
+        detail = "\n" + "\n".join(issues) if issues else ""
+        return f"问题草稿已保存：初稿约 {chars} 字符，阻断 {len(blockers)} 项，警告 {len(warnings)} 项。{detail}"
     final = quality.get("final")
     if not isinstance(final, dict):
         return str(quality.get("summary") or "")[:300]
     blockers = final.get("blockers") or []
     warnings = final.get("warnings") or []
     chars = final.get("visible_chars") or 0
-    return f"质量检查：终稿约 {chars} 字符，阻断 {len(blockers)} 项，警告 {len(warnings)} 项。"
+    issues = _quality_issue_lines([*blockers, *warnings])
+    detail = "\n" + "\n".join(issues) if issues else ""
+    return f"质量检查：终稿约 {chars} 字符，阻断 {len(blockers)} 项，警告 {len(warnings)} 项。{detail}"
+
+
+def _quality_issue_lines(values: list[Any]) -> list[str]:
+    lines = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip().rstrip("。！？；;, ")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        lines.append(f"{len(lines) + 1}. {text}")
+    return lines
 
 
 def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -632,6 +656,18 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
         outline_json = {}
     for key in [
         "story_time",
+        "continuity_debt",
+        "debt_type",
+        "opening_mode",
+        "opening_subject",
+        "opening_trigger",
+        "time_or_environment_function",
+        "previous_anchor",
+        "first_screen_conflict",
+        "forbidden_opening",
+        "reader_question_in",
+        "reader_answer_out",
+        "new_question_out",
         "chapter_goal",
         "reader_expectation",
         "conflict",
@@ -644,6 +680,9 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
         "foreshadowing",
         "emotional_turn",
         "emotional_rhythm",
+        "ending_external_anchor",
+        "next_opening_action",
+        "next_continuity_debt",
         "forbidden",
         "handoff",
         "opening_hook",
@@ -681,7 +720,8 @@ def _generate_memory(
     if not final_text:
         raise ValueError("当前章节没有已保存最终稿，无法生成记忆。")
     context = STATE.workflow.build_chapter_context(work_id, chapter_number)
-    memory = STATE.workflow.memory.make_memory_card(context, final_text)
+    memory_context = context_for_memory(context)
+    memory = STATE.workflow.memory.make_memory_card(memory_context, final_text)
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：章节记忆已返回，但未入库。")
     memory = STATE.workflow.normalize_output_names(work_id, memory)
@@ -697,7 +737,7 @@ def _generate_memory(
         agent_name="memory",
         model=STATE.workflow.client.model_for("memory"),
         prompt_name="memory_prompt.md",
-        input_preview=json_dumps({"context": context, "final_text": final_text[:3000]}),
+        input_preview=json_dumps({"context": memory_context, "final_text": final_text[:3000]}),
         output=json_dumps(memory),
         **STATE.workflow.client.last_usage("memory"),
     )
@@ -725,23 +765,43 @@ def _revise_chapter_with_instruction(
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     context = STATE.workflow.build_chapter_context(work_id, chapter_number)
-    revised = STATE.workflow.reviser.revise_with_instruction(context, current_text, instruction)
+    reviser_context = context_for_reviser(context)
+    revised = STATE.workflow.reviser.revise_with_instruction(reviser_context, current_text, instruction)
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：修订稿已返回，但未写入界面。")
+    latest_chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    _validate_chapter_request(work_id, chapter_number, body, latest_chapter, require_identity=True)
     revised = STATE.workflow.normalize_output_names(work_id, revised)
-    revised = strip_chapter_heading(revised, chapter_number, chapter.get("title"))
+    revised = strip_chapter_heading(revised, chapter_number, latest_chapter.get("title"))
+    memory_invalidated = bool(str(latest_chapter.get("memory_json") or "").strip())
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
+    STATE.repo.save_final_after_manual_edit(
+        work_id,
+        chapter["id"],
+        revised,
+        title=latest_chapter.get("title") or f"第{chapter_number}章",
+        ending_hook=latest_chapter.get("ending_hook") or "",
+        handoff=latest_chapter.get("handoff") or "",
+        memory_json=latest_chapter.get("memory_json") or "",
+        invalidate_memory=memory_invalidated,
+    )
     STATE.repo.log_agent_run(
         work_id=work_id,
         chapter_id=chapter["id"],
         agent_name="reviser",
         model=STATE.workflow.client.model_for("reviser"),
         prompt_name="reviser_prompt.md",
-        input_preview=json_dumps({"context": context, "instruction": instruction, "current_text": current_text[:3000]}),
+        input_preview=json_dumps({"context": reviser_context, "instruction": instruction, "current_text": current_text[:3000]}),
         output=revised,
         **STATE.workflow.client.last_usage("reviser"),
     )
-    return {**_chapter_state(work_id, chapter_number), "revised_text": revised}
+    return {
+        **_chapter_state(work_id, chapter_number),
+        "revised_text": revised,
+        "saved": True,
+        "memory_invalidated": memory_invalidated,
+        "work_state": _work_state(work_id),
+    }
 
 
 def _outline_data(work_id: int) -> dict[str, Any]:

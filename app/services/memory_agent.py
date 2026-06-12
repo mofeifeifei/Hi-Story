@@ -18,6 +18,7 @@ class MemoryAgent(BaseAgent):
         user_prompt = (
             "请根据最终稿生成章节记忆卡，输出供程序解析的合法 JSON。\n\n"
             "重点：handoff 必须生成可让下一章第一段直接承接的章节交接口，不能只写抽象悬念或氛围总结。\n\n"
+            "handoff 必须包含 next_continuity_debt、suggested_opening_modes、forbidden_next_opening：下一章承接债要具体，建议开头方式要给出 2 到 4 种可选功能，禁用开头要结合本章结尾和最近开头避免重复。\n\n"
             "同时：人物状态、伏笔、世界约束和接力棒要能服务下一章的 minimal_memory_pack，只保留不知道就会写错的信息。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"

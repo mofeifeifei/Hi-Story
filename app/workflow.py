@@ -9,7 +9,13 @@ from app.services.planner_agent import PlannerAgent
 from app.services.reviewer_agent import ReviewerAgent
 from app.services.reviser_agent import ReviserAgent
 from app.services.writer_agent import WriterAgent
-from app.utils.context_filter import filter_chapter_bundle
+from app.utils.context_filter import (
+    compact_genre_contract,
+    context_for_memory,
+    context_for_reviewer,
+    context_for_reviser,
+    filter_chapter_bundle,
+)
 from app.utils.history import historical_context_for_bundle
 from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.name_normalizer import aliases_to_official_map, normalize_bundle_names, normalize_names
@@ -24,8 +30,10 @@ from app.utils.outline_utils import (
 from app.utils.text_check import (
     DEFAULT_TEMPLATE_BLACKLIST,
     blacklist_for_prompt,
+    detect_opening_mode,
     first_paragraph,
     manuscript_quality_report,
+    opening_ending_repair_issues,
     opening_pattern_flags,
     opening_pattern_label,
     quality_summary,
@@ -366,7 +374,7 @@ class NovelWorkflow:
             )
         context = {
             "work": compact_work,
-            "book_contract": bundle.get("book_contract", {}),
+            "genre_contract": compact_genre_contract(bundle.get("book_contract", {})),
             "book_bible": bundle.get("book_bible", {}),
             "characters": characters,
             "world_rules": bundle.get("world_rules", []),
@@ -455,11 +463,17 @@ class NovelWorkflow:
         if stop_requested():
             raise RuntimeError("任务已停止：第 {0} 章初稿已返回，但未保存。".format(chapter_number))
         draft_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, draft)
-        if draft_repeat_warnings:
-            raise ValueError("本章初稿疑似重复，已停止保存：" + "；".join(draft_repeat_warnings))
         draft = self.normalize_output_names(work_id, draft)
         draft_quality = self._manuscript_quality_report("初稿", context, chapter, draft)
-        self._raise_quality_blockers(chapter_number, draft_quality)
+        if draft_repeat_warnings:
+            draft_quality["blockers"] = self._dedupe_texts(
+                [
+                    *self._as_list(draft_quality.get("blockers")),
+                    *[f"初稿疑似重复：{warning}" for warning in draft_repeat_warnings],
+                ]
+            )
+        draft_repair_issues = opening_ending_repair_issues(draft_quality) if (do_review and do_revise) else []
+        draft_blockers = self._quality_blockers(draft_quality, ignored=draft_repair_issues)
         if str(chapter.get("memory_json") or "").strip():
             self.repo.clear_chapter_memory(work_id, chapter["id"])
             chapter = self.repo.get_chapter(work_id, chapter_number)
@@ -474,10 +488,23 @@ class NovelWorkflow:
             output=draft,
             **self.client.last_usage("writer"),
         )
+        if draft_blockers:
+            review = self._local_quality_review(draft_quality)
+            self.repo.save_review(work_id, chapter["id"], review)
+            return self._problem_draft_result(
+                work_id=work_id,
+                chapter=chapter,
+                chapter_number=chapter_number,
+                draft=draft,
+                review=review,
+                draft_quality=draft_quality,
+                blockers=draft_blockers,
+            )
 
         review: dict[str, Any] | None = None
         if do_review:
-            review = self.reviewer.review_chapter(context, draft)
+            reviewer_context = context_for_reviewer(context)
+            review = self.reviewer.review_chapter(reviewer_context, draft)
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章审稿已返回，但未继续修订。".format(chapter_number))
             review = self.normalize_output_names(work_id, review)
@@ -489,14 +516,15 @@ class NovelWorkflow:
                 agent_name="reviewer",
                 model=self.client.model_for("reviewer"),
                 prompt_name="reviewer_prompt.md",
-                input_preview=json_dumps({"context": context, "draft": draft[:3000]}),
+                input_preview=json_dumps({"context": reviewer_context, "draft": draft[:3000]}),
                 output=json_dumps(review),
                 **self.client.last_usage("reviewer"),
             )
 
         final_text = draft
         if do_revise and review is not None:
-            final_text = self.reviser.revise_chapter(context, draft, review)
+            reviser_context = context_for_reviser(context)
+            final_text = self.reviser.revise_chapter(reviser_context, draft, review)
             final_text = strip_chapter_heading(final_text, chapter_number, chapter.get("title"))
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章修订稿已返回，但未保存最终稿。".format(chapter_number))
@@ -505,6 +533,22 @@ class NovelWorkflow:
                 raise ValueError("本章修订稿疑似重复，已停止保存：" + "；".join(final_repeat_warnings))
             final_text = self.normalize_output_names(work_id, final_text)
             final_quality = self._manuscript_quality_report("修订稿", context, chapter, final_text)
+            if self._revision_degraded_opening(draft_quality, final_quality):
+                final_text = draft
+                final_quality = draft_quality
+            focus_issues = opening_ending_repair_issues(final_quality)
+            if focus_issues:
+                final_text = self._revise_opening_ending_once(
+                    work_id,
+                    chapter,
+                    chapter_number,
+                    context,
+                    reviser_context,
+                    final_text,
+                    focus_issues,
+                    should_stop=stop_requested,
+                )
+                final_quality = self._manuscript_quality_report("首尾专项修订稿", context, chapter, final_text)
             self._raise_quality_blockers(chapter_number, final_quality)
             self.repo.log_agent_run(
                 work_id=work_id,
@@ -512,7 +556,7 @@ class NovelWorkflow:
                 agent_name="reviser",
                 model=self.client.model_for("reviser"),
                 prompt_name="reviser_prompt.md",
-                input_preview=json_dumps({"context": context, "review": review, "draft": draft[:3000]}),
+                input_preview=json_dumps({"context": reviser_context, "review": review, "draft": draft[:3000]}),
                 output=final_text,
                 **self.client.last_usage("reviser"),
             )
@@ -524,7 +568,8 @@ class NovelWorkflow:
         memory_card: dict[str, Any] | None = None
         if do_memory:
             refreshed_context = self.build_chapter_context(work_id, chapter_number)
-            memory_card = self.memory.make_memory_card(refreshed_context, final_text)
+            memory_context = context_for_memory(refreshed_context)
+            memory_card = self.memory.make_memory_card(memory_context, final_text)
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章记忆卡已返回，但未入库。".format(chapter_number))
             memory_card = self.normalize_output_names(work_id, memory_card)
@@ -540,7 +585,7 @@ class NovelWorkflow:
                 agent_name="memory",
                 model=self.client.model_for("memory"),
                 prompt_name="memory_prompt.md",
-                input_preview=json_dumps({"context": refreshed_context, "final_text": final_text[:3000]}),
+                input_preview=json_dumps({"context": memory_context, "final_text": final_text[:3000]}),
                 output=json_dumps(memory_card),
                 **self.client.last_usage("memory"),
             )
@@ -581,11 +626,148 @@ class NovelWorkflow:
             stage=stage,
         )
 
+    def _revise_opening_ending_once(
+        self,
+        work_id: int,
+        chapter: dict[str, Any],
+        chapter_number: int,
+        context: dict[str, Any],
+        reviser_context: dict[str, Any],
+        final_text: str,
+        issues: list[str],
+        *,
+        should_stop: Callable[[], bool],
+    ) -> str:
+        revised = self.reviser.revise_opening_ending(reviser_context, final_text, issues)
+        revised = strip_chapter_heading(revised, chapter_number, chapter.get("title"))
+        if should_stop():
+            raise RuntimeError("任务已停止：第 {0} 章首尾专项修订稿已返回，但未保存最终稿。".format(chapter_number))
+        repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, revised)
+        if repeat_warnings:
+            raise ValueError("本章首尾专项修订稿疑似重复，已停止保存：" + "；".join(repeat_warnings))
+        revised = self.normalize_output_names(work_id, revised)
+        self.repo.log_agent_run(
+            work_id=work_id,
+            chapter_id=chapter["id"],
+            agent_name="reviser",
+            model=self.client.model_for("reviser"),
+            prompt_name="reviser_prompt.md",
+            input_preview=json_dumps({"context": reviser_context, "focus_issues": issues, "draft": final_text[:3000]}),
+            output=revised,
+            **self.client.last_usage("reviser"),
+        )
+        return revised
+
     @staticmethod
-    def _raise_quality_blockers(chapter_number: int, report: dict[str, Any]) -> None:
-        blockers = [str(item) for item in report.get("blockers") or [] if str(item).strip()]
+    def _revision_degraded_opening(draft_quality: dict[str, Any], final_quality: dict[str, Any]) -> bool:
+        draft_issues = opening_ending_repair_issues(draft_quality)
+        final_issues = opening_ending_repair_issues(final_quality)
+        if not final_issues:
+            return False
+        if not draft_issues:
+            return True
+
+        draft_blockers = [
+            str(item)
+            for item in draft_quality.get("blockers", [])
+            if str(item).strip() and any(marker in str(item) for marker in ("章首", "开篇", "第一屏", "承接债", "结尾", "章末"))
+        ]
+        final_blockers = [
+            str(item)
+            for item in final_quality.get("blockers", [])
+            if str(item).strip() and any(marker in str(item) for marker in ("章首", "开篇", "第一屏", "承接债", "结尾", "章末"))
+        ]
+        if len(final_blockers) > len(draft_blockers):
+            return True
+        if len(final_issues) > len(draft_issues):
+            return True
+        return False
+
+    @staticmethod
+    def _quality_blockers(report: dict[str, Any] | None, *, ignored: list[str] | None = None) -> list[str]:
+        ignored_set = {str(item).strip() for item in (ignored or []) if str(item).strip()}
+        if not isinstance(report, dict):
+            return []
+        return [
+            str(item)
+            for item in report.get("blockers") or []
+            if str(item).strip() and str(item).strip() not in ignored_set
+        ]
+
+    @staticmethod
+    def _raise_quality_blockers(chapter_number: int, report: dict[str, Any], *, ignored: list[str] | None = None) -> None:
+        blockers = NovelWorkflow._quality_blockers(report, ignored=ignored)
         if blockers:
             raise ValueError(f"第 {chapter_number} 章未通过质量闸门：" + "；".join(blockers))
+
+    @staticmethod
+    def _local_quality_review(report: dict[str, Any]) -> dict[str, Any]:
+        blockers = NovelWorkflow._quality_blockers(report)
+        warnings = [str(item) for item in report.get("warnings") or [] if str(item).strip()]
+        problems = [
+            {
+                "type": "quality_gate",
+                "severity": "high",
+                "evidence": item,
+                "why_it_matters": "该问题会影响章节承接、正文完整度或读者阅读体验。",
+            }
+            for item in blockers
+        ]
+        problems.extend(
+            {
+                "type": "quality_gate",
+                "severity": "medium",
+                "evidence": item,
+                "why_it_matters": "该问题暂未阻断保存，但建议在定稿前处理。",
+            }
+            for item in warnings
+        )
+        return {
+            "continuity_score": 45 if blockers else 70,
+            "character_score": 60,
+            "emotion_score": 55,
+            "rhythm_score": 55,
+            "foreshadow_score": 55,
+            "payoff_score": 55,
+            "hook_score": 45 if blockers else 70,
+            "historical_score": 60,
+            "problems": problems,
+            "suggestions": [
+                "这份内容已保存为问题草稿，请先处理质量闸门列出的阻断项，再保存为最终稿。",
+                "优先检查章首承接、章节任务完成度、正文完整度和章末牵引。",
+            ],
+            "template_hits": report.get("template_hits") or [],
+            "risk_flags": report.get("risk_flags") or [],
+            "length_problem": report.get("length_problem") or "",
+            "repeat_risk": [item for item in blockers if "重复" in item],
+        }
+
+    def _problem_draft_result(
+        self,
+        *,
+        work_id: int,
+        chapter: dict[str, Any],
+        chapter_number: int,
+        draft: str,
+        review: dict[str, Any],
+        draft_quality: dict[str, Any],
+        blockers: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "chapter": self.repo.get_chapter(work_id, chapter_number),
+            "draft": draft,
+            "review": review,
+            "final_text": "",
+            "memory": None,
+            "problem_draft": True,
+            "quality_gate": {
+                "problem_draft": True,
+                "draft": draft_quality,
+                "final": {},
+                "blockers": blockers,
+                "summary": f"问题草稿已保存：第 {chapter_number} 章初稿未通过质量闸门，阻断 {len(blockers)} 项。",
+            },
+        }
 
     @staticmethod
     def _merge_quality_report_into_review(review: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
@@ -719,6 +901,7 @@ class NovelWorkflow:
                     "opening": opening,
                     "pattern": opening_pattern_label(opening),
                     "pattern_flags": flags,
+                    "opening_mode": detect_opening_mode(opening),
                 }
             )
         return openings
@@ -728,6 +911,8 @@ class NovelWorkflow:
         recent = openings[-3:]
         flag_sets = [set(item.get("pattern_flags") or []) for item in recent if item.get("pattern_flags")]
         repeated_flags = sorted(set.intersection(*flag_sets)) if len(flag_sets) >= 2 else []
+        modes = [str(item.get("opening_mode") or "").strip() for item in recent if item.get("opening_mode")]
+        repeated_mode = modes[-1] if len(modes) >= 2 and modes[-1] == modes[-2] else ""
         if repeated_flags:
             instruction = (
                 "最近章节章首已经连续出现"
@@ -735,14 +920,21 @@ class NovelWorkflow:
                 + "开头。本章第一句禁止再用时辰、地名、天气、晨雾、钟鼓、日光、夜色等静态信息起笔；"
                 "必须从上一章留下的人物动作、对白、证据、威胁、物件变化或冲突后果直接切入。"
             )
+        elif repeated_mode:
+            instruction = (
+                f"最近章节章首开头方式连续接近“{repeated_mode}”。本章必须换成不同 opening_mode，"
+                "例如物件、对白、异常、后果、反应、命令、缺席、冲突、时间压力或环境异常中的另一种，并让开头触发新事件。"
+            )
         else:
             instruction = (
-                "章首优先从人物动作、对白、证据、威胁、物件变化或冲突后果切入；"
-                "不要为了古风氛围先写时辰、地点、天气或环境陈列。"
+                "章首可用物件、对白、异常、后果、反应、命令、缺席、冲突、时间压力、环境异常或人物动作；"
+                "不要固定成主角名字加普通动作，也不要为了古风氛围先写时辰、地点、天气或环境陈列。"
             )
         return {
             "recent_opening_count": len(openings),
             "repeated_opening_flags": repeated_flags,
+            "recent_opening_modes": modes,
+            "repeated_opening_mode": repeated_mode,
             "instruction": instruction,
         }
 
@@ -753,11 +945,13 @@ class NovelWorkflow:
         required_opening = (
             handoff.get("next_first_paragraph_task")
             or handoff.get("next_opening_must_continue")
+            or handoff.get("next_continuity_debt")
             or previous_chapter.get("ending_hook")
             or ""
         )
         forbidden_opening = (
-            handoff.get("forbidden_opening")
+            handoff.get("forbidden_next_opening")
+            or handoff.get("forbidden_opening")
             or handoff.get("forbidden_jump")
             or "禁止跳过上一章结尾，禁止先写天气、时间跳转、回忆或背景说明。"
         )
@@ -771,6 +965,7 @@ class NovelWorkflow:
             "forbidden_opening": forbidden_opening,
             "must_use_concrete_anchor": (
                 handoff.get("active_object")
+                or handoff.get("last_visible_anchor")
                 or handoff.get("last_external_action")
                 or handoff.get("last_spoken_line")
                 or handoff.get("current_conflict")

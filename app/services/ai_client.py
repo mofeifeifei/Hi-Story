@@ -583,6 +583,15 @@ class AIClient:
                 "forbidden_drift": ["禁止把主角写成无代价万能解法", "禁止跳过关键冲突直接给结果"],
                 "ending_direction": "结局回收主线问题、人物成长和关键伏笔，保留与题材相符的余味。",
             },
+            "book_contract": {
+                "genre_core": genre_text,
+                "reader_promise": f"读者期待主角围绕“{idea}”持续破局，并看到每章都有可见推进。",
+                "conflict_engine": "阶段目标、外部阻力、信息差、关系试探和选择代价。",
+                "chapter_payoff": "每章至少给出一个事件推进、信息增量、关系变化、胜负变化或新问题。",
+                "opening_preference": "优先从证据、命令、威胁、关系逼问、异常现场或上一章后果切入。",
+                "avoid": "避免泛氛围开头、普通动作开头、空泛章末和无代价万能解法。",
+                "language_texture": "具体、克制、紧凑，少用空泛感慨和模板化总结。",
+            },
             "title_candidates": self._mock_title_candidates(title, idea, genre_text),
             "summary": f"{idea}。在{genre_text}框架下，主角从一个具体问题切入，逐步卷入更大的长期主线，并在选择、关系和代价中完成成长。",
             "core_selling_points": [
@@ -742,10 +751,15 @@ class AIClient:
             "关键机会即将消失，主角必须在保全自己和推进主线之间做选择。",
         ]
         scenes = ["主线事件现场", "临时会面地点", "关键资料所在处", "冲突公开爆发点", "下一阶段入口"]
+        opening_modes = ["物件", "冲突", "异常", "对白", "命令"]
+        debt_types = ["证据", "威胁", "选择", "关系", "物件"]
+        opening_subjects = ["证据", "对手", "异常现场", partner, "命令文书"]
         chapters = []
         for number in range(start, start + count):
             index = (number - 1) % len(base_titles)
             title = base_titles[index]
+            opening_trigger = f"“{title}”相关线索出现新的可见变化，迫使{protagonist}立刻处理。"
+            next_debt = f"下一章必须承接门外索要“{title}”证据的人，并处理{protagonist}是否交出证据的选择。"
             chapters.append(
                 {
                     "chapter_number": number,
@@ -753,6 +767,15 @@ class AIClient:
                     "story_time": f"第{number}章对应的故事时间段，紧接上一章后推进",
                     "title": title,
                     "opening_hook": f"前 300 字从{protagonist}发现“{title}”相关异常开始，让冲突和行动先出现，再补充背景。",
+                    "continuity_debt": f"承接上一章留下的“{title}”相关证据尚未处理完的问题。",
+                    "debt_type": debt_types[index],
+                    "opening_mode": opening_modes[index],
+                    "opening_subject": opening_subjects[index],
+                    "opening_trigger": opening_trigger,
+                    "time_or_environment_function": "如果使用时间或环境，只能作为证据即将被转移的压力来源，不能单纯烘托氛围。",
+                    "previous_anchor": f"上一章末尾留下的可见锚点是“{title}”相关证据尚未处理完。",
+                    "first_screen_conflict": f"{protagonist}发现“{title}”相关证据被人动过，必须立刻判断是否暴露。",
+                    "forbidden_opening": "禁止先写天气、时辰、醒来、普通整备或照抄 story_time。",
                     "outline": (
                         f"第{number}章在{scenes[index]}展开。{goals[index]}主角需要面对的阻力是："
                         f"{conflicts[index]}本章必须给出一个新的行动结果，同时保留尚未解决的下一步问题。"
@@ -781,6 +804,9 @@ class AIClient:
                         },
                     ],
                     "chapter_goal": goals[index],
+                    "reader_question_in": f"读者会想知道{protagonist}能否处理“{title}”证据带来的新压力。",
+                    "reader_answer_out": f"本章回答：{protagonist}找到一个可执行切口，但必须付出新的关系或风险代价。",
+                    "new_question_out": f"门外索要证据的人到底代表谁，{protagonist}该交出还是藏起证据？",
                     "reader_expectation": f"读者会期待{protagonist}如何把零散信息转化成可执行行动。",
                     "conflict": conflicts[index],
                     "main_scene": scenes[index],
@@ -792,6 +818,9 @@ class AIClient:
                     "foreshadowing": "早期异常会在后续章节被重新解释，但本章不能提前揭开最终答案。",
                     "emotional_turn": "从发现异常的压迫感，转向必须抢在证据被清理前行动的紧迫感。",
                     "emotional_rhythm": "开场压迫，中段推理拉扯，结尾以新证据制造紧迫感。",
+                    "ending_external_anchor": f"门外敲门声逼近，桌上的“{title}”证据仍压在{protagonist}手下。",
+                    "next_opening_action": f"下一章第一段直接写{protagonist}如何处理门外索要证据的人和桌上的“{title}”证据。",
+                    "next_continuity_debt": next_debt,
                     "ending_hook": f"{protagonist}刚把“{title}”相关证据按到灯下，门外就有人敲门索要这份证据。",
                     "handoff": f"下一章第一段必须从门外敲门声和桌上的“{title}”证据承接，写{protagonist}如何保护或交出证据；禁止跳到次日或直接给出最终答案。",
                     "forbidden": "禁止临时新增万能设定解决冲突，禁止重复同一开场场景。",
@@ -941,5 +970,11 @@ class AIClient:
                 "next_first_paragraph_task": f"下一章第一段从{protagonist}继续查看灯下线索写起，让{partner}立刻追问或阻止，不能先跳时间。",
                 "forbidden_opening": "禁止以天气、次日、回忆、背景介绍或新地点开头。",
                 "ending_style": "证据出现",
+                "last_visible_anchor": "灯下的关键线索",
+                "next_opening_action": f"{protagonist}继续查看灯下线索，{partner}立刻追问或阻止。",
+                "ending_anchor_type": "证据出现",
+                "next_continuity_debt": f"下一章必须承接灯下线索尚未验证完、{partner}正在追问的现场。",
+                "suggested_opening_modes": ["物件", "对白", "异常"],
+                "forbidden_next_opening": "禁止以天气、次日、回忆、背景介绍、新地点或普通人物动作开头。",
             },
         }

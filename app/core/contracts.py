@@ -23,6 +23,7 @@ class ContractError(ValueError):
 def normalize_work_plan(data: Any) -> dict[str, Any]:
     plan = _object_or_empty(data)
     plan.setdefault("book_bible", {})
+    plan.setdefault("book_contract", {})
     plan.setdefault("title_candidates", [])
     plan.setdefault("summary", "")
     plan.setdefault("core_selling_points", [])
@@ -76,6 +77,18 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("scene_cards", [])
         item.setdefault("story_time", "")
         item.setdefault("opening_hook", "")
+        item.setdefault("continuity_debt", "")
+        item.setdefault("debt_type", "")
+        item.setdefault("opening_mode", "")
+        item.setdefault("opening_subject", "")
+        item.setdefault("opening_trigger", "")
+        item.setdefault("time_or_environment_function", "")
+        item.setdefault("previous_anchor", "")
+        item.setdefault("first_screen_conflict", "")
+        item.setdefault("forbidden_opening", "")
+        item.setdefault("reader_question_in", "")
+        item.setdefault("reader_answer_out", "")
+        item.setdefault("new_question_out", "")
         item.setdefault("chapter_goal", "")
         item.setdefault("reader_expectation", "")
         item.setdefault("conflict", "")
@@ -88,6 +101,9 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("foreshadowing", "")
         item.setdefault("emotional_turn", "")
         item.setdefault("emotional_rhythm", "")
+        item.setdefault("ending_external_anchor", "")
+        item.setdefault("next_opening_action", "")
+        item.setdefault("next_continuity_debt", "")
         item.setdefault("ending_hook", "")
         item.setdefault("handoff", "")
         item.setdefault("forbidden", "")
@@ -166,14 +182,35 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     handoff.setdefault("next_first_paragraph_task", handoff.get("next_opening_must_continue", ""))
     handoff.setdefault("forbidden_opening", handoff.get("forbidden_jump", ""))
     handoff.setdefault("ending_style", "")
+    handoff.setdefault("next_continuity_debt", handoff.get("next_first_paragraph_task", ""))
+    handoff.setdefault("suggested_opening_modes", [])
+    handoff.setdefault("forbidden_next_opening", handoff.get("forbidden_opening", ""))
     if ending_hook and not str(handoff.get("next_opening_must_continue") or "").strip():
         handoff["next_opening_must_continue"] = f"承接本章结尾钩子：{ending_hook}"
     if not str(handoff.get("next_first_paragraph_task") or "").strip():
         handoff["next_first_paragraph_task"] = handoff.get("next_opening_must_continue", "")
     if not str(handoff.get("forbidden_opening") or "").strip():
         handoff["forbidden_opening"] = handoff.get("forbidden_jump") or "禁止跳过上一章结尾，禁止先写天气、时间跳转、回忆或背景说明。"
+    if not str(handoff.get("forbidden_next_opening") or "").strip():
+        handoff["forbidden_next_opening"] = handoff.get("forbidden_opening", "")
     if not str(handoff.get("open_conflict") or "").strip():
         handoff["open_conflict"] = handoff.get("current_conflict", "")
+    if not str(handoff.get("last_visible_anchor") or "").strip():
+        handoff["last_visible_anchor"] = (
+            handoff.get("last_external_action")
+            or handoff.get("active_object")
+            or handoff.get("last_spoken_line")
+            or handoff.get("open_conflict")
+            or ""
+        )
+    if not str(handoff.get("next_opening_action") or "").strip():
+        handoff["next_opening_action"] = handoff.get("next_first_paragraph_task") or handoff.get("next_opening_must_continue", "")
+    if not str(handoff.get("next_continuity_debt") or "").strip():
+        handoff["next_continuity_debt"] = handoff.get("next_opening_action") or handoff.get("next_opening_must_continue", "")
+    if not str(handoff.get("ending_anchor_type") or "").strip():
+        handoff["ending_anchor_type"] = handoff.get("ending_style", "")
+    if not isinstance(handoff.get("suggested_opening_modes"), list):
+        handoff["suggested_opening_modes"] = []
     memory["handoff"] = handoff
     return memory
 

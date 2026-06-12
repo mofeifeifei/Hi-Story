@@ -56,7 +56,19 @@ const STYLE_LABELS = {
 
 const CHAPTER_FIELDS = [
   ["story_time", "故事时间"],
+  ["continuity_debt", "承接债"],
+  ["debt_type", "承接类型"],
+  ["opening_mode", "开头方式"],
+  ["opening_subject", "开头主体"],
+  ["opening_trigger", "开头触发事件"],
+  ["time_or_environment_function", "时间/环境功能"],
+  ["previous_anchor", "上一章锚点"],
   ["chapter_goal", "本章目标"],
+  ["first_screen_conflict", "第一屏冲突"],
+  ["forbidden_opening", "禁止开头"],
+  ["reader_question_in", "入章问题"],
+  ["reader_answer_out", "本章回答"],
+  ["new_question_out", "新问题"],
   ["reader_expectation", "读者期待"],
   ["conflict", "核心冲突"],
   ["main_scene", "主要场景"],
@@ -68,15 +80,21 @@ const CHAPTER_FIELDS = [
   ["foreshadowing", "伏笔"],
   ["emotional_turn", "情绪转折"],
   ["emotional_rhythm", "情绪节奏"],
+  ["ending_external_anchor", "结尾外部锚点"],
+  ["next_opening_action", "下一章开场动作"],
+  ["next_continuity_debt", "下一章承接债"],
   ["handoff", "下一章接力棒"],
   ["forbidden", "禁止内容"],
 ];
 
 const BOOK_CONTRACT_FIELDS = [
-  ["protagonist_fantasy", "protagonistFantasyInput", "主角爽点"],
-  ["escalation_ladder", "escalationLadderInput", "升级阶梯"],
-  ["relationship_mainline", "relationshipMainlineInput", "关系主线"],
-  ["absolute_red_lines", "absoluteRedLinesInput", "绝对红线"],
+  ["genre_core", "genreCoreInput", "题材核心"],
+  ["reader_promise", "readerPromiseInput", "读者承诺"],
+  ["conflict_engine", "conflictEngineInput", "冲突发动机"],
+  ["chapter_payoff", "chapterPayoffInput", "章节回报"],
+  ["opening_preference", "openingPreferenceInput", "开头偏好"],
+  ["avoid", "avoidInput", "避雷"],
+  ["language_texture", "languageTextureInput", "语言质感"],
 ];
 
 const LIBRARY_CATEGORIES = {
@@ -844,8 +862,8 @@ function fillWorkForm() {
 
 function fillBookContractForm() {
   const contract = state.workData?.book_contract || {};
-  if (!contract.absolute_red_lines && state.work?.locked_facts) {
-    contract.absolute_red_lines = readableTextList(state.work.locked_facts);
+  if (!contract.avoid && state.work?.locked_facts) {
+    contract.avoid = readableTextList(state.work.locked_facts);
   }
   for (const [key, id] of BOOK_CONTRACT_FIELDS) {
     const node = $(id);
@@ -949,7 +967,7 @@ function collectWorkForm() {
     forbidden_tropes: "",
     protagonist_preference: "",
     reader_profile: "",
-    locked_facts: $("absoluteRedLinesInput").value.trim(),
+    locked_facts: $("avoidInput").value.trim(),
     writing_controls: "",
   };
 }
@@ -983,8 +1001,8 @@ async function saveWork() {
       });
     }
     applyWorkState(data);
-    log("基础信息与整本契约已保存。");
-    notify("基础信息与整本契约已保存。", "success");
+    log("基础信息与题材契约卡已保存。");
+    notify("基础信息与题材契约卡已保存。", "success");
   } catch (error) {
     showError(error);
   }
@@ -1024,7 +1042,7 @@ function buildPlanItems() {
   }
   const contract = data.book_contract || {};
   if (Object.values(contract).some((value) => String(value || "").trim())) {
-    items.push(["整本契约", formatRecord(contract)]);
+    items.push(["题材契约卡", formatRecord(contract)]);
   }
   if (data.project_readable) items.push(["当前设定", data.project_readable]);
   for (const character of data.characters || []) {
@@ -1719,7 +1737,7 @@ function fillChapter(data) {
   state.currentChapterWordTarget = data.context?.chapter_word_target || null;
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
-  $("chapterTextInput").value = chapter.final_text || chapter.draft || "";
+  $("chapterTextInput").value = chapter.status === "draft" && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "";
   $("chapterOutlinePreview").textContent = formatChapterTask(chapter) || data.outline_readable || "暂无任务单。";
   $("contextPreview").textContent = data.context_error
     ? `上下文构建失败：${data.context_error}`
@@ -1920,11 +1938,20 @@ async function generateChapter() {
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
+    const isProblemDraft = Boolean(data.problem_draft || data.quality_gate?.problem_draft);
     if (!editorIsShowing(workId, chapterNumber)) {
       if (data.work_state && Number(state.selectedWorkId) === Number(workId)) applyWorkState(data.work_state);
-      log(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success", { chapter: chapterNumber, task: task.title });
-      notify(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success");
+      if (isProblemDraft) showProblemDraftNotice(data, chapterNumber);
+      else {
+        log(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success", { chapter: chapterNumber, task: task.title });
+        notify(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success");
+      }
       return;
+    }
+    if (data.chapter) {
+      state.currentChapter = data.chapter;
+      setEditorOwner(data.chapter);
+      state.currentChapterWordTarget = data.context?.chapter_word_target || state.currentChapterWordTarget;
     }
     if (data.final_text || data.draft) $("chapterTextInput").value = data.final_text || data.draft;
     updateChapterWordStatus();
@@ -1932,6 +1959,11 @@ async function generateChapter() {
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "暂无记忆卡。");
     $("draftPreview").textContent = data.draft || "暂无初稿。";
     if (data.work_state) applyWorkState(data.work_state);
+    if (isProblemDraft) {
+      if (data.draft) $("chapterTextInput").value = data.draft;
+      showProblemDraftNotice(data, chapterNumber);
+      return;
+    }
     await loadChapter(chapterNumber, "writing");
     if (!editorIsShowing(workId, chapterNumber)) {
       log(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success", { chapter: chapterNumber, task: task.title });
@@ -1956,12 +1988,43 @@ function manualQualityIssues(qualityGate) {
   return [...(report.blockers || []), ...(report.warnings || [])].filter(Boolean);
 }
 
+function problemDraftIssues(qualityGate) {
+  if (!qualityGate?.problem_draft) return [];
+  const draft = qualityGate.draft || {};
+  const blockers = qualityGate.blockers || draft.blockers || [];
+  return [...blockers, ...(draft.warnings || [])].filter(Boolean);
+}
+
+function cleanQualityIssue(text) {
+  return String(text || "").trim().replace(/[。！？；;,\s]+$/g, "");
+}
+
+function formatQualityIssues(issues) {
+  return issues.map((item, index) => `${index + 1}. ${item}`).join("\n");
+}
+
+function showProblemDraftNotice(data, chapterNumber) {
+  const issues = problemDraftIssues(data.quality_gate).map(cleanQualityIssue).filter(Boolean);
+  const shownIssues = issues.slice(0, 3);
+  const message = shownIssues.length
+    ? formatQualityIssues(shownIssues)
+    : cleanQualityIssue(data.quality_gate?.summary || "未通过质量闸门");
+  const fullMessage = issues.length ? formatQualityIssues(issues) : message;
+  const more = issues.length > shownIssues.length ? `\n还有 ${issues.length - shownIssues.length} 条，请查看运行记录。` : "";
+  log(`第 ${chapterNumber} 章未通过质量闸门，已保存为问题草稿。\n${fullMessage}`, "warning");
+  notify(`第 ${chapterNumber} 章已保存为问题草稿：\n${message}${more}`, "warning");
+  return true;
+}
+
 function showManualQualityNotice(qualityGate) {
-  const issues = manualQualityIssues(qualityGate);
+  const issues = manualQualityIssues(qualityGate).map(cleanQualityIssue).filter(Boolean);
   if (!issues.length) return false;
-  const message = issues.slice(0, 3).join("；");
-  log(`手动保存质量提示：${message}`);
-  notify(`已保存，但有质量提示：${message}`, "warning");
+  const shownIssues = issues.slice(0, 3);
+  const message = formatQualityIssues(shownIssues);
+  const fullMessage = formatQualityIssues(issues);
+  const more = issues.length > shownIssues.length ? `\n还有 ${issues.length - shownIssues.length} 条，请查看运行记录。` : "";
+  log(`手动保存质量提示：\n${fullMessage}`);
+  notify(`已保存，但有质量提示：\n${message}${more}`, "warning");
   return true;
 }
 
@@ -2018,7 +2081,6 @@ async function reviseWithInstruction() {
   const { workId, chapterNumber, chapterId, updatedAt } = target;
   const instruction = $("revisionInstructionInput").value.trim();
   const sourceText = $("chapterTextInput").value;
-  const chapterTitle = $("chapterTitleInput").value.trim();
   if (!instruction) {
     notify("请先填写修改意见。", "warning");
     return;
@@ -2036,24 +2098,19 @@ async function reviseWithInstruction() {
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
-    const revisedText = data.revised_text || sourceText;
-    if (!editorIsShowing(workId, chapterNumber)) {
-      addPendingChapterResult({
-        workId,
-        chapterNumber,
-        title: chapterTitle,
-        kind: "revise",
-        text: revisedText,
-      });
-      log(`第 ${chapterNumber} 章修订完成，结果已暂存。`, "success", { chapter: chapterNumber, task: task.title });
-      notify(`第 ${chapterNumber} 章修订完成，结果已暂存。`, "success");
+    if (data.work_state && Number(state.selectedWorkId) === Number(workId)) {
+      applyWorkState(data.work_state);
+    }
+    const memoryNotice = data.memory_invalidated ? "旧记忆已清空，请重新生成记忆。" : "";
+    if (editorIsShowing(workId, chapterNumber)) {
+      fillChapter(data);
+      $("revisionInstructionInput").value = "";
+      log(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success");
       return;
     }
-    $("chapterTextInput").value = revisedText;
-    updateChapterWordStatus();
-    $("revisionInstructionInput").value = "";
-    log("修订完成，满意后请保存最终稿。");
-    notify("修订完成，满意后请保存最终稿。", "success");
+    log(`第 ${chapterNumber} 章已在后台修订并保存。${memoryNotice}`, "success", { chapter: chapterNumber, task: task.title });
+    notify(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success");
   } catch (error) {
     if (taskWasStopped(task)) notify("修订任务已停止。", "warning");
     else showError(error);
@@ -2646,6 +2703,13 @@ function labelFor(key) {
     goal: "目标",
     content: "内容",
     absolute_red_lines: "绝对红线",
+    genre_core: "题材核心",
+    reader_promise: "读者承诺",
+    conflict_engine: "冲突发动机",
+    chapter_payoff: "章节回报",
+    opening_preference: "开头偏好",
+    avoid: "避雷",
+    language_texture: "语言质感",
     context: "上下文",
     current_characters: "当前人物",
     current_conflict: "当前冲突",
@@ -2964,9 +3028,9 @@ function currentFlowState(input) {
   }
   if (!input.contractDone) {
     return {
-      title: "整本契约",
-      description: "基础设定已经可用，建议先写清楚主角爽点、升级阶梯、关系主线和绝对红线。",
-      action: "在设定页填写整本契约，并点击保存基础信息。",
+      title: "题材契约卡",
+      description: "基础设定已经可用，建议先写清楚题材核心、冲突发动机、章节回报和避雷。",
+      action: "在设定页填写题材契约卡，并点击保存基础信息。",
       badge: "待补齐",
       tone: "waiting",
     };

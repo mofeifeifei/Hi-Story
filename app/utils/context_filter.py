@@ -7,6 +7,8 @@ from app.utils.json_parser import as_list, parse_json_object
 
 def filter_chapter_bundle(bundle: dict[str, Any], outline_detail: dict[str, Any]) -> dict[str, Any]:
     filtered = dict(bundle)
+    filtered["genre_contract"] = compact_genre_contract(bundle.get("book_contract", {}))
+    filtered.pop("book_contract", None)
     filtered["characters"] = _relevant_characters(bundle.get("characters", []), outline_detail)
     filtered["open_plot_threads"] = _relevant_plot_threads(bundle.get("open_plot_threads", []), outline_detail)
     filtered["world_rules"] = _relevant_world_rules(bundle.get("world_rules", []), outline_detail)
@@ -14,6 +16,49 @@ def filter_chapter_bundle(bundle: dict[str, Any], outline_detail: dict[str, Any]
     filtered["historical_facts"] = _latest_items(bundle.get("historical_facts", []), 20)
     filtered["minimal_memory_pack"] = _minimal_memory_pack(filtered, outline_detail)
     return filtered
+
+
+def context_for_reviewer(context: dict[str, Any]) -> dict[str, Any]:
+    return _agent_context(context, task="reviewer")
+
+
+def context_for_reviser(context: dict[str, Any]) -> dict[str, Any]:
+    return _agent_context(context, task="reviser")
+
+
+def context_for_memory(context: dict[str, Any]) -> dict[str, Any]:
+    return _agent_context(context, task="memory")
+
+
+def compact_genre_contract(contract: Any) -> dict[str, str]:
+    if not isinstance(contract, dict):
+        return {}
+    fields = [
+        "genre_core",
+        "reader_promise",
+        "conflict_engine",
+        "chapter_payoff",
+        "opening_preference",
+        "avoid",
+        "language_texture",
+    ]
+    result = {
+        field: str(contract.get(field) or "").strip()
+        for field in fields
+        if str(contract.get(field) or "").strip()
+    }
+    if not result:
+        return {}
+    return {
+        "genre_core": result.get("genre_core", ""),
+        "reader_promise": result.get("reader_promise", ""),
+        "conflict_engine": result.get("conflict_engine", ""),
+        "chapter_payoff": result.get("chapter_payoff", ""),
+        "opening_preference": result.get("opening_preference", ""),
+        "avoid": result.get("avoid", ""),
+        "language_texture": result.get("language_texture", ""),
+        "usage_rule": "每章只按这些短字段保持题材味道，不展开成长篇专项提示词。",
+    }
 
 
 def _outline_text(outline_detail: dict[str, Any]) -> str:
@@ -117,6 +162,21 @@ def _minimal_memory_pack(bundle: dict[str, Any], outline_detail: dict[str, Any])
             ),
             "chapter_payoff": str(outline_detail.get("chapter_payoff") or ""),
             "opening_hook": str(outline_detail.get("opening_hook") or ""),
+            "continuity_debt": str(outline_detail.get("continuity_debt") or ""),
+            "debt_type": str(outline_detail.get("debt_type") or ""),
+            "opening_mode": str(outline_detail.get("opening_mode") or ""),
+            "opening_subject": str(outline_detail.get("opening_subject") or ""),
+            "opening_trigger": str(outline_detail.get("opening_trigger") or ""),
+            "time_or_environment_function": str(outline_detail.get("time_or_environment_function") or ""),
+            "previous_anchor": str(outline_detail.get("previous_anchor") or ""),
+            "first_screen_conflict": str(outline_detail.get("first_screen_conflict") or ""),
+            "forbidden_opening": str(outline_detail.get("forbidden_opening") or ""),
+            "reader_question_in": str(outline_detail.get("reader_question_in") or ""),
+            "reader_answer_out": str(outline_detail.get("reader_answer_out") or ""),
+            "new_question_out": str(outline_detail.get("new_question_out") or ""),
+            "ending_external_anchor": str(outline_detail.get("ending_external_anchor") or ""),
+            "next_opening_action": str(outline_detail.get("next_opening_action") or ""),
+            "next_continuity_debt": str(outline_detail.get("next_continuity_debt") or ""),
             "ending_hook": str(outline_detail.get("ending_hook") or ""),
             "handoff": str(outline_detail.get("handoff") or ""),
         },
@@ -176,3 +236,200 @@ def _latest_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
     if len(items) <= limit:
         return items
     return items[-limit:]
+
+
+def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
+    chapter = context.get("chapter") if isinstance(context.get("chapter"), dict) else {}
+    result: dict[str, Any] = {
+        "work": _pick(context.get("work"), _work_keys(task)),
+        "chapter": _pick(
+            chapter,
+            [
+                "id",
+                "chapter_number",
+                "title",
+                "outline",
+                "outline_detail",
+                "outline_task_sheet",
+                "ending_hook",
+            ],
+        ),
+        "book_bible": context.get("book_bible", {}),
+        "genre_contract": compact_genre_contract(
+            context.get("genre_contract") or context.get("book_contract", {})
+        ),
+        "chapter_word_target": context.get("chapter_word_target", {}),
+        "minimal_memory_pack": context.get("minimal_memory_pack", {}),
+        "previous_chapter": _previous_chapter(context.get("previous_chapter")),
+        "chapter_transition_contract": context.get("chapter_transition_contract", {}),
+        "chapter_notes": context.get("chapter_notes", []),
+        "history_specialist": _history_specialist_for_task(context.get("history_specialist"), task),
+    }
+    if task == "reviewer":
+        result.update(
+            {
+                "characters": _compact_items(context.get("characters"), _character_keys(), 8),
+                "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 8),
+                "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 10),
+                "recent_three_chapter_summaries": context.get("recent_three_chapter_summaries", []),
+                "recent_chapter_openings": context.get("recent_chapter_openings", []),
+                "opening_variation_policy": context.get("opening_variation_policy", {}),
+                "repeat_risk_warnings": context.get("repeat_risk_warnings", []),
+                "forbidden_template_phrases": context.get("forbidden_template_phrases", []),
+                "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
+            }
+        )
+    elif task == "reviser":
+        result.update(
+            {
+                "characters": _compact_items(context.get("characters"), _character_keys(), 6),
+                "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 6),
+                "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
+                "recent_chapter_openings": context.get("recent_chapter_openings", [])[-3:],
+                "opening_variation_policy": context.get("opening_variation_policy", {}),
+                "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
+            }
+        )
+    else:
+        result.update(
+            {
+                "characters": _compact_items(context.get("characters"), _character_memory_keys(), 6),
+                "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
+            }
+        )
+    return _drop_empty(result)
+
+
+def _work_keys(task: str) -> list[str]:
+    keys = [
+        "title",
+        "idea",
+        "genre",
+        "platform",
+        "target_words",
+        "style",
+        "summary",
+        "reader_profile",
+        "locked_facts",
+    ]
+    if task == "memory":
+        return ["title", "genre", "summary"]
+    return keys
+
+
+def _character_keys() -> list[str]:
+    return [
+        "name",
+        "role",
+        "personality",
+        "goal",
+        "current_goal",
+        "current_fear",
+        "current_state",
+        "relationship",
+        "relationship_stage",
+        "speaking_style",
+        "locked_rules",
+    ]
+
+
+def _character_memory_keys() -> list[str]:
+    return [
+        "name",
+        "role",
+        "current_goal",
+        "current_fear",
+        "current_state",
+        "relationship_stage",
+        "locked_rules",
+    ]
+
+
+def _world_rule_keys() -> list[str]:
+    return ["rule_name", "rule_content", "limitations", "forbidden_changes"]
+
+
+def _thread_keys() -> list[str]:
+    return ["first_chapter", "content", "status", "planned_resolve_chapter", "actual_resolve_chapter"]
+
+
+def _previous_chapter(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        [
+            "chapter_number",
+            "title",
+            "summary",
+            "ending_hook",
+            "handoff",
+            "tail",
+        ],
+    )
+
+
+def _history_specialist_for_task(value: Any, task: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value.get("enabled"):
+        return {"enabled": False}
+    fact_limit = {"reviewer": 12, "reviser": 8, "memory": 5}.get(task, 12)
+    return _drop_empty(
+        {
+            "enabled": True,
+            "trigger_rule": value.get("trigger_rule", ""),
+            "profile": _selected_history_profile(value.get("profile")),
+            "facts": _latest_items(value.get("facts") or [], fact_limit),
+        }
+    )
+
+
+def _selected_history_profile(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        [
+            "dynasty",
+            "period",
+            "year_range",
+            "current_ruler",
+            "official_system",
+            "central_official_system",
+            "local_administration",
+            "noble_titles",
+            "exam_system",
+            "military_system",
+            "military_ranks",
+            "weapons",
+            "social_order",
+            "daily_life",
+            "currency",
+            "measurements",
+            "geo_notes",
+            "travel_speed",
+            "communication_speed",
+            "language_style",
+            "address_terms",
+            "taboo_words",
+            "allowed_fiction",
+            "fiction_boundary",
+            "locked_facts",
+        ],
+    )
+
+
+def _compact_items(value: Any, keys: list[str], limit: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result = [_pick(item, keys) for item in value if isinstance(item, dict)]
+    return [item for item in result if item][:limit]
+
+
+def _pick(value: Any, keys: list[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return _drop_empty({key: value.get(key) for key in keys if key in value})
+
+
+def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if item not in (None, "", [], {})
+    }

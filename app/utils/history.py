@@ -69,7 +69,10 @@ def is_historical_bundle(bundle: dict[str, Any]) -> bool:
     profile = bundle.get("historical_profile")
     if isinstance(profile, dict) and any(str(profile.get(key) or "").strip() for key in HISTORICAL_PROFILE_FIELDS):
         return True
-    return _contains_historical_keyword(_collect_text(bundle))
+    facts = bundle.get("historical_facts")
+    if isinstance(facts, list) and any(isinstance(item, dict) and str(item.get("content") or "").strip() for item in facts):
+        return True
+    return _contains_historical_keyword(_collect_historical_signal_text(bundle))
 
 
 def historical_context_for_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -214,7 +217,7 @@ def history_prompt_section(context: dict[str, Any], *, task: str = "writer") -> 
     if not isinstance(specialist, dict) or not specialist.get("enabled"):
         return ""
     task = str(task or "writer").strip().lower()
-    profile_text = specialist.get("compact_context") or format_historical_profile(specialist.get("profile") or {})
+    profile_text = _history_text_for_task(specialist, task)
     if task in {"planner", "outline", "chapter_outlines"}:
         return (
             "【历史专项约束】\n"
@@ -277,3 +280,64 @@ def _collect_text(value: Any) -> str:
     elif value not in (None, ""):
         parts.append(str(value))
     return "\n".join(part for part in parts if part)
+
+
+def _collect_historical_signal_text(bundle: dict[str, Any]) -> str:
+    work = bundle.get("work") if isinstance(bundle, dict) else {}
+    if not isinstance(work, dict):
+        work = {}
+    signal = {
+        "work": {
+            key: work.get(key)
+            for key in [
+                "title",
+                "idea",
+                "genre",
+                "platform",
+                "style",
+                "summary",
+                "reader_profile",
+                "forbidden_tropes",
+                "protagonist_preference",
+                "locked_facts",
+            ]
+        },
+        "book_bible": bundle.get("book_bible", {}),
+        "book_contract": bundle.get("book_contract", {}),
+        "historical_profile": bundle.get("historical_profile", {}),
+    }
+    return _collect_text(signal)
+
+
+def _history_text_for_task(specialist: dict[str, Any], task: str) -> str:
+    if task in {"writer", "planner", "outline", "chapter_outlines"}:
+        return specialist.get("compact_context") or format_historical_profile(specialist.get("profile") or {})
+    profile = specialist.get("profile") or {}
+    facts = specialist.get("facts") or []
+    if task == "reviewer":
+        return _join_history_context(profile, facts[-12:])
+    if task == "reviser":
+        return _join_history_context(_selected_profile_fields(profile), facts[-8:])
+    return format_historical_profile(_selected_profile_fields(profile))
+
+
+def _selected_profile_fields(profile: dict[str, Any]) -> dict[str, str]:
+    keys = [
+        "dynasty",
+        "period",
+        "year_range",
+        "current_ruler",
+        "official_system",
+        "military_system",
+        "social_order",
+        "geo_notes",
+        "travel_speed",
+        "communication_speed",
+        "language_style",
+        "address_terms",
+        "taboo_words",
+        "allowed_fiction",
+        "fiction_boundary",
+        "locked_facts",
+    ]
+    return {key: str(profile.get(key) or "").strip() for key in keys}

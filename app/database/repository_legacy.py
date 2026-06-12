@@ -112,6 +112,7 @@ class Repository:
         )
         style = self._merge_style_and_controls(inputs)
         book_bible = self._book_bible_from_plan(inputs, plan, locked_facts)
+        book_contract = self._normalize_book_contract(plan.get("book_contract") or {})
 
         with connect(db_path) as conn:
             conn.execute(
@@ -119,8 +120,8 @@ class Repository:
                 INSERT INTO works (
                   id, title, idea, genre, platform, target_words, style, summary,
                   reader_profile, forbidden_tropes, protagonist_preference,
-                  core_selling_points, book_bible_json, locked_facts, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  core_selling_points, book_bible_json, book_contract_json, locked_facts, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     work_id,
@@ -136,6 +137,7 @@ class Repository:
                     inputs.get("protagonist_preference", ""),
                     json_dumps(plan.get("core_selling_points", [])),
                     json_dumps(book_bible),
+                    json_dumps(book_contract),
                     json_dumps(locked_facts),
                     created_at,
                     created_at,
@@ -246,7 +248,7 @@ class Repository:
             next_action = "填写并保存一句话创意。"
         elif not has_contract:
             stage = "book_contract"
-            next_action = "补全整本契约，明确主角爽点、升级阶梯、关系主线和绝对红线。"
+            next_action = "补全题材契约卡，明确题材核心、冲突发动机、章节回报和避雷。"
         elif not has_outline:
             stage = "outline"
             next_action = "生成或编辑全书大纲。"
@@ -394,6 +396,9 @@ class Repository:
             input_locked_facts = self._stored_locked_facts(existing.get("locked_facts"))
         locked_facts = self._dedupe_text_items([*input_locked_facts, *self._collect_locked_facts(plan)])
         book_bible = self._book_bible_from_plan(inputs, plan, locked_facts)
+        book_contract = self._normalize_book_contract(plan.get("book_contract") or {})
+        if not any(book_contract.values()):
+            book_contract = self._book_contract_from_work(existing)
 
         db_path = self._db_path_for_work(work_id)
         conn = connect(db_path)
@@ -412,7 +417,7 @@ class Repository:
                 SET title = ?, idea = ?, genre = ?, platform = ?, target_words = ?,
                     style = ?, summary = ?, reader_profile = ?, forbidden_tropes = ?,
                     protagonist_preference = ?, core_selling_points = ?,
-                    book_bible_json = ?, locked_facts = ?, updated_at = ?
+                    book_bible_json = ?, book_contract_json = ?, locked_facts = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -428,6 +433,7 @@ class Repository:
                     inputs.get("protagonist_preference", ""),
                     json_dumps(plan.get("core_selling_points", [])),
                     json_dumps(book_bible),
+                    json_dumps(book_contract),
                     json_dumps(locked_facts),
                     timestamp,
                     work_id,
@@ -2332,12 +2338,25 @@ class Repository:
     @staticmethod
     def _normalize_book_contract(contract: dict[str, Any]) -> dict[str, str]:
         fields = [
-            "protagonist_fantasy",
-            "escalation_ladder",
-            "relationship_mainline",
-            "absolute_red_lines",
+            "genre_core",
+            "reader_promise",
+            "conflict_engine",
+            "chapter_payoff",
+            "opening_preference",
+            "avoid",
+            "language_texture",
         ]
-        return {field: str(contract.get(field) or "").strip() for field in fields}
+        normalized = {field: str(contract.get(field) or "").strip() for field in fields}
+        legacy_fallbacks = {
+            "reader_promise": "protagonist_fantasy",
+            "conflict_engine": "escalation_ladder",
+            "chapter_payoff": "relationship_mainline",
+            "avoid": "absolute_red_lines",
+        }
+        for target, source in legacy_fallbacks.items():
+            if not normalized[target]:
+                normalized[target] = str(contract.get(source) or "").strip()
+        return normalized
 
     def _book_contract_from_work(self, work: dict[str, Any]) -> dict[str, str]:
         raw = work.get("book_contract_json")
