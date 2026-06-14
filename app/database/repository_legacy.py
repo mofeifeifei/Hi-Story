@@ -2344,7 +2344,6 @@ class Repository:
             "chapter_payoff",
             "opening_preference",
             "avoid",
-            "language_texture",
         ]
         normalized = {field: str(contract.get(field) or "").strip() for field in fields}
         legacy_fallbacks = {

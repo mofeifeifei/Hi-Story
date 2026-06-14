@@ -177,6 +177,31 @@ button:disabled {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
+.chapter-volume {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.chapter-volume:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.chapter-volume .item-title {
+  font-weight: 700;
+}
+
+.chapter-child {
+  margin-left: 16px;
+}
+
 .work-item:hover,
 .chapter-item:hover,
 .nav-item:hover,
@@ -221,6 +246,14 @@ button:disabled {
 
 .nav-level-2 {
   margin-left: 20px;
+}
+
+.chapter-volume .tree-marker,
+.nav-item .tree-marker {
+  width: 14px;
+  flex: 0 0 14px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .flow-nav {

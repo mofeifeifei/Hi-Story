@@ -19,7 +19,7 @@ class WriterAgent(BaseAgent):
             "注意：必须优先执行 chapter.outline_task_sheet 中的本章目标、场景卡、核心冲突、线索推进、信息增量和接力棒。\n"
             "必须优先使用 minimal_memory_pack；它只包含本章不知道就会写错的人物状态、伏笔和世界约束。\n"
             "必须优先服从 book_bible、chapter_notes、人物动态状态和用户批注。\n"
-            "必须读取 genre_contract；它是本书的轻量题材契约卡，只按其中的题材核心、读者承诺、冲突发动机、章节回报、开头偏好、避雷和语言质感保持题材味道，不要扩写成新的题材专项提示词。\n"
+            "必须读取 genre_contract；它是本书的轻量题材契约卡，只按其中的题材核心、读者承诺、冲突发动机、章节回报、开头偏好和避雷保持题材味道，不要扩写成新的题材专项提示词。\n"
             "必须读取 chapter_word_target，并按其中的动态目标字数、建议范围和规则生成完整章节。\n"
             "必须优先承接 chapter_transition_contract；第一段要直接接住上一章末尾的具体动作、对白、物件、证据或威胁。\n"
             "必须读取 chapter.outline_detail.continuity_debt、opening_mode、opening_subject、opening_trigger、reader_question_in、reader_answer_out、new_question_out、next_continuity_debt；它们分别约束本章承接债、开头功能、开头主体、触发事件、入章问题、本章回答、新问题和下一章承接债。\n"

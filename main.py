@@ -129,13 +129,14 @@ def command_generate_outline(args: argparse.Namespace) -> None:
 
 
 def command_generate_chapter_outlines(args: argparse.Namespace) -> None:
-    chapters = NovelWorkflow().generate_chapter_outlines(
+    result = NovelWorkflow().generate_chapter_outlines(
         args.work_id,
         start_chapter=args.start,
         count=args.count,
     )
+    chapters = result.get("chapters", [])
     print(f"已保存 {len(chapters)} 章细纲。")
-    print_json(chapters)
+    print_json(result)
 
 
 def command_list_chapters(args: argparse.Namespace) -> None:
@@ -221,7 +222,8 @@ def command_demo(args: argparse.Namespace) -> None:
     workflow.repo.init()
     work_id, plan = workflow.create_work(build_work_inputs(args))
     outline = workflow.generate_outline(work_id)
-    chapters = workflow.generate_chapter_outlines(work_id, start_chapter=1, count=1)
+    outline_result = workflow.generate_chapter_outlines(work_id, start_chapter=1, count=1)
+    chapters = outline_result.get("chapters", [])
     result = workflow.generate_chapter(work_id, 1)
     output = export_txt(workflow.repo, work_id)
 

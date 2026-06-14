@@ -49,7 +49,7 @@ class PlannerAgent(BaseAgent):
             f"{history_section}"
             "JSON 字段：book_bible, book_contract, title_candidates, summary, core_selling_points, target_readers, "
             "protagonist, supporting_characters, villains, world_rules, main_goal, first_volume_direction, historical_profile。"
-            "book_contract 是轻量题材契约卡，只写短句，字段包含 genre_core, reader_promise, conflict_engine, chapter_payoff, opening_preference, avoid, language_texture。"
+            "book_contract 是轻量题材契约卡，只写短句，字段包含 genre_core, reader_promise, conflict_engine, chapter_payoff, opening_preference, avoid。"
         )
         parsed = self.complete_json(
             user_prompt,
@@ -106,14 +106,17 @@ class PlannerAgent(BaseAgent):
                 "请根据作品资料里的 volume_outline、已有章节细纲、最近章节摘要和剧情阶段，自行判断每章所属分卷。\n"
                 "章节号必须按全书连续编号，不要因为进入新分卷就从第 1 章重新开始。\n"
                 "你可以提出进入下一卷，但系统会校验：不能跳卷；当前卷未达到 min_chapters 时不能换卷；超过 hard_max_chapters 时必须进入下一卷或收束。\n"
-                "判断是否换卷时必须参考 active_volume、chapter_counts、entry_condition、exit_condition 和 required_milestones。\n"
+                "判断是否换卷时必须参考 volume_transition_context.progress、volume_transition_context.volume_plot_threads、active_volume、chapter_counts、entry_condition、exit_condition、required_milestones、最近章节摘要和未回收伏笔。\n"
                 "如果当前卷 exit_condition 和核心里程碑尚未完成，应继续当前卷；如果已完成且达到 min_chapters，可以把后续章节归入下一卷。\n"
+                "你必须输出顶层 volume_decision：should_transition, from_volume, to_volume, reason, completed_milestones, unfinished_milestones, carry_over, next_volume_opening_focus。\n"
+                "如果不换卷，should_transition 为 false，from_volume/to_volume 写当前卷，reason 写继续当前卷的剧情理由。\n"
                 "不要把所有章节默认放进第一卷，也不要因为界面当前选中了某个分卷就强行归入该卷。\n"
             )
         user_prompt = (
             f"请生成从第 {start_chapter} 章开始的 {count} 章细纲，输出供程序解析的合法 JSON。\n"
             f"{volume_instruction}"
-            "JSON 字段：chapters。\n"
+            "JSON 字段：volume_decision, chapters。\n"
+            "volume_decision 是本批细纲开始前的卷决策；显式指定目标卷时仍要返回，但 should_transition 必须为 false。\n"
             "chapters 内每项必须包含：chapter_number, volume_number, story_time, title, outline, opening_hook, continuity_debt, debt_type, opening_mode, opening_subject, opening_trigger, time_or_environment_function, "
             "previous_anchor, first_screen_conflict, forbidden_opening, reader_question_in, reader_answer_out, new_question_out, scene_cards, chapter_goal, conflict, main_scene, "
             "reader_expectation, characters_present, clues, new_information, chapter_payoff, "

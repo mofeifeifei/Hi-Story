@@ -181,21 +181,31 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     start = max(1, int(body.get("start_chapter") or 1))
                     count = min(30, max(1, int(body.get("count") or 3)))
                     volume_number = int(body["volume_number"]) if body.get("volume_number") not in (None, "") else None
-                    chapters = STATE.workflow.generate_chapter_outlines(
+                    outline_result = STATE.workflow.generate_chapter_outlines(
                         work_id,
                         start_chapter=start,
                         count=count,
                         volume_number=volume_number,
                         should_stop=lambda: STATE.task_cancelled(task_id),
                     )
+                    chapters = outline_result.get("chapters", [])
+                    volume_transition = outline_result.get("volume_transition", {})
                     if chapters:
                         first = chapters[0].get("chapter_number")
                         last = chapters[-1].get("chapter_number")
                         output_preview = f"生成 {len(chapters)} 章细纲：第 {first} 章至第 {last} 章。"
+                    if volume_transition.get("changed"):
+                        output_preview = (output_preview + "\n" if output_preview else "") + _volume_transition_preview(volume_transition)
                     partial_warning = ""
                     if len(chapters) < count:
                         partial_warning = f"AI 本次只返回了 {len(chapters)}/{count} 章细纲，已先保存可用章节。"
-                    return {"generated_chapters": chapters, "partial_warning": partial_warning, **_work_state(work_id)}
+                    return {
+                        "generated_chapters": chapters,
+                        "partial_warning": partial_warning,
+                        "volume_transition": volume_transition,
+                        "volume_decision": outline_result.get("volume_decision", {}),
+                        **_work_state(work_id),
+                    }
                 except Exception as exc:
                     _finish_task_error(task_id, exc, work_id=work_id)
                     raise
@@ -571,6 +581,24 @@ def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -
         "problem_draft": bool(result.get("problem_draft")),
         "work_state": _work_state(work_id),
     }
+
+
+def _volume_transition_preview(transition: dict[str, Any]) -> str:
+    if not isinstance(transition, dict) or not transition.get("changed"):
+        return ""
+    from_label = f"第{transition.get('from_volume')}卷"
+    to_label = f"第{transition.get('to_volume')}卷"
+    if transition.get("from_title"):
+        from_label += f"《{transition.get('from_title')}》"
+    if transition.get("to_title"):
+        to_label += f"《{transition.get('to_title')}》"
+    lines = [f"已从{from_label}切换到{to_label}。"]
+    if transition.get("reason"):
+        lines.append(f"原因：{transition.get('reason')}")
+    carry_over = transition.get("carry_over") or []
+    if carry_over:
+        lines.append("遗留线索：" + "、".join(str(item) for item in carry_over if str(item).strip()))
+    return "\n".join(lines)
 
 
 def _chapter_task_preview(result: dict[str, Any]) -> str:

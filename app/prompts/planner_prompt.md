@@ -63,7 +63,7 @@ output_contract: 结构化数据
 - 清晰的故事前提和核心钩子；
 - 面向读者、能在正文里读到的核心卖点；
 - 作品圣经 `book_bible`；
-- 轻量题材契约卡 `book_contract`，总量控制在 300 到 800 字，不写成长篇题材专项提示词；
+- 轻量题材契约卡 `book_contract`，总量控制在 250 到 700 字，不写成长篇题材专项提示词；
 - 主角、配角、反派或主要阻力；
 - 世界观规则和能力限制；
 - 主线目标和第一卷方向。
@@ -189,8 +189,7 @@ output_contract: 结构化数据
     "conflict_engine": "",
     "chapter_payoff": "",
     "opening_preference": "",
-    "avoid": "",
-    "language_texture": ""
+    "avoid": ""
   },
   "title_candidates": [],
   "summary": "",
@@ -256,6 +255,16 @@ output_contract: 结构化数据
 
 ```
 {
+  "volume_decision": {
+    "should_transition": false,
+    "from_volume": 1,
+    "to_volume": 1,
+    "reason": "",
+    "completed_milestones": [],
+    "unfinished_milestones": [],
+    "carry_over": [],
+    "next_volume_opening_focus": ""
+  },
   "chapters": [
     {
       "chapter_number": 1,
@@ -312,6 +321,7 @@ output_contract: 结构化数据
 
 - `outline`：至少 120 个中文字符，必须是具体任务说明。
 - `volume_number`：必须写明本章所属分卷。若程序明确指定目标分卷，必须和目标分卷一致；若未指定目标分卷，必须根据 `volume_outline`、`volume_state`、已有章节和剧情阶段提出归卷。章节号按全书连续编号，不要因为进入新分卷就从第 1 章重新开始。不能跳卷；当前卷未达到 `min_chapters` 时不要提议进入下一卷；超过 `hard_max_chapters` 时必须收束或进入下一卷。
+- `volume_decision`：生成章节细纲时必须先判断当前卷是否应该继续。参考 `volume_transition_context.progress`、`volume_transition_context.volume_plot_threads`、当前卷章数、`exit_condition`、`required_milestones`、最近章节摘要和未回收伏笔。若当前卷任务完成且达到 `min_chapters`，可建议从本批第一章进入下一卷；若未完成，说明继续当前卷的理由。程序会硬校验：不得跳卷、未达 `min_chapters` 不得换卷、达到 `hard_max_chapters` 会强制换卷。
 - `story_time`：必须写清本章在故事内部的时间锚点，例如朝代、年份、季节、案发第几日、行动当天或上一章后的具体间隔；不能留空，不能只写“当前”。它只作为时间线参考，不代表正文第一句必须从这个时间写起。
 - `opening_hook`：写清本章前 300 字要抓住读者的第一屏问题、具体切入方式和读者钩子。
 - `opening_hook`：必须包含章首钩子类型，且落到具体事件，不能只写“制造悬念”。

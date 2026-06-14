@@ -99,7 +99,7 @@ class NovelWorkflow:
         count: int = 30,
         volume_number: int | None = None,
         should_stop: Callable[[], bool] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         bundle = self.build_planning_context(
             work_id,
             start_chapter=start_chapter,
@@ -129,18 +129,26 @@ class NovelWorkflow:
         start_chapter: int,
         count: int,
         volume_number: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         result = self.normalize_output_names(work_id, result)
         chapters = [dict(item) for item in result.get("chapters", []) if isinstance(item, dict)]
         if not chapters:
             raise ValueError("AI 没有返回可保存的章节细纲，请重新生成。")
         volume_state = self._volume_state(work_id)
+        initial_active_volume = int(volume_state.get("active_volume") or 1)
+        volume_decision = self._validated_volume_decision(
+            volume_state,
+            result.get("volume_decision"),
+            explicit_volume=volume_number,
+        )
         prepared: list[dict[str, Any]] = []
         for offset, item in enumerate(chapters[:count]):
             chapter_number = start_chapter + offset
             item["chapter_number"] = chapter_number
             item = self._merge_chapter_outline_fields(work_id, chapter_number, item)
             item["chapter_number"] = chapter_number
+            if offset == 0 and volume_decision.get("applied") and volume_decision.get("to_volume"):
+                item["volume_number"] = int(volume_decision["to_volume"])
             item["volume_number"] = self._assign_volume_number(
                 volume_state,
                 chapter_number,
@@ -188,7 +196,11 @@ class NovelWorkflow:
             output=json_dumps(result),
             **self.client.last_usage("planner"),
         )
-        return saved
+        return {
+            "chapters": saved,
+            "volume_transition": self._volume_transition_notice(volume_state, volume_decision, saved, initial_active_volume),
+            "volume_decision": volume_decision,
+        }
 
     def _volume_state(self, work_id: int) -> dict[str, Any]:
         work = self.repo.get_work(work_id)
@@ -214,6 +226,104 @@ class NovelWorkflow:
             "counts": counts,
             "active_volume": active_volume,
         }
+
+    def _volume_transition_context(self, work_id: int, start_chapter: int, state: dict[str, Any]) -> dict[str, Any]:
+        active_volume = int(state.get("active_volume") or 1)
+        next_volume = self._next_volume_number(state.get("volume_numbers") or [], active_volume)
+        current_plan = self._volume_plan(state, active_volume)
+        next_plan = self._volume_plan(state, next_volume) if next_volume else {}
+        current_count = int((state.get("counts") or {}).get(active_volume, 0))
+        min_chapters = self._int_field(current_plan, "min_chapters")
+        target_chapters = self._int_field(current_plan, "target_chapters")
+        soft_max_chapters = self._int_field(current_plan, "soft_max_chapters")
+        hard_max_chapters = self._int_field(current_plan, "hard_max_chapters")
+        open_threads = self.repo.list_plot_threads(work_id, status="open")[:12]
+        return {
+            "active_volume": active_volume,
+            "active_volume_title": current_plan.get("title", ""),
+            "next_volume": next_volume,
+            "next_volume_title": next_plan.get("title", "") if next_plan else "",
+            "current_count": current_count,
+            "min_chapters": min_chapters,
+            "target_chapters": target_chapters,
+            "soft_max_chapters": soft_max_chapters,
+            "hard_max_chapters": hard_max_chapters,
+            "progress": self._volume_progress(current_count, min_chapters, target_chapters, soft_max_chapters, hard_max_chapters),
+            "entry_condition": current_plan.get("entry_condition", ""),
+            "exit_condition": current_plan.get("exit_condition", ""),
+            "required_milestones": current_plan.get("required_milestones", []),
+            "recent_summaries": self.repo.get_recent_summaries(work_id, start_chapter, limit=5),
+            "open_plot_threads": open_threads,
+            "volume_plot_threads": self._volume_plot_threads(open_threads, state, active_volume, start_chapter),
+            "rule": "AI 判断剧情是否该换卷；程序硬校验：未达 min_chapters 不得换卷，达到 hard_max_chapters 强制换卷，不得跳卷，下一卷必须存在。",
+        }
+
+    def _validated_volume_decision(
+        self,
+        state: dict[str, Any],
+        decision: Any,
+        *,
+        explicit_volume: int | None,
+    ) -> dict[str, Any]:
+        if not isinstance(decision, dict):
+            decision = {}
+        active_volume = int(state.get("active_volume") or 1)
+        volume_numbers = state.get("volume_numbers") or []
+        next_volume = self._next_volume_number(volume_numbers, active_volume)
+        current_plan = self._volume_plan(state, active_volume)
+        current_count = int((state.get("counts") or {}).get(active_volume, 0))
+        min_chapters = self._int_field(current_plan, "min_chapters")
+        hard_max = self._int_field(current_plan, "hard_max_chapters")
+
+        normalized = {
+            "should_transition": bool(decision.get("should_transition")),
+            "from_volume": self._optional_int(decision.get("from_volume")) or active_volume,
+            "to_volume": self._optional_int(decision.get("to_volume")) or active_volume,
+            "reason": str(decision.get("reason") or "").strip(),
+            "completed_milestones": self._string_list(decision.get("completed_milestones")),
+            "unfinished_milestones": self._string_list(decision.get("unfinished_milestones")),
+            "carry_over": self._string_list(decision.get("carry_over")),
+            "next_volume_opening_focus": str(decision.get("next_volume_opening_focus") or "").strip(),
+            "applied": False,
+            "forced": False,
+            "blocked_reason": "",
+        }
+        if explicit_volume:
+            normalized["should_transition"] = False
+            normalized["from_volume"] = int(explicit_volume)
+            normalized["to_volume"] = int(explicit_volume)
+            normalized["blocked_reason"] = "本次已显式指定目标卷，自动换卷判断不生效。"
+            return normalized
+
+        if next_volume and hard_max and current_count >= hard_max:
+            normalized["should_transition"] = True
+            normalized["from_volume"] = active_volume
+            normalized["to_volume"] = int(next_volume)
+            normalized["applied"] = True
+            normalized["forced"] = True
+            if not normalized["reason"]:
+                normalized["reason"] = f"当前卷已达到 hard_max_chapters={hard_max}，系统强制进入下一卷。"
+            return normalized
+
+        if not normalized["should_transition"]:
+            normalized["from_volume"] = active_volume
+            normalized["to_volume"] = active_volume
+            return normalized
+        if not next_volume:
+            normalized["from_volume"] = active_volume
+            normalized["to_volume"] = active_volume
+            normalized["blocked_reason"] = "没有下一卷可切换。"
+            return normalized
+        if min_chapters and current_count < min_chapters:
+            normalized["from_volume"] = active_volume
+            normalized["to_volume"] = active_volume
+            normalized["blocked_reason"] = f"当前卷仅 {current_count} 章，未达到 min_chapters={min_chapters}。"
+            return normalized
+        if normalized["to_volume"] != int(next_volume):
+            normalized["to_volume"] = int(next_volume)
+        normalized["from_volume"] = active_volume
+        normalized["applied"] = True
+        return normalized
 
     def _assign_volume_number(
         self,
@@ -268,6 +378,88 @@ class NovelWorkflow:
         chapter_volumes[int(chapter_number)] = int(volume_number)
         state["active_volume"] = volume_number
 
+    def _volume_transition_notice(
+        self,
+        state: dict[str, Any],
+        decision: dict[str, Any],
+        saved: list[dict[str, Any]],
+        initial_active_volume: int | None = None,
+    ) -> dict[str, Any]:
+        if not saved:
+            return {}
+        from_volume = int(decision.get("from_volume") or initial_active_volume or 0)
+        to_volume = int(decision.get("to_volume") or 0)
+        first_switched_chapter = saved[0]
+        if not decision.get("applied"):
+            from_volume = int(initial_active_volume or from_volume or 0)
+            for chapter in saved:
+                chapter_volume = int(chapter.get("volume_number") or 0)
+                if from_volume and chapter_volume and chapter_volume != from_volume:
+                    to_volume = chapter_volume
+                    first_switched_chapter = chapter
+                    break
+        if not from_volume or not to_volume or from_volume == to_volume:
+            return {}
+        from_plan = self._volume_plan(state, from_volume)
+        to_plan = self._volume_plan(state, to_volume)
+        reason = decision.get("reason", "")
+        if not reason and not decision.get("applied"):
+            reason = "本批细纲保存时触发分卷硬约束，后续章节已自动归入下一卷。"
+        return {
+            "changed": True,
+            "forced": bool(decision.get("forced")),
+            "from_volume": from_volume,
+            "to_volume": to_volume,
+            "from_title": from_plan.get("title", ""),
+            "to_title": to_plan.get("title", ""),
+            "reason": reason,
+            "carry_over": decision.get("carry_over", []),
+            "next_volume_opening_focus": decision.get("next_volume_opening_focus", ""),
+            "first_chapter": first_switched_chapter.get("chapter_number"),
+        }
+
+    @staticmethod
+    def _volume_progress(
+        current_count: int,
+        min_chapters: int,
+        target_chapters: int,
+        soft_max_chapters: int,
+        hard_max_chapters: int,
+    ) -> dict[str, Any]:
+        return {
+            "reached_min": bool(min_chapters and current_count >= min_chapters),
+            "near_target": bool(target_chapters and current_count >= max(1, target_chapters - 1)),
+            "at_or_over_soft_max": bool(soft_max_chapters and current_count >= soft_max_chapters),
+            "at_or_over_hard_max": bool(hard_max_chapters and current_count >= hard_max_chapters),
+            "chapters_until_min": max(0, min_chapters - current_count) if min_chapters else 0,
+            "chapters_until_target": max(0, target_chapters - current_count) if target_chapters else 0,
+            "chapters_until_soft_max": max(0, soft_max_chapters - current_count) if soft_max_chapters else 0,
+            "chapters_until_hard_max": max(0, hard_max_chapters - current_count) if hard_max_chapters else 0,
+        }
+
+    def _volume_plot_threads(
+        self,
+        threads: list[dict[str, Any]],
+        state: dict[str, Any],
+        active_volume: int,
+        start_chapter: int,
+    ) -> list[dict[str, Any]]:
+        volume_chapters = [
+            int(chapter)
+            for chapter, volume in (state.get("chapter_volumes") or {}).items()
+            if int(volume or 0) == int(active_volume)
+        ]
+        max_current_chapter = max(volume_chapters or [max(1, int(start_chapter) - 1)])
+        relevant: list[dict[str, Any]] = []
+        for thread in threads:
+            planned = self._optional_int(thread.get("planned_resolve_chapter"))
+            first = self._optional_int(thread.get("first_chapter"))
+            if planned and planned <= max_current_chapter + 2:
+                relevant.append(thread)
+            elif first and first <= max_current_chapter and not planned:
+                relevant.append(thread)
+        return relevant[:8]
+
     def _previous_volume_for_chapter(self, state: dict[str, Any], chapter_number: int) -> int | None:
         chapter_volumes = state.get("chapter_volumes") or {}
         previous = [
@@ -309,6 +501,20 @@ class NovelWorkflow:
             return max(0, int(data.get(key) or 0))
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item or "").strip()]
 
     def _merge_chapter_outline_fields(self, work_id: int, chapter_number: int, item: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -385,6 +591,7 @@ class NovelWorkflow:
             "recent_summaries": self.repo.get_recent_summaries(work_id, start_chapter, limit=3),
         }
         volume_state = self._volume_state(work_id)
+        volume_transition_context = self._volume_transition_context(work_id, start_chapter, volume_state)
         context["volume_state"] = {
             "active_volume": volume_state.get("active_volume"),
             "volume_numbers": volume_state.get("volume_numbers", []),
@@ -392,6 +599,7 @@ class NovelWorkflow:
             "last_chapter_volume": self._previous_volume_for_chapter(volume_state, start_chapter),
             "rule": "系统会校验 AI 的分卷提案：不得跳卷；当前卷未达到 min_chapters 时不得进入下一卷；达到 hard_max_chapters 后会强制进入下一卷。",
         }
+        context["volume_transition_context"] = volume_transition_context
         if volume_number is not None:
             target_volume_number = int(volume_number or 1)
             context["target_volume_number"] = target_volume_number

@@ -10,12 +10,14 @@ const state = {
   chapterLoadSeq: 0,
   workLoadSeq: 0,
   pendingPlan: null,
+  pendingPlanReadable: "",
   pendingPlanWorkId: null,
   config: null,
   tab: "project",
   outline: { full_outline: "", volume_outline: [], chapters: [] },
   outlineSelection: { type: "full" },
   outlineExpandedVolumes: [],
+  writingExpandedVolumes: [],
   outlineTargetVolume: null,
   libraryKind: "characters",
   libraryItem: null,
@@ -94,7 +96,6 @@ const BOOK_CONTRACT_FIELDS = [
   ["chapter_payoff", "chapterPayoffInput", "章节回报"],
   ["opening_preference", "openingPreferenceInput", "开头偏好"],
   ["avoid", "avoidInput", "避雷"],
-  ["language_texture", "languageTextureInput", "语言质感"],
 ];
 
 const LIBRARY_CATEGORIES = {
@@ -732,11 +733,14 @@ function applyWorkState(data) {
   const workChanged = previousWorkId && Number(state.selectedWorkId) !== Number(previousWorkId);
   if (workChanged) {
     state.pendingPlan = null;
+    state.pendingPlanReadable = "";
     state.pendingPlanWorkId = null;
     state.pendingChapterResults = state.pendingChapterResults.filter((item) => Number(item.workId) === Number(state.selectedWorkId));
+    state.writingExpandedVolumes = [];
   }
   if (state.pendingPlanWorkId && state.pendingPlanWorkId !== state.selectedWorkId) {
     state.pendingPlan = null;
+    state.pendingPlanReadable = "";
     state.pendingPlanWorkId = null;
   }
   state.outline = data.outline || { full_outline: "", volume_outline: [], chapters: [] };
@@ -779,11 +783,13 @@ function clearWorkState() {
   state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
   state.chapterLoadSeq += 1;
   state.pendingPlan = null;
+  state.pendingPlanReadable = "";
   state.pendingPlanWorkId = null;
   state.pendingChapterResults = [];
   state.outline = { full_outline: "", volume_outline: [], chapters: [] };
   state.outlineSelection = { type: "full" };
   state.outlineExpandedVolumes = [];
+  state.writingExpandedVolumes = [];
   state.outlineTargetVolume = null;
   state.libraryItem = null;
   state.agentRuns = [];
@@ -1038,7 +1044,7 @@ function buildPlanItems() {
   const data = state.workData || {};
   const items = [];
   if (state.pendingPlan) {
-    items.push(["设定草稿", formatAny(state.pendingPlan)]);
+    items.push(["设定草稿", state.pendingPlanReadable || formatAny(state.pendingPlan)]);
   }
   const contract = data.book_contract || {};
   if (Object.values(contract).some((value) => String(value || "").trim())) {
@@ -1106,9 +1112,9 @@ async function generatePlan() {
       return;
     }
     state.pendingPlan = data.plan;
+    state.pendingPlanReadable = data.readable || "";
     state.pendingPlanWorkId = workId;
     renderPlanBrowser();
-    $("planPreview").textContent = data.readable || formatAny(data.plan);
     log("设定草稿已生成。");
     notify("设定草稿已生成。", "success");
   } catch (error) {
@@ -1130,6 +1136,7 @@ async function applyPlan() {
   }
   if (state.pendingPlanWorkId !== state.selectedWorkId) {
     state.pendingPlan = null;
+    state.pendingPlanReadable = "";
     state.pendingPlanWorkId = null;
     renderPlanBrowser();
     notify("设定草稿不属于当前文章，已清空。请重新生成。", "warning");
@@ -1141,6 +1148,7 @@ async function applyPlan() {
       body: { plan: state.pendingPlan, inputs: collectWorkForm() },
     });
     state.pendingPlan = null;
+    state.pendingPlanReadable = "";
     state.pendingPlanWorkId = null;
     applyWorkState(data);
     log("设定草稿已采用入库。");
@@ -1498,12 +1506,34 @@ async function generateChapterOutlines() {
       log("章节细纲已生成。");
       notify("章节细纲已生成。", "success");
     }
+    const transitionMessage = formatVolumeTransition(data.volume_transition);
+    if (transitionMessage) {
+      log(transitionMessage, "success");
+      notify(transitionMessage, "success");
+    }
   } catch (error) {
     if (taskWasStopped(task)) notify("章节细纲生成已停止。", "warning");
     else showError(error);
   } finally {
     finishTask("chapterOutlines");
   }
+}
+
+function formatVolumeTransition(transition) {
+  if (!transition?.changed) return "";
+  let fromLabel = `第${transition.from_volume}卷`;
+  let toLabel = `第${transition.to_volume}卷`;
+  if (transition.from_title) fromLabel += `《${transition.from_title}》`;
+  if (transition.to_title) toLabel += `《${transition.to_title}》`;
+  const lines = [`已从${fromLabel}切换到${toLabel}。`];
+  if (transition.reason) lines.push(`原因：${transition.reason}`);
+  if (Array.isArray(transition.carry_over) && transition.carry_over.length) {
+    lines.push(`遗留线索：${transition.carry_over.filter(Boolean).join("、")}`);
+  }
+  if (transition.next_volume_opening_focus) {
+    lines.push(`新卷开篇：${transition.next_volume_opening_focus}`);
+  }
+  return lines.join("\n");
 }
 
 function chapterByNumber(number) {
@@ -1668,6 +1698,7 @@ async function loadChapter(chapterNumber, targetTab) {
     if (seq !== state.chapterLoadSeq || Number(state.selectedWorkId) !== Number(workId)) return;
     state.selectedChapter = chapterNumber;
     state.currentChapter = data.chapter;
+    ensureWritingVolumeExpanded(volumeForChapter(data.chapter || {}));
     fillChapter(data);
     renderChapterLists();
     if (targetTab) setTab(targetTab);
@@ -1717,16 +1748,83 @@ function renderChapterLists() {
     writingList.innerHTML = '<div class="empty">暂无章节。</div>';
     return;
   }
-  for (const chapter of filtered) {
-    const status = chapterStatusLabel(chapter);
-    const item = document.createElement("div");
-    item.className = `chapter-item ${Number(chapter.chapter_number) === Number(state.selectedChapter) ? "active" : ""}`;
-    item.innerHTML = `
-      <div class="item-title">第 ${escapeHtml(chapter.chapter_number)} 章 · ${escapeHtml(chapter.title || "未命名")}</div>
-      <div class="item-meta">第 ${escapeHtml(chapter.volume_number || volumeForChapter(chapter))} 卷 · ${status}</div>
+  const volumes = writingVolumeGroups(filtered);
+  for (const group of volumes) {
+    const expanded = keyword || isWritingVolumeExpanded(group.volumeNumber);
+    const volumeItem = document.createElement("div");
+    volumeItem.className = `chapter-volume ${expanded ? "expanded" : ""}`;
+    volumeItem.innerHTML = `
+      <span class="tree-marker">${expanded ? "▾" : "▸"}</span>
+      <div class="item-title">第 ${escapeHtml(group.volumeNumber)} 卷 · ${escapeHtml(group.title || "未命名")}</div>
     `;
-    item.addEventListener("click", () => loadChapter(Number(chapter.chapter_number), "writing"));
-    writingList.appendChild(item);
+    volumeItem.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleWritingVolumeExpanded(group.volumeNumber);
+      renderChapterLists();
+    });
+    writingList.appendChild(volumeItem);
+    if (!expanded) continue;
+    for (const chapter of group.chapters) {
+      const status = chapterStatusLabel(chapter);
+      const item = document.createElement("div");
+      item.className = `chapter-item chapter-child ${Number(chapter.chapter_number) === Number(state.selectedChapter) ? "active" : ""}`;
+      item.innerHTML = `
+        <div class="item-title">第 ${escapeHtml(chapter.chapter_number)} 章 · ${escapeHtml(chapter.title || "未命名")}</div>
+        <div class="item-meta">${status}</div>
+      `;
+      item.addEventListener("click", () => {
+        ensureWritingVolumeExpanded(group.volumeNumber);
+        loadChapter(Number(chapter.chapter_number), "writing");
+      });
+      writingList.appendChild(item);
+    }
+  }
+}
+
+function writingVolumeGroups(chapters) {
+  const byVolume = new Map();
+  const volumes = (state.outline.volume_outline || []).map((volume, index) => ({
+    volumeNumber: Number(volume.volume_number || index + 1),
+    title: volume.title || "未命名",
+    chapters: [],
+  }));
+  for (const group of volumes) byVolume.set(group.volumeNumber, group);
+  for (const chapter of chapters) {
+    const volumeNumber = Number(chapter.volume_number || volumeForChapter(chapter) || 1);
+    if (!byVolume.has(volumeNumber)) {
+      byVolume.set(volumeNumber, {
+        volumeNumber,
+        title: `第${volumeNumber}卷`,
+        chapters: [],
+      });
+      volumes.push(byVolume.get(volumeNumber));
+    }
+    byVolume.get(volumeNumber).chapters.push(chapter);
+  }
+  for (const group of volumes) {
+    group.chapters.sort((a, b) => Number(a.chapter_number || 0) - Number(b.chapter_number || 0));
+  }
+  return volumes
+    .filter((group) => group.chapters.length)
+    .sort((a, b) => Number(a.volumeNumber) - Number(b.volumeNumber));
+}
+
+function isWritingVolumeExpanded(volumeNumber) {
+  return (state.writingExpandedVolumes || []).map(Number).includes(Number(volumeNumber));
+}
+
+function ensureWritingVolumeExpanded(volumeNumber) {
+  const number = Number(volumeNumber || 1);
+  if (!isWritingVolumeExpanded(number)) state.writingExpandedVolumes.push(number);
+}
+
+function toggleWritingVolumeExpanded(volumeNumber) {
+  const number = Number(volumeNumber || 1);
+  if (isWritingVolumeExpanded(number)) {
+    state.writingExpandedVolumes = state.writingExpandedVolumes.filter((item) => Number(item) !== number);
+  } else {
+    state.writingExpandedVolumes.push(number);
   }
 }
 
@@ -2709,7 +2807,6 @@ function labelFor(key) {
     chapter_payoff: "章节回报",
     opening_preference: "开头偏好",
     avoid: "避雷",
-    language_texture: "语言质感",
     context: "上下文",
     current_characters: "当前人物",
     current_conflict: "当前冲突",

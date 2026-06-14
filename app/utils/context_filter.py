@@ -40,7 +40,6 @@ def compact_genre_contract(contract: Any) -> dict[str, str]:
         "chapter_payoff",
         "opening_preference",
         "avoid",
-        "language_texture",
     ]
     result = {
         field: str(contract.get(field) or "").strip()
@@ -56,7 +55,6 @@ def compact_genre_contract(contract: Any) -> dict[str, str]:
         "chapter_payoff": result.get("chapter_payoff", ""),
         "opening_preference": result.get("opening_preference", ""),
         "avoid": result.get("avoid", ""),
-        "language_texture": result.get("language_texture", ""),
         "usage_rule": "每章只按这些短字段保持题材味道，不展开成长篇专项提示词。",
     }
 

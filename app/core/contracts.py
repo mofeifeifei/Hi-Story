@@ -64,6 +64,27 @@ def normalize_outline(data: Any) -> dict[str, Any]:
 
 def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
     result = _object_or_empty(data)
+    decision = result.get("volume_decision")
+    if not isinstance(decision, dict):
+        decision = {}
+    for key in [
+        "should_transition",
+        "from_volume",
+        "to_volume",
+        "reason",
+        "completed_milestones",
+        "unfinished_milestones",
+        "carry_over",
+        "next_volume_opening_focus",
+    ]:
+        default: Any = [] if key in {"completed_milestones", "unfinished_milestones", "carry_over"} else ""
+        if key == "should_transition":
+            default = False
+        decision.setdefault(key, default)
+    for key in ["completed_milestones", "unfinished_milestones", "carry_over"]:
+        if not isinstance(decision.get(key), list):
+            decision[key] = []
+    result["volume_decision"] = decision
     chapters = result.get("chapters")
     if not isinstance(chapters, list):
         result["chapters"] = []

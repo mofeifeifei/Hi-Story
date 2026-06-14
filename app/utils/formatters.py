@@ -320,7 +320,6 @@ def _format_book_contract(contract: dict[str, Any]) -> list[str]:
         ("章节回报", "chapter_payoff"),
         ("开头偏好", "opening_preference"),
         ("避雷", "avoid"),
-        ("语言质感", "language_texture"),
     ]
     return [f"{label}：{_text(contract.get(key))}" for label, key in fields]
 

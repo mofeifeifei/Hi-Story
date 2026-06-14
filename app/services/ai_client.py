@@ -590,7 +590,6 @@ class AIClient:
                 "chapter_payoff": "每章至少给出一个事件推进、信息增量、关系变化、胜负变化或新问题。",
                 "opening_preference": "优先从证据、命令、威胁、关系逼问、异常现场或上一章后果切入。",
                 "avoid": "避免泛氛围开头、普通动作开头、空泛章末和无代价万能解法。",
-                "language_texture": "具体、克制、紧凑，少用空泛感慨和模板化总结。",
             },
             "title_candidates": self._mock_title_candidates(title, idea, genre_text),
             "summary": f"{idea}。在{genre_text}框架下，主角从一个具体问题切入，逐步卷入更大的长期主线，并在选择、关系和代价中完成成长。",
@@ -826,7 +825,20 @@ class AIClient:
                     "forbidden": "禁止临时新增万能设定解决冲突，禁止重复同一开场场景。",
                 }
             )
-        return {"chapters": chapters}
+        target_volume = volume_number or (chapters[0]["volume_number"] if chapters else 1)
+        return {
+            "volume_decision": {
+                "should_transition": False,
+                "from_volume": target_volume,
+                "to_volume": target_volume,
+                "reason": "模拟模式默认继续当前卷；真实模型会根据卷完成度快照判断是否切卷。",
+                "completed_milestones": [],
+                "unfinished_milestones": [],
+                "carry_over": [],
+                "next_volume_opening_focus": "",
+            },
+            "chapters": chapters,
+        }
 
     def _mock_chapter_text(self, user_prompt: str, chapter_number: int, title: str, seed: int) -> str:
         profile = self._mock_profile(user_prompt)

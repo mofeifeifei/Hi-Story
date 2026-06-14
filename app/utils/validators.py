@@ -92,6 +92,9 @@ def validate_chapter_outlines(data: Any) -> list[str]:
     if not _is_list(chapters, 1):
         return ["缺少 chapters"]
     issues: list[str] = []
+    decision = data.get("volume_decision")
+    if decision is not None and not isinstance(decision, dict):
+        issues.append("volume_decision 必须是对象")
     for index, chapter in enumerate(chapters, 1):
         if not isinstance(chapter, dict):
             issues.append(f"第 {index} 个章节不是对象")
