@@ -116,6 +116,7 @@ class PlannerAgent(BaseAgent):
             f"请生成从第 {start_chapter} 章开始的 {count} 章细纲，输出供程序解析的合法 JSON。\n"
             f"{volume_instruction}"
             "JSON 字段：volume_decision, chapters。\n"
+            "无论是否换卷，都必须输出 chapters 数组；不能只输出 volume_decision，也不能把章节数组命名为 chapter_outlines。\n"
             "volume_decision 是本批细纲开始前的卷决策；显式指定目标卷时仍要返回，但 should_transition 必须为 false。\n"
             "chapters 内每项必须包含：chapter_number, volume_number, story_time, title, outline, opening_hook, continuity_debt, debt_type, opening_mode, opening_subject, opening_trigger, time_or_environment_function, "
             "previous_anchor, first_screen_conflict, forbidden_opening, reader_question_in, reader_answer_out, new_question_out, scene_cards, chapter_goal, conflict, main_scene, "

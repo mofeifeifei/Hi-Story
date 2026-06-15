@@ -12,6 +12,14 @@ from app.utils.json_parser import json_dumps, parse_json_object
 logger = logging.getLogger(__name__)
 
 
+class JsonValidationError(ValueError):
+    def __init__(self, issues: list[str], *, raw: str = "", parsed: Any = None) -> None:
+        self.issues = issues
+        self.raw = raw
+        self.parsed = parsed
+        super().__init__("AI 输出 JSON 未通过校验：" + "；".join(issues))
+
+
 class BaseAgent:
     agent_name = "base"
     prompt_file = ""
@@ -74,4 +82,4 @@ class BaseAgent:
             if not issues:
                 return parsed
 
-        raise ValueError("AI 输出 JSON 未通过校验：" + "；".join(issues))
+        raise JsonValidationError(issues, raw=raw, parsed=parsed)

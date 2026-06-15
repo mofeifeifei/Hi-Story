@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from app.database.repository import Repository
 from app.services.ai_client import AIClient
+from app.services.base_agent import JsonValidationError
 from app.services.memory_agent import MemoryAgent
 from app.services.planner_agent import PlannerAgent
 from app.services.reviewer_agent import ReviewerAgent
@@ -105,12 +106,34 @@ class NovelWorkflow:
             start_chapter=start_chapter,
             volume_number=volume_number,
         )
-        result = self.planner.generate_chapter_outlines(
-            bundle,
-            start_chapter=start_chapter,
-            count=count,
-            volume_number=volume_number,
-        )
+        try:
+            result = self.planner.generate_chapter_outlines(
+                bundle,
+                start_chapter=start_chapter,
+                count=count,
+                volume_number=volume_number,
+            )
+        except JsonValidationError as exc:
+            self.repo.log_agent_run(
+                work_id=work_id,
+                chapter_id=None,
+                agent_name="planner",
+                model=self.client.model_for("planner"),
+                prompt_name="planner_prompt.md",
+                input_preview=json_dumps(
+                    {
+                        "work_id": work_id,
+                        "start_chapter": start_chapter,
+                        "count": count,
+                        "volume_number": volume_number,
+                    }
+                ),
+                output=exc.raw or json_dumps(exc.parsed),
+                status="failed",
+                error=str(exc),
+                **self.client.last_usage("planner"),
+            )
+            raise
         if should_stop and should_stop():
             raise RuntimeError("任务已停止：章节细纲已返回，但未保存。")
         return self.save_generated_chapter_outlines(
@@ -237,7 +260,7 @@ class NovelWorkflow:
         target_chapters = self._int_field(current_plan, "target_chapters")
         soft_max_chapters = self._int_field(current_plan, "soft_max_chapters")
         hard_max_chapters = self._int_field(current_plan, "hard_max_chapters")
-        open_threads = self.repo.list_plot_threads(work_id, status="open")[:12]
+        open_threads = self.repo.list_plot_threads(work_id, status="open")
         return {
             "active_volume": active_volume,
             "active_volume_title": current_plan.get("title", ""),
@@ -253,7 +276,7 @@ class NovelWorkflow:
             "exit_condition": current_plan.get("exit_condition", ""),
             "required_milestones": current_plan.get("required_milestones", []),
             "recent_summaries": self.repo.get_recent_summaries(work_id, start_chapter, limit=5),
-            "open_plot_threads": open_threads,
+            "open_plot_threads": open_threads[:12],
             "volume_plot_threads": self._volume_plot_threads(open_threads, state, active_volume, start_chapter),
             "rule": "AI 判断剧情是否该换卷；程序硬校验：未达 min_chapters 不得换卷，达到 hard_max_chapters 强制换卷，不得跳卷，下一卷必须存在。",
         }
@@ -454,11 +477,18 @@ class NovelWorkflow:
         for thread in threads:
             planned = self._optional_int(thread.get("planned_resolve_chapter"))
             first = self._optional_int(thread.get("first_chapter"))
-            if planned and planned <= max_current_chapter + 2:
+            if planned and planned <= max_current_chapter + 3:
                 relevant.append(thread)
-            elif first and first <= max_current_chapter and not planned:
+            elif first and max_current_chapter - 5 <= first <= max_current_chapter and not planned:
                 relevant.append(thread)
-        return relevant[:8]
+        return sorted(
+            relevant,
+            key=lambda item: (
+                self._optional_int(item.get("planned_resolve_chapter")) or 999999,
+                -(self._optional_int(item.get("first_chapter")) or 0),
+                self._optional_int(item.get("id")) or 0,
+            ),
+        )[:8]
 
     def _previous_volume_for_chapter(self, state: dict[str, Any], chapter_number: int) -> int | None:
         chapter_volumes = state.get("chapter_volumes") or {}

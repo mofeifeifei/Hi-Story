@@ -29,8 +29,10 @@ from app.utils.formatters import (
 )
 from app.utils.context_filter import context_for_memory, context_for_reviser
 from app.utils.json_parser import json_dumps, parse_json_object
+from app.utils.outline_utils import normalize_chapter_outline
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.text_check import manuscript_quality_report, quality_summary
+from app.utils.word_target import chapter_word_target_from_style
 from app.web.config_api import public_config, sanitize_config_update
 from app.web.state import STATE
 
@@ -257,6 +259,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         return _work_state(work_id)
                 if len(parts) == 6 and parts[5] == "outline" and method == "PUT":
                     return _save_chapter_outline(work_id, chapter_number, body)
+                if len(parts) == 6 and parts[5] == "context" and method == "GET":
+                    return _chapter_context_state(work_id, chapter_number)
                 if len(parts) == 6 and parts[5] == "clear-text" and method == "POST":
                     _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
                     STATE.repo.clear_chapter_text(work_id, chapter_number)
@@ -415,8 +419,11 @@ def run(host: str = "127.0.0.1", port: int = 8765, *, open_browser: bool = True)
 
 def _write_server_url(url: str) -> None:
     log_dir = DATA_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "server.url").write_text(url, encoding="utf-8")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "server.url").write_text(url, encoding="utf-8")
+    except OSError:
+        return
 
 
 def _available_port(host: str, start: int) -> int:
@@ -550,6 +557,20 @@ def _work_state(work_id: int) -> dict[str, Any]:
 def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     memory = parse_json_object(chapter.get("memory_json") or "{}", default={}) or {}
+    chapter_word_target = _chapter_word_target(work_id)
+    return {
+        "chapter": chapter,
+        "chapter_word_target": chapter_word_target,
+        "context": {"chapter_word_target": chapter_word_target},
+        "context_readable": "",
+        "context_error": "",
+        "context_deferred": True,
+        "memory_readable": format_memory_readable(memory),
+        "outline_readable": format_outline_readable({"chapters": [chapter]}),
+    }
+
+
+def _chapter_context_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     context = {}
     context_readable = ""
     context_error = ""
@@ -559,13 +580,18 @@ def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         context_error = str(exc)
     return {
-        "chapter": chapter,
+        "chapter_number": chapter_number,
         "context": context,
         "context_readable": context_readable,
         "context_error": context_error,
-        "memory_readable": format_memory_readable(memory),
-        "outline_readable": format_outline_readable({"chapters": [chapter]}),
+        "context_deferred": False,
+        "chapter_word_target": context.get("chapter_word_target") or _chapter_word_target(work_id),
     }
+
+
+def _chapter_word_target(work_id: int) -> dict[str, Any]:
+    work = STATE.repo.get_work(work_id)
+    return chapter_word_target_from_style(work.get("style", ""))
 
 
 def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -> dict[str, Any]:
@@ -834,10 +860,11 @@ def _revise_chapter_with_instruction(
 
 def _outline_data(work_id: int) -> dict[str, Any]:
     work = STATE.repo.get_work(work_id)
+    chapters = [normalize_chapter_outline(chapter) for chapter in STATE.repo.list_chapter_outlines(work_id)]
     return {
         "full_outline": work.get("full_outline") or "",
         "volume_outline": parse_json_object(work.get("volume_outline") or "[]", default=[]),
-        "chapters": STATE.repo.list_chapter_outlines(work_id),
+        "chapters": chapters,
     }
 
 

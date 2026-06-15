@@ -8,6 +8,10 @@ const state = {
   currentChapterWordTarget: null,
   editor: { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" },
   chapterLoadSeq: 0,
+  chapterLoadController: null,
+  contextLoadSeq: 0,
+  contextLoadController: null,
+  contextLoadedFor: null,
   workLoadSeq: 0,
   pendingPlan: null,
   pendingPlanReadable: "",
@@ -244,12 +248,14 @@ async function api(path, options = {}) {
 }
 
 function log(message, type = "info", meta = {}) {
+  const chapter = meta.chapter ?? meta.chapterNumber ?? state.task?.chapterNumber ?? "";
   const entry = {
     time: new Date(),
     message,
     type,
     work: meta.work ?? state.work?.title ?? "",
-    chapter: meta.chapter ?? state.task?.chapterNumber ?? state.selectedChapter ?? "",
+    chapter,
+    range: meta.range ?? state.task?.range ?? "",
     task: meta.task ?? state.task?.title ?? "",
   };
   state.runLogs.unshift(entry);
@@ -271,6 +277,7 @@ function renderLogList() {
     const meta = [
       entry.work ? `文章：${entry.work}` : "",
       entry.chapter ? `章节：第 ${entry.chapter} 章` : "",
+      entry.range ? `范围：${entry.range}` : "",
       entry.task ? `任务：${entry.task}` : "",
     ].filter(Boolean).join(" · ");
     item.innerHTML = `
@@ -433,7 +440,7 @@ function showError(error) {
   if (message === "未知接口。") {
     message = "未知接口。前端与后台服务版本可能不一致，请关闭旧后台后重新启动 Hi Story.bat。";
   }
-  log(`失败：${message}`);
+  log(`失败：${message}`, "error");
   notify(message, "error");
 }
 
@@ -476,6 +483,7 @@ function startTask(kind, title, detail, meta = {}) {
     stopped: false,
     workId: meta.workId ?? state.selectedWorkId,
     chapterNumber: meta.chapterNumber ?? null,
+    range: meta.range ?? "",
   };
   updateTaskUI();
   return state.task;
@@ -782,6 +790,12 @@ function clearWorkState() {
   state.currentChapterWordTarget = null;
   state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
   state.chapterLoadSeq += 1;
+  state.contextLoadSeq += 1;
+  state.contextLoadedFor = null;
+  if (state.chapterLoadController) state.chapterLoadController.abort();
+  if (state.contextLoadController) state.contextLoadController.abort();
+  state.contextLoadController = null;
+  state.chapterLoadController = null;
   state.pendingPlan = null;
   state.pendingPlanReadable = "";
   state.pendingPlanWorkId = null;
@@ -1477,11 +1491,12 @@ async function generateChapterOutlines() {
     );
     if (!ok) return;
   }
-  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成第 ${start} 章起的 ${count} 章任务单，系统会校验所属分卷。`, { workId });
+  const range = `第 ${start} 章起 ${count} 章`;
+  const task = startTask("chapterOutlines", "生成章节细纲", `策划 AI 正在生成${range}的任务单，系统会校验所属分卷。`, { workId, range });
   try {
     await persistOutline(workId);
     if (taskWasStopped(task)) return;
-    log(`策划 AI 正在生成第 ${start} 章起的 ${count} 章细纲，系统会校验所属分卷...`);
+    log(`策划 AI 正在生成第 ${start} 章起的 ${count} 章细纲，系统会校验所属分卷...`, "info", { range, task: task.title });
     const data = await api(`/api/works/${workId}/chapter-outlines`, {
       method: "POST",
       body: { start_chapter: start, count, task_id: task.id },
@@ -1500,15 +1515,15 @@ async function generateChapterOutlines() {
     setNextChapterStart();
     updateOutlineGenerateControls();
     if (data.partial_warning) {
-      log(data.partial_warning);
+      log(data.partial_warning, "warning", { range, task: task.title });
       notify(data.partial_warning, "warning");
     } else {
-      log("章节细纲已生成。");
+      log("章节细纲已生成。", "success", { range, task: task.title });
       notify("章节细纲已生成。", "success");
     }
     const transitionMessage = formatVolumeTransition(data.volume_transition);
     if (transitionMessage) {
-      log(transitionMessage, "success");
+      log(transitionMessage, "success", { range, task: task.title });
       notify(transitionMessage, "success");
     }
   } catch (error) {
@@ -1693,18 +1708,64 @@ async function loadChapter(chapterNumber, targetTab) {
   if (!requireWork()) return;
   const workId = state.selectedWorkId;
   const seq = ++state.chapterLoadSeq;
+  state.contextLoadSeq += 1;
+  state.contextLoadedFor = null;
+  if (state.chapterLoadController) state.chapterLoadController.abort();
+  if (state.contextLoadController) state.contextLoadController.abort();
+  const controller = new AbortController();
+  state.chapterLoadController = controller;
   try {
-    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}`);
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}`, { signal: controller.signal });
     if (seq !== state.chapterLoadSeq || Number(state.selectedWorkId) !== Number(workId)) return;
     state.selectedChapter = chapterNumber;
     state.currentChapter = data.chapter;
-    ensureWritingVolumeExpanded(volumeForChapter(data.chapter || {}));
+    const expandedChanged = ensureWritingVolumeExpanded(volumeForChapter(data.chapter || {}));
     fillChapter(data);
-    renderChapterLists();
+    if (expandedChanged) renderChapterLists();
+    else updateActiveChapterListItem();
     if (targetTab) setTab(targetTab);
     log(`已载入第 ${chapterNumber} 章。`);
   } catch (error) {
+    if (error?.name === "AbortError") return;
     showError(error);
+  } finally {
+    if (state.chapterLoadController === controller) state.chapterLoadController = null;
+  }
+}
+
+async function loadChapterContext() {
+  const target = loadedEditorTarget();
+  if (!target) {
+    $("contextPreview").textContent = "请先载入章节。";
+    return;
+  }
+  if (
+    state.contextLoadedFor
+    && Number(state.contextLoadedFor.workId) === Number(target.workId)
+    && Number(state.contextLoadedFor.chapterNumber) === Number(target.chapterNumber)
+  ) {
+    return;
+  }
+  const seq = ++state.contextLoadSeq;
+  const { workId, chapterNumber } = target;
+  if (state.contextLoadController) state.contextLoadController.abort();
+  const controller = new AbortController();
+  state.contextLoadController = controller;
+  $("contextPreview").textContent = "正在构建上下文...";
+  try {
+    const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/context`, { signal: controller.signal });
+    if (seq !== state.contextLoadSeq || !editorIsShowing(workId, chapterNumber)) return;
+    state.currentChapterWordTarget = data.chapter_word_target || data.context?.chapter_word_target || state.currentChapterWordTarget;
+    $("contextPreview").textContent = data.context_error
+      ? `上下文构建失败：${data.context_error}`
+      : formatPreviewObject(data.context, data.context_readable, "暂无上下文。");
+    if (!data.context_error) state.contextLoadedFor = { workId, chapterNumber };
+    updateChapterWordStatus();
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (seq === state.contextLoadSeq && editorIsShowing(workId, chapterNumber)) showError(error);
+  } finally {
+    if (state.contextLoadController === controller) state.contextLoadController = null;
   }
 }
 
@@ -1721,6 +1782,10 @@ function clearEditor() {
   state.currentChapter = null;
   state.currentChapterWordTarget = null;
   state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
+  state.contextLoadSeq += 1;
+  state.contextLoadedFor = null;
+  if (state.contextLoadController) state.contextLoadController.abort();
+  state.contextLoadController = null;
   if ($("writingChapterNumberInput")) $("writingChapterNumberInput").value = state.selectedChapter || 1;
   if ($("chapterTitleInput")) $("chapterTitleInput").value = "";
   if ($("chapterTextInput")) $("chapterTextInput").value = "";
@@ -1769,6 +1834,7 @@ function renderChapterLists() {
       const status = chapterStatusLabel(chapter);
       const item = document.createElement("div");
       item.className = `chapter-item chapter-child ${Number(chapter.chapter_number) === Number(state.selectedChapter) ? "active" : ""}`;
+      item.dataset.chapterNumber = String(chapter.chapter_number || "");
       item.innerHTML = `
         <div class="item-title">第 ${escapeHtml(chapter.chapter_number)} 章 · ${escapeHtml(chapter.title || "未命名")}</div>
         <div class="item-meta">${status}</div>
@@ -1816,7 +1882,15 @@ function isWritingVolumeExpanded(volumeNumber) {
 
 function ensureWritingVolumeExpanded(volumeNumber) {
   const number = Number(volumeNumber || 1);
-  if (!isWritingVolumeExpanded(number)) state.writingExpandedVolumes.push(number);
+  if (isWritingVolumeExpanded(number)) return false;
+  state.writingExpandedVolumes.push(number);
+  return true;
+}
+
+function updateActiveChapterListItem() {
+  document.querySelectorAll("#writingChapterList .chapter-item").forEach((item) => {
+    item.classList.toggle("active", Number(item.dataset.chapterNumber || 0) === Number(state.selectedChapter));
+  });
 }
 
 function toggleWritingVolumeExpanded(volumeNumber) {
@@ -1832,14 +1906,16 @@ function fillChapter(data) {
   const chapter = data.chapter || {};
   state.currentChapter = chapter;
   setEditorOwner(chapter);
-  state.currentChapterWordTarget = data.context?.chapter_word_target || null;
+  state.currentChapterWordTarget = data.chapter_word_target || data.context?.chapter_word_target || null;
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
   $("chapterTextInput").value = chapter.status === "draft" && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "";
   $("chapterOutlinePreview").textContent = formatChapterTask(chapter) || data.outline_readable || "暂无任务单。";
   $("contextPreview").textContent = data.context_error
     ? `上下文构建失败：${data.context_error}`
-    : formatPreviewObject(data.context, data.context_readable, "暂无上下文。");
+    : data.context_deferred
+      ? "上下文将在打开本面板时构建。"
+      : formatPreviewObject(data.context, data.context_readable, "暂无上下文。");
   $("memoryPreview").textContent = formatPreviewObject(data.memory || parseJson(chapter.memory_json, null), data.memory_readable, "暂无记忆卡。");
   $("reviewPreview").textContent = "暂无审稿结果。";
   $("draftPreview").textContent = chapter.draft || "暂无初稿。";
@@ -2017,6 +2093,7 @@ function switchInspector(event) {
   const name = button.dataset.inspector;
   document.querySelectorAll("#inspectorTabs button").forEach((node) => node.classList.toggle("active", node === button));
   document.querySelectorAll(".inspector-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === name));
+  if (name === "context") loadChapterContext();
 }
 
 async function generateChapter() {

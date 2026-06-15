@@ -63,7 +63,14 @@ def normalize_outline(data: Any) -> dict[str, Any]:
 
 
 def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
+    if isinstance(data, list):
+        data = {"chapters": data}
     result = _object_or_empty(data)
+    if "chapters" not in result:
+        for key in ["chapter_outlines", "chapterOutlines", "items"]:
+            if isinstance(result.get(key), list):
+                result["chapters"] = result[key]
+                break
     decision = result.get("volume_decision")
     if not isinstance(decision, dict):
         decision = {}
@@ -128,9 +135,23 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("ending_hook", "")
         item.setdefault("handoff", "")
         item.setdefault("forbidden", "")
+        _fill_missing_ending_hook(item)
         normalized_chapters.append(item)
     result["chapters"] = normalized_chapters
     return result
+
+
+def _fill_missing_ending_hook(item: dict[str, Any]) -> None:
+    if str(item.get("ending_hook") or "").strip():
+        return
+    anchor = (
+        str(item.get("ending_external_anchor") or "").strip()
+        or str(item.get("next_continuity_debt") or "").strip()
+        or str(item.get("next_opening_action") or "").strip()
+        or str(item.get("handoff") or "").strip()
+    )
+    if anchor:
+        item["ending_hook"] = f"【章尾钩子：承接压力】【强度：中】{anchor}"
 
 
 def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> dict[str, Any]:

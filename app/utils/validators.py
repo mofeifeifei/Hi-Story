@@ -97,16 +97,17 @@ def validate_chapter_outlines(data: Any) -> list[str]:
         issues.append("volume_decision 必须是对象")
     for index, chapter in enumerate(chapters, 1):
         if not isinstance(chapter, dict):
-            issues.append(f"第 {index} 个章节不是对象")
+            issues.append(f"返回第 {index} 项不是章节对象")
             continue
+        label = _chapter_issue_label(index, chapter)
         if chapter.get("chapter_number") in (None, ""):
-            issues.append(f"第 {index} 章缺少 chapter_number")
+            issues.append(f"{label}缺少 chapter_number")
         if chapter.get("volume_number") in (None, ""):
-            issues.append(f"第 {index} 章缺少 volume_number")
+            issues.append(f"{label}缺少 volume_number")
         if not _is_text(chapter.get("title")):
-            issues.append(f"第 {index} 章缺少 title")
+            issues.append(f"{label}缺少 title")
         if not _is_text(chapter.get("outline"), 30):
-            issues.append(f"第 {index} 章 outline 过短")
+            issues.append(f"{label}outline 过短")
         for key in [
             "story_time",
             "opening_hook",
@@ -125,16 +126,23 @@ def validate_chapter_outlines(data: Any) -> list[str]:
             "handoff",
         ]:
             if not _is_text(chapter.get(key)):
-                issues.append(f"第 {index} 章缺少 {key}")
+                issues.append(f"{label}缺少 {key}")
         scene_cards = chapter.get("scene_cards")
         if not isinstance(scene_cards, list):
-            issues.append(f"第 {index} 章 scene_cards 必须是数组")
+            issues.append(f"{label}scene_cards 必须是数组")
         elif len(scene_cards) < 3:
-            issues.append(f"第 {index} 章 scene_cards 少于 3 个")
+            issues.append(f"{label}scene_cards 少于 3 个")
         for key in ["ending_hook"]:
             if not _is_text(chapter.get(key)):
-                issues.append(f"第 {index} 章缺少 {key}")
+                issues.append(f"{label}缺少 {key}")
     return issues
+
+
+def _chapter_issue_label(index: int, chapter: dict[str, Any]) -> str:
+    chapter_number = chapter.get("chapter_number")
+    if chapter_number not in (None, ""):
+        return f"返回第 {index} 项（目标第 {chapter_number} 章）"
+    return f"返回第 {index} 项"
 
 
 def validate_review(data: Any) -> list[str]:
