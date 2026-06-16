@@ -16,9 +16,11 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from app.core.contracts import normalize_work_plan
+from app.database.repository import Repository
 from app.exporters.export_docx import export_chapter_docx, export_docx, export_range_docx
 from app.exporters.export_txt import export_chapter_txt, export_range_txt, export_txt
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
+from app.services.ai_client import AIClient
 from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, save_config
 from app.utils.formatters import (
     format_context_readable,
@@ -35,6 +37,7 @@ from app.utils.text_check import manuscript_quality_report, quality_summary
 from app.utils.word_target import chapter_word_target_from_style
 from app.web.config_api import public_config, sanitize_config_update
 from app.web.state import STATE
+from app.workflow import NovelWorkflow
 
 
 STATIC_DIR = RESOURCE_DIR / "web"
@@ -66,6 +69,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
 
     def _handle_api(self, method: str, path: str) -> None:
         try:
+            self._check_api_token(method, self._parts(path))
             result = self._route_api(method, self._parts(path), self._read_json())
             self._send_json({"ok": True, "data": result})
         except ValueError as exc:
@@ -73,6 +77,13 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             _log_server_error(method, path, exc)
             self._send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _check_api_token(self, method: str, parts: list[str]) -> None:
+        if not _requires_api_token(method, parts):
+            return
+        token = self.headers.get("X-HiStory-Token", "")
+        if not token or token != STATE.api_token:
+            raise ValueError("本地页面令牌无效，请刷新页面或重启服务。")
 
     def _route_api(self, method: str, parts: list[str], body: dict[str, Any]) -> Any:
         if parts == ["api", "health"]:
@@ -91,7 +102,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 STATE.reload_config()
                 return public_config(config)
         if parts == ["api", "config", "test"] and method == "POST":
-            return STATE.workflow.client.test_connection()
+            return _task_workflow().client.test_connection()
         if parts == ["api", "shutdown"] and method == "POST":
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"message": "服务正在关闭"}
@@ -131,7 +142,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 _start_task(task_id, work_id, kind="plan", title="生成设定草稿", stage="project", input_data=body)
                 try:
                     inputs = _clean_inputs(body or _inputs_from_work(STATE.repo.get_work(work_id)))
-                    plan = normalize_work_plan(STATE.workflow.planner.generate_work_plan(inputs))
+                    workflow = _task_workflow_for(task_id)
+                    plan = normalize_work_plan(workflow.planner.generate_work_plan(inputs))
                     _raise_if_stopped(task_id, "任务已停止：设定草稿已返回，但未写入界面。")
                     return {"plan": plan, "readable": format_project_readable(plan)}
                 except Exception as exc:
@@ -151,11 +163,10 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     work_id=work_id,
                     chapter_id=None,
                     agent_name="planner",
-                    model=STATE.workflow.client.model_for("planner"),
+                    model=_task_workflow().client.model_for("planner"),
                     prompt_name="planner_prompt.md",
                     input_preview=json_dumps(inputs),
                     output=json_dumps(plan),
-                    **STATE.workflow.client.last_usage("planner"),
                 )
                 return _work_state(work_id)
 
@@ -164,7 +175,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     task_id = _task_id(body)
                     _start_task(task_id, work_id, kind="outline", title="生成全书大纲", stage="outline", input_data=body)
                     try:
-                        STATE.workflow.generate_outline(work_id, should_stop=lambda: STATE.task_cancelled(task_id))
+                        workflow = _task_workflow_for(task_id)
+                        workflow.generate_outline(work_id, should_stop=lambda: STATE.task_cancelled(task_id))
                         return _work_state(work_id)
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id)
@@ -183,7 +195,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     start = max(1, int(body.get("start_chapter") or 1))
                     count = min(30, max(1, int(body.get("count") or 3)))
                     volume_number = int(body["volume_number"]) if body.get("volume_number") not in (None, "") else None
-                    outline_result = STATE.workflow.generate_chapter_outlines(
+                    workflow = _task_workflow_for(task_id)
+                    outline_result = workflow.generate_chapter_outlines(
                         work_id,
                         start_chapter=start,
                         count=count,
@@ -284,11 +297,13 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     )
                     try:
                         mode = str(body.get("mode") or "standard")
-                        result = STATE.workflow.generate_chapter(
+                        formal_mode = mode != "fast"
+                        workflow = _task_workflow_for(task_id)
+                        result = workflow.generate_chapter(
                             work_id,
                             chapter_number,
-                            do_review=mode in {"standard", "polish"},
-                            do_revise=mode == "polish",
+                            do_review=formal_mode,
+                            do_revise=formal_mode,
                             do_memory=bool(body.get("do_memory", False)),
                             should_stop=lambda: STATE.task_cancelled(task_id),
                         )
@@ -313,9 +328,11 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         input_data=body,
                     )
                     try:
+                        workflow = _task_workflow_for(task_id)
                         return _generate_memory(
                             work_id,
                             chapter_number,
+                            workflow=workflow,
                             should_stop=lambda: STATE.task_cancelled(task_id),
                         )
                     except Exception as exc:
@@ -337,10 +354,12 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         input_data={"instruction": body.get("instruction", "")},
                     )
                     try:
+                        workflow = _task_workflow_for(task_id)
                         return _revise_chapter_with_instruction(
                             work_id,
                             chapter_number,
                             body,
+                            workflow=workflow,
                             should_stop=lambda: STATE.task_cancelled(task_id),
                         )
                     except Exception as exc:
@@ -370,6 +389,8 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
             return
         content_type = _content_type(file_path)
         data = file_path.read_bytes()
+        if file_path == STATIC_DIR / "index.html":
+            data = _inject_api_token(data)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -421,9 +442,35 @@ def _write_server_url(url: str) -> None:
     log_dir = DATA_DIR / "logs"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "server.url").write_text(url, encoding="utf-8")
+        (log_dir / "server.url").write_text(f"{url}\ntoken={STATE.api_token}\n", encoding="utf-8")
     except OSError:
         return
+
+
+def _inject_api_token(data: bytes) -> bytes:
+    html = data.decode("utf-8")
+    script = f"<script>window.__HI_STORY_TOKEN__ = {json.dumps(STATE.api_token)};</script>"
+    if "</head>" in html:
+        html = html.replace("</head>", script + "\n</head>", 1)
+    else:
+        html = script + html
+    return html.encode("utf-8")
+
+
+def _requires_api_token(method: str, parts: list[str]) -> bool:
+    if parts == ["api", "health"]:
+        return False
+    return bool(parts and parts[0] == "api")
+
+
+def _task_workflow() -> NovelWorkflow:
+    return NovelWorkflow(repo=Repository(), client=AIClient(load_config()))
+
+
+def _task_workflow_for(task_id: str) -> NovelWorkflow:
+    workflow = _task_workflow()
+    STATE.register_task_cleanup(task_id, workflow.client.close)
+    return workflow
 
 
 def _available_port(host: str, start: int) -> int:
@@ -509,11 +556,12 @@ def _finish_task(
 
 
 def _finish_task_error(task_id: str, exc: Exception, *, work_id: int | None = None, chapter_id: int | None = None) -> None:
-    status = "cancelled" if str(exc).startswith(TASK_CANCELLED_PREFIX) else "failed"
+    message = str(exc)
+    status = "cancelled" if message.startswith(TASK_CANCELLED_PREFIX) or message == "AI 请求已取消。" else "failed"
     if work_id is None:
-        STATE.finish_task(task_id, status=status, error=str(exc))
+        STATE.finish_task(task_id, status=status, error=message)
     else:
-        _finish_task(task_id, work_id, status=status, error=str(exc), chapter_id=chapter_id)
+        _finish_task(task_id, work_id, status=status, error=message, chapter_id=chapter_id)
 
 
 def _chapter_id_or_none(work_id: int, chapter_number: int) -> int | None:
@@ -546,8 +594,6 @@ def _work_state(work_id: int) -> dict[str, Any]:
         "historical_facts": STATE.repo.list_historical_facts(work_id),
         "chapter_notes": STATE.repo.list_chapter_notes(work_id),
         "sync_events": STATE.repo.list_sync_events(work_id),
-        "agent_runs": STATE.repo.list_agent_runs(work_id, limit=120),
-        "task_runs": STATE.repo.list_task_runs(work_id, limit=120),
         "export_dir": str(_current_export_dir(work_id)),
         "default_export_dir": str(STATE.repo.export_dir(work_id)),
         "custom_export_dir": work_id in STATE.custom_export_dirs,
@@ -575,7 +621,7 @@ def _chapter_context_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     context_readable = ""
     context_error = ""
     try:
-        context = STATE.workflow.build_chapter_context(work_id, chapter_number)
+        context = _task_workflow().build_chapter_context(work_id, chapter_number)
         context_readable = format_context_readable(context)
     except Exception as exc:  # noqa: BLE001
         context_error = str(exc)
@@ -668,7 +714,7 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
     title = str(body.get("title") or chapter.get("title") or f"第{chapter_number}章").strip()
     text = strip_chapter_heading(str(body.get("final_text") or ""), chapter_number, title)
     try:
-        context = STATE.workflow.build_chapter_context(work_id, chapter_number)
+        context = _task_workflow().build_chapter_context(work_id, chapter_number)
     except Exception:  # noqa: BLE001
         context = {}
     quality = manuscript_quality_report(
@@ -678,6 +724,9 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
         chapter_title=title,
         stage="手动保存稿",
     )
+    hard_blockers = _manual_save_hard_blockers(quality)
+    if hard_blockers:
+        raise ValueError("正文不能保存：" + "；".join(hard_blockers))
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
     STATE.repo.save_final_after_manual_edit(
@@ -696,8 +745,24 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
             "manual": quality,
             "summary": quality_summary(quality),
             "warning_only": True,
+            "saved_as_final": True,
         },
     }
+
+
+def _manual_save_hard_blockers(quality: dict[str, Any]) -> list[str]:
+    hard_markers = [
+        "为空",
+        "JSON",
+        "Markdown 代码块",
+        "结构化协议内容",
+    ]
+    blockers = []
+    for item in quality.get("blockers") or []:
+        text = str(item or "").strip()
+        if text and any(marker in text for marker in hard_markers):
+            blockers.append(text)
+    return blockers
 
 
 def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -767,18 +832,35 @@ def _generate_memory(
     work_id: int,
     chapter_number: int,
     *,
+    workflow: NovelWorkflow,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     final_text = str(chapter.get("final_text") or "").strip()
+    promoted_problem_draft = False
+    if not final_text and chapter.get("status") == "problem_draft":
+        final_text = str(chapter.get("draft") or "").strip()
+        if final_text:
+            STATE.repo.save_final_after_manual_edit(
+                work_id,
+                chapter["id"],
+                final_text,
+                title=chapter.get("title") or f"第{chapter_number}章",
+                ending_hook=chapter.get("ending_hook") or "",
+                handoff=chapter.get("handoff") or "",
+                memory_json="",
+                invalidate_memory=True,
+            )
+            chapter = STATE.repo.get_chapter(work_id, chapter_number)
+            promoted_problem_draft = True
     if not final_text:
         raise ValueError("当前章节没有已保存最终稿，无法生成记忆。")
-    context = STATE.workflow.build_chapter_context(work_id, chapter_number)
+    context = workflow.build_chapter_context(work_id, chapter_number)
     memory_context = context_for_memory(context)
-    memory = STATE.workflow.memory.make_memory_card(memory_context, final_text)
+    memory = workflow.memory.make_memory_card(memory_context, final_text)
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：章节记忆已返回，但未入库。")
-    memory = STATE.workflow.normalize_output_names(work_id, memory)
+    memory = workflow.normalize_output_names(work_id, memory)
     STATE.repo.apply_memory_card(
         work_id=work_id,
         chapter_id=chapter["id"],
@@ -789,16 +871,17 @@ def _generate_memory(
         work_id=work_id,
         chapter_id=chapter["id"],
         agent_name="memory",
-        model=STATE.workflow.client.model_for("memory"),
+        model=workflow.client.model_for("memory"),
         prompt_name="memory_prompt.md",
         input_preview=json_dumps({"context": memory_context, "final_text": final_text[:3000]}),
         output=json_dumps(memory),
-        **STATE.workflow.client.last_usage("memory"),
+        **workflow.client.last_usage("memory"),
     )
     return {
         **_chapter_state(work_id, chapter_number),
         "memory": memory,
         "memory_readable": format_memory_readable(memory),
+        "promoted_problem_draft": promoted_problem_draft,
         "work_state": _work_state(work_id),
     }
 
@@ -808,6 +891,7 @@ def _revise_chapter_with_instruction(
     chapter_number: int,
     body: dict[str, Any],
     *,
+    workflow: NovelWorkflow,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     instruction = str(body.get("instruction") or "").strip()
@@ -818,14 +902,14 @@ def _revise_chapter_with_instruction(
         raise ValueError("当前正文为空，无法按意见修订。")
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
-    context = STATE.workflow.build_chapter_context(work_id, chapter_number)
+    context = workflow.build_chapter_context(work_id, chapter_number)
     reviser_context = context_for_reviser(context)
-    revised = STATE.workflow.reviser.revise_with_instruction(reviser_context, current_text, instruction)
+    revised = workflow.reviser.revise_with_instruction(reviser_context, current_text, instruction)
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：修订稿已返回，但未写入界面。")
     latest_chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, latest_chapter, require_identity=True)
-    revised = STATE.workflow.normalize_output_names(work_id, revised)
+    revised = workflow.normalize_output_names(work_id, revised)
     revised = strip_chapter_heading(revised, chapter_number, latest_chapter.get("title"))
     memory_invalidated = bool(str(latest_chapter.get("memory_json") or "").strip())
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
@@ -843,11 +927,11 @@ def _revise_chapter_with_instruction(
         work_id=work_id,
         chapter_id=chapter["id"],
         agent_name="reviser",
-        model=STATE.workflow.client.model_for("reviser"),
+        model=workflow.client.model_for("reviser"),
         prompt_name="reviser_prompt.md",
         input_preview=json_dumps({"context": reviser_context, "instruction": instruction, "current_text": current_text[:3000]}),
         output=revised,
-        **STATE.workflow.client.last_usage("reviser"),
+        **workflow.client.last_usage("reviser"),
     )
     return {
         **_chapter_state(work_id, chapter_number),
@@ -895,6 +979,7 @@ def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
     custom = work_id in STATE.custom_export_dirs
     if scope == "chapter":
         chapter_number = max(1, int(body.get("chapter_number") or 1))
+        _validate_export_ready(work_id, scope="chapter", include_draft=include_draft, start=chapter_number, end=chapter_number)
         chapter = STATE.repo.get_chapter(work_id, chapter_number)
         output_path = chapter_export_path(work, chapter, fmt, output_dir.parent if not custom else None)
         if custom:
@@ -907,6 +992,7 @@ def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
     elif scope == "range":
         start = max(1, int(body.get("start_chapter") or 1))
         end = max(start, int(body.get("end_chapter") or start))
+        _validate_export_ready(work_id, scope="range", include_draft=include_draft, start=start, end=end)
         output_path = chapter_range_export_path(work, start, end, fmt, output_dir.parent if not custom else None)
         if custom:
             output_path = output_dir / output_path.name
@@ -916,6 +1002,7 @@ def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
             else export_range_docx(STATE.repo, work_id, start, end, output_path, include_draft=include_draft)
         )
     else:
+        _validate_export_ready(work_id, scope="book", include_draft=include_draft)
         output_path = book_export_path(work, fmt, output_dir.parent if not custom else None)
         if custom:
             output_path = output_dir / output_path.name
@@ -925,6 +1012,55 @@ def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
             else export_docx(STATE.repo, work_id, output_path, include_draft=include_draft)
         )
     return {"path": str(path)}
+
+
+def _validate_export_ready(
+    work_id: int,
+    *,
+    scope: str,
+    include_draft: bool,
+    start: int | None = None,
+    end: int | None = None,
+) -> None:
+    chapters = STATE.repo.chapters_for_export(work_id)
+    if not chapters:
+        raise ValueError("没有可导出的章节。请先生成正文。")
+    by_number = {int(chapter.get("chapter_number") or 0): chapter for chapter in chapters}
+    if scope == "book":
+        numbers = sorted(number for number in by_number if number > 0)
+        expected = list(range(1, numbers[-1] + 1)) if numbers else []
+    else:
+        if start is None or end is None:
+            raise ValueError("导出范围不完整。")
+        expected = list(range(int(start), int(end) + 1))
+    missing = []
+    empty = []
+    for number in expected:
+        chapter = by_number.get(number)
+        if not chapter:
+            missing.append(number)
+            continue
+        if not _exportable_chapter_text(chapter, include_draft=include_draft).strip():
+            empty.append(number)
+    if missing or empty:
+        details = []
+        if missing:
+            details.append("缺少章节：" + _chapter_number_list(missing))
+        if empty:
+            label = "没有可导出的正式稿/草稿" if include_draft else "没有可导出的正式稿"
+            details.append(f"{label}：" + _chapter_number_list(empty))
+        raise ValueError("导出中止：" + "；".join(details) + "。请补齐后再导出。")
+
+
+def _exportable_chapter_text(chapter: dict[str, Any], *, include_draft: bool) -> str:
+    text = str(chapter.get("final_text") or "")
+    if include_draft and not text.strip():
+        text = str(chapter.get("draft") or "")
+    return text
+
+
+def _chapter_number_list(numbers: list[int]) -> str:
+    return "、".join(f"第 {number} 章" for number in numbers[:20]) + (" 等" if len(numbers) > 20 else "")
 
 
 def _current_export_dir(work_id: int) -> Path:

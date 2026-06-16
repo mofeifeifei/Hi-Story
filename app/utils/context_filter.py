@@ -257,6 +257,7 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
             context.get("genre_contract") or context.get("book_contract", {})
         ),
         "chapter_word_target": context.get("chapter_word_target", {}),
+        "chapter_execution_card": context.get("chapter_execution_card", {}),
         "minimal_memory_pack": context.get("minimal_memory_pack", {}),
         "previous_chapter": _previous_chapter(context.get("previous_chapter")),
         "chapter_transition_contract": context.get("chapter_transition_contract", {}),

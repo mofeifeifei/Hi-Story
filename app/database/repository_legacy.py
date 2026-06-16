@@ -570,7 +570,9 @@ class Repository:
         result = row_to_dict(row)
         if result is None:
             raise ValueError(f"章节不存在: work_id={work_id}, chapter={chapter_number}")
-        if str(result.get("memory_json") or "").strip():
+        if str(result.get("status") or "") == "problem_draft":
+            result["status"] = "problem_draft"
+        elif str(result.get("memory_json") or "").strip():
             result["status"] = "memory"
         return result
 
@@ -581,6 +583,7 @@ class Repository:
                 """
                 SELECT id, chapter_number, title,
                        CASE
+                         WHEN status = 'problem_draft' THEN 'problem_draft'
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
@@ -602,6 +605,7 @@ class Repository:
                 """
                 SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
                        CASE
+                         WHEN status = 'problem_draft' THEN 'problem_draft'
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
@@ -621,6 +625,7 @@ class Repository:
                 """
                 SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
                        CASE
+                         WHEN status = 'problem_draft' THEN 'problem_draft'
                          WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
@@ -1126,9 +1131,16 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             row = conn.execute(
                 """
-                SELECT chapter_number, title, final_text, draft, ending_hook, handoff
+                SELECT chapter_number, title, final_text, draft, ending_hook, handoff, status
                 FROM chapters
                 WHERE work_id = ? AND chapter_number < ?
+                  AND (
+                    (COALESCE(status, '') = 'problem_draft' AND final_text IS NOT NULL AND TRIM(final_text) != '')
+                    OR (
+                      COALESCE(status, '') != 'problem_draft'
+                      AND ((final_text IS NOT NULL AND final_text != '') OR (draft IS NOT NULL AND draft != ''))
+                    )
+                  )
                 ORDER BY chapter_number DESC
                 LIMIT 1
                 """,
@@ -1137,21 +1149,33 @@ class Repository:
         if row is None:
             return None
         data = dict(row)
-        text = data.get("final_text") or data.get("draft") or ""
+        if data.get("status") == "problem_draft":
+            text = data.get("final_text") or ""
+        else:
+            text = data.get("final_text") or data.get("draft") or ""
         data["tail"] = text[-tail_chars:]
         data.pop("final_text", None)
         data.pop("draft", None)
+        data.pop("status", None)
         return data
 
     def get_recent_chapter_texts(self, work_id: int, before_chapter: int, limit: int = 5) -> list[dict[str, Any]]:
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(
                 """
-                SELECT chapter_number, title, final_text, draft
+                SELECT chapter_number, title,
+                       CASE WHEN status = 'problem_draft' THEN '' ELSE final_text END AS final_text,
+                       CASE WHEN status = 'problem_draft' THEN '' ELSE draft END AS draft
                 FROM chapters
                 WHERE work_id = ?
                   AND chapter_number < ?
-                  AND ((final_text IS NOT NULL AND final_text != '') OR (draft IS NOT NULL AND draft != ''))
+                  AND (
+                    (COALESCE(status, '') = 'problem_draft' AND final_text IS NOT NULL AND TRIM(final_text) != '')
+                    OR (
+                      COALESCE(status, '') != 'problem_draft'
+                      AND ((final_text IS NOT NULL AND final_text != '') OR (draft IS NOT NULL AND draft != ''))
+                    )
+                  )
                 ORDER BY chapter_number DESC
                 LIMIT ?
                 """,
@@ -1163,6 +1187,11 @@ class Repository:
         draft = self.normalize_official_names(work_id, draft)
         self._update_chapter_text(work_id, chapter_id, draft=draft, status="draft")
         self.add_version(work_id, chapter_id, f"draft_ai_{now_text()}", draft)
+
+    def save_problem_draft(self, work_id: int, chapter_id: int, draft: str) -> None:
+        draft = self.normalize_official_names(work_id, draft)
+        self._update_chapter_text(work_id, chapter_id, draft=draft, status="problem_draft")
+        self.add_version(work_id, chapter_id, f"problem_draft_ai_{now_text()}", draft)
 
     def save_final(
         self,
@@ -1517,7 +1546,9 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(
                 """
-                SELECT chapter_number, title, final_text, draft
+                SELECT chapter_number, title,
+                       final_text,
+                       CASE WHEN status = 'problem_draft' THEN '' ELSE draft END AS draft
                 FROM chapters
                 WHERE work_id = ?
                 ORDER BY chapter_number

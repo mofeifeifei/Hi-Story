@@ -35,6 +35,7 @@ class AIClient:
         self.config = config or load_config()
         self._session: Any | None = None
         self._last_usage_by_agent: dict[str, dict[str, Any]] = {}
+        self._closed = False
 
     def model_for(self, agent_name: str) -> str:
         agent_models = self.config.get("agent_models", {})
@@ -51,6 +52,8 @@ class AIClient:
         json_mode: bool = False,
         mock_hint: dict[str, Any] | None = None,
     ) -> str:
+        if self._closed:
+            raise AIClientError("AI 请求已取消。")
         api_key = self.config.get("api_key") or os.getenv("NOVEL_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
         input_chars = len(system_prompt) + len(user_prompt)
         input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
@@ -99,6 +102,16 @@ class AIClient:
 
     def last_usage(self, agent_name: str) -> dict[str, Any]:
         return dict(self._last_usage_by_agent.get(agent_name, {}))
+
+    def close(self) -> None:
+        self._closed = True
+        session = self._session
+        self._session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                return
 
     def _record_usage(
         self,
@@ -292,6 +305,8 @@ class AIClient:
         raise AIClientError(self._friendly_request_error(last_error, api_name, url, timeout))
 
     def _requests_session(self, requests_module: Any) -> Any:
+        if self._closed:
+            raise AIClientError("AI 请求已取消。")
         if self._session is None:
             self._session = requests_module.Session()
         return self._session

@@ -6,18 +6,28 @@ import re
 from typing import Any, Iterable
 
 
-DEFAULT_TEMPLATE_BLACKLIST = [
+HARD_TEMPLATE_BLACKLIST = [
     "重生归来",
     "系统觉醒",
     "全网震惊",
     "她冷笑一声",
     "他冷笑一声",
-    "嘴角勾起",
     "三年之期已到",
     "恐怖如斯",
     "所有人都愣住了",
     "你可知我是谁",
     "前所未有的震撼",
+    "命运的齿轮开始转动",
+    "不容置疑的力量",
+    "由此可见",
+    "综上所述",
+    "前途无量",
+    "未来可期",
+    "新的篇章",
+]
+DEFAULT_TEMPLATE_BLACKLIST = HARD_TEMPLATE_BLACKLIST
+
+ENDING_TEMPLATE_PHRASES = [
     "一切才刚刚开始",
     "事情才刚刚开始",
     "真正的危险还在后面",
@@ -28,13 +38,14 @@ DEFAULT_TEMPLATE_BLACKLIST = [
     "她终于明白",
     "他不知道的是",
     "她不知道的是",
-    "命运的齿轮开始转动",
-    "声音不大，却",
-    "不容置疑的力量",
+]
+
+DENSITY_SENSITIVE_PHRASES = [
     "不易察觉",
     "眼中闪过",
     "眼底闪过",
     "嘴角微扬",
+    "嘴角勾起",
     "嘴角勾起一抹",
     "心中涌起",
     "心头一震",
@@ -46,17 +57,16 @@ DEFAULT_TEMPLATE_BLACKLIST = [
     "仿佛",
     "宛若",
     "犹如",
-    "由此可见",
-    "综上所述",
     "与此同时",
-    "前途无量",
-    "未来可期",
-    "新的篇章",
 ]
 
 DEFAULT_TEMPLATE_PATTERNS: list[tuple[str, str]] = [
     ("不是A，而是B式句式", r"不是[^，。！？\n]{1,24}[，,]\s*而是[^，。！？\n]{1,40}"),
+    ("不是A，是B式句式", r"不是[^，。！？\n—-]{1,36}(?:[，,]|——|—|--)\s*(?!而)是[^，。！？\n]{1,50}"),
+    ("不是A——B式对照", r"不是[^。！？\n]{1,48}(?:——|—|--)[^。！？\n]{1,60}"),
+    ("不是A却B式句式", r"不是[^，。！？\n]{1,36}[，,]?\s*却[^，。！？\n]{1,50}"),
     ("不是A不是B而是C式句式", r"不是[^，。！？\n]{1,16}[，,]\s*不是[^，。！？\n]{1,16}[，,]\s*而是"),
+    ("连续不是对照句式", r"不是[^。！？\n]{0,80}不是[^。！？\n]{0,80}"),
     ("万能带着状语", r"[，,]\s*带着[^，。！？\n]{1,24}"),
     ("声音不大却带着式句式", r"声音不大[，,]\s*却[^。！？\n]{1,40}"),
     ("章末预告式空悬念", r"不?知道的是[^。！？\n]{1,40}(风暴|危险|真相|阴谋|开始)"),
@@ -173,6 +183,8 @@ OPENING_ENDING_REPAIR_MARKERS = [
     "承接债",
     "开头方式",
     "开头触发",
+    "语言专项修订",
+    "破折号",
 ]
 
 FORBIDDEN_OPENING_KEYWORDS = [
@@ -204,13 +216,35 @@ ANCHOR_KEYWORDS = [
     "封蜡",
     "折痕",
     "划痕",
+    "便条",
+    "纸边",
+    "墨迹",
+    "草稿",
     "名单",
     "账册",
     "文书",
     "书信",
+    "移文",
+    "录簿",
+    "抄本",
+    "保甲册",
+    "档房",
+    "封条",
+    "启封",
+    "会验",
+    "画押",
+    "急报",
+    "告假条",
+    "名帖",
     "令牌",
     "钥匙",
+    "铜镇尺",
+    "镇尺",
+    "鹅卵石",
+    "角门",
+    "门闩",
     "脚印",
+    "脚步",
     "血",
     "伤口",
     "命令",
@@ -257,6 +291,7 @@ OPENING_MODE_COMPATIBLE = {
     "后果": {"反应", "异常"},
     "时间压力": {"环境异常"},
     "环境异常": {"时间压力", "异常"},
+    "人物动作": {"物件", "对白", "异常", "后果", "反应", "命令", "缺席", "冲突", "时间压力", "环境异常"},
 }
 
 _HEADING_LINE_RE = re.compile(
@@ -338,6 +373,10 @@ LOW_VALUE_OPENING_RE = re.compile(
     r"(?:又|再|反复|重新|仔细)?"
     r"(?:看了看|看见|看着|检查|翻看|摸了摸|拿起|放下|走出|走进|翻身上马|上马|下马|沉默|没有说话|点了点头)"
 )
+DASH_RE = re.compile(r"——|--|—")
+BUSHI_CONTRAST_RE = re.compile(
+    r"不是[^。！？\n]{1,90}(?:而是|[，,]\s*是|(?:——|—|--)\s*是|却|不是)"
+)
 
 
 def first_paragraph(text: str, *, max_chars: int = 220) -> str:
@@ -346,6 +385,23 @@ def first_paragraph(text: str, *, max_chars: int = 220) -> str:
         if compact:
             return compact[:max_chars]
     return ""
+
+
+def first_screen(text: str, *, max_chars: int = 520) -> str:
+    parts: list[str] = []
+    total = 0
+    for part in re.split(r"\n\s*\n|\r\n\s*\r\n", str(text or "").strip()):
+        compact = re.sub(r"\s+", " ", part.strip())
+        if not compact:
+            continue
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        parts.append(compact[:remaining])
+        total += len(parts[-1])
+        if total >= max_chars:
+            break
+    return "\n".join(parts)
 
 
 def opening_pattern_flags(opening: str) -> list[str]:
@@ -366,6 +422,23 @@ def opening_pattern_flags(opening: str) -> list[str]:
 def opening_pattern_label(opening: str) -> str:
     flags = opening_pattern_flags(opening)
     return " + ".join(flags) if flags else "动作/对白/冲突"
+
+
+def rhetorical_pattern_flags(text: str, *, opening: bool = False) -> list[str]:
+    sample = first_paragraph(text, max_chars=360) if opening else str(text or "")
+    flags: list[str] = []
+    if _has_bushi_contrast(sample):
+        flags.append("不是对照句式")
+    dash_count = _dash_count(sample)
+    if opening and dash_count:
+        first_sentence = re.split(r"[。！？!?]\s*", sample, maxsplit=1)[0].strip()
+        sample_without_dialogue = _strip_dialogue_text(sample)
+        first_sentence_without_dialogue = _strip_dialogue_text(first_sentence)
+        if _dash_count(sample_without_dialogue) >= 2 or _dash_count(first_sentence_without_dialogue) >= 1:
+            flags.append("破折号解释式开头")
+    elif not opening and _dash_density_warning(sample):
+        flags.append("破折号密度偏高")
+    return _dedupe(flags)
 
 
 def detect_opening_mode(opening: str) -> str:
@@ -409,11 +482,94 @@ def _has_first_screen_hook(text: str) -> bool:
     return False
 
 
-def _first_screen_hook_warning(text: str) -> str:
-    first = first_paragraph(text, max_chars=320)
+def _has_bushi_contrast(text: str) -> bool:
+    return bool(BUSHI_CONTRAST_RE.search(str(text or "")))
+
+
+def _dash_count(text: str) -> int:
+    return len(DASH_RE.findall(str(text or "")))
+
+
+def _dash_density_limit(text: str) -> int:
+    visible = _visible_length(str(text or ""))
+    if visible <= 1200:
+        return 2
+    if visible <= 5000:
+        return 3
+    return 4
+
+
+def _dash_density_warning(text: str) -> str:
+    count = _dash_count(text)
+    if count < _dash_density_limit(text):
+        return ""
+    return f"语言专项修订：正文破折号使用偏多（约 {count} 处），容易形成解释式机器味；请只保留真正的对白打断、突发打断或关键揭示，其余改成动作承接、短句、对白反应、物件状态或证据差异。"
+
+
+def _dash_density_blocker(text: str) -> str:
+    count = _dash_count(text)
+    limit = _dash_density_limit(text)
+    first = first_screen(text, max_chars=320)
+    first_without_dialogue = _strip_dialogue_text(first)
+    if _dash_count(first_without_dialogue) >= 1:
+        return "章首前 300 字使用破折号，容易形成解释式开头；除对白被打断或突发打断外，必须改成动作、对白、物件状态或证据差异承接。"
+    if count > max(limit, 3):
+        return f"正文破折号过多（约 {count} 处），超过正式稿阈值；必须先做语言专项修订，压到 1 到 2 处附近。"
+    return ""
+
+
+def _density_phrase_limit(phrase: str, text: str) -> int:
+    visible = _visible_length(str(text or ""))
+    if phrase in {"仿佛", "不禁", "与此同时"}:
+        return 4 if visible >= 3000 else 3
+    if visible >= 4500:
+        return 3
+    return 2
+
+
+def _strip_dialogue_text(text: str) -> str:
+    stripped = re.sub(r"“[^”]*”", "", str(text or ""))
+    stripped = re.sub(r"“[^”]*$", "", stripped)
+    stripped = re.sub(r'"[^"]*"', "", stripped)
+    stripped = re.sub(r'"[^"]*$', "", stripped)
+    return stripped
+
+
+def _opening_rhetorical_warning(text: str, context: dict[str, Any]) -> str:
+    first = first_paragraph(text, max_chars=360)
     if not first:
         return ""
-    if _has_first_screen_hook(first):
+    flags = rhetorical_pattern_flags(first, opening=True)
+    if not flags:
+        return ""
+    recent = context.get("recent_chapter_openings")
+    if not isinstance(recent, list):
+        recent = []
+    recent_flags: list[str] = []
+    for item in recent[-3:]:
+        if isinstance(item, dict):
+            recent_flags.extend(str(flag) for flag in item.get("rhetorical_flags") or [])
+    repeated = sorted(set(flags).intersection(recent_flags))
+    if "不是对照句式" in flags:
+        prefix = "章首连续使用" if "不是对照句式" in repeated else "章首使用"
+        return (
+            prefix
+            + "“不是…是/而是/却…”对照句式，容易形成AI味；请保留上一章事实锚点，改成具体动作、对白、证据、物件变化或场面反应。"
+        )
+    if "破折号解释式开头" in flags:
+        if "破折号解释式开头" in repeated:
+            return "章首连续使用破折号解释式开头，AI味明显；请不用破折号补充说明，直接承接上一章的动作、对白、物件、证据、威胁或后果。"
+        if _dash_count(first) >= 2:
+            return "章首破折号使用偏多，容易把开篇写成解释/反转模板；请减少破折号，用动作、对白或证据自然承接上一章。"
+    return ""
+
+
+def _first_screen_hook_warning(text: str) -> str:
+    first = first_paragraph(text, max_chars=220)
+    screen = first_screen(text, max_chars=520)
+    if not screen:
+        return ""
+    if _has_first_screen_hook(screen):
         return ""
     first_sentence = re.split(r"[。！？!?]\s*", first, maxsplit=1)[0].strip()
     if LOW_VALUE_OPENING_RE.search(first_sentence):
@@ -429,6 +585,9 @@ def chapter_opening_warning(text: str, context: dict[str, Any]) -> str:
     copied_outline = _copied_outline_opening_warning(text, context)
     if copied_outline:
         return copied_outline
+    rhetorical_warning = _opening_rhetorical_warning(text, context)
+    if rhetorical_warning:
+        return rhetorical_warning
     hook_warning = _first_screen_hook_warning(text)
     if hook_warning:
         return hook_warning
@@ -453,18 +612,53 @@ def chapter_opening_warning(text: str, context: dict[str, Any]) -> str:
 
 def detect_template_phrases(
     text: str,
-    blacklist: Iterable[str] = DEFAULT_TEMPLATE_BLACKLIST,
+    blacklist: Iterable[str] = HARD_TEMPLATE_BLACKLIST,
 ) -> list[dict[str, int | str]]:
-    counter: Counter[str] = Counter()
+    hits: list[dict[str, int | str]] = []
     for phrase in blacklist:
         count = text.count(phrase)
         if count:
-            counter[phrase] = count
+            hits.append(
+                {
+                    "phrase": phrase,
+                    "count": count,
+                    "severity": "high",
+                    "reason": "强套路或非小说化表达，建议避免。",
+                }
+            )
     for label, pattern in DEFAULT_TEMPLATE_PATTERNS:
         count = len(re.findall(pattern, text))
         if count:
-            counter[label] += count
-    return [{"phrase": phrase, "count": count} for phrase, count in counter.items()]
+            hits.append(
+                {
+                    "phrase": label,
+                    "count": count,
+                    "severity": "medium",
+                    "reason": "结构性模板句，少量也容易显得机器味。",
+                }
+            )
+    for phrase in DENSITY_SENSITIVE_PHRASES:
+        count = text.count(phrase)
+        if count >= _density_phrase_limit(phrase, text):
+            hits.append(
+                {
+                    "phrase": phrase,
+                    "count": count,
+                    "severity": "low",
+                    "reason": "普通词或常见动作重复偏多，建议减少密度而非绝对禁用。",
+                }
+            )
+    dash_count = _dash_count(text)
+    if dash_count >= _dash_density_limit(text):
+        hits.append(
+            {
+                "phrase": "破折号高频使用",
+                "count": dash_count,
+                "severity": "medium",
+                "reason": "破折号不是禁用，但高频用于解释或转折会形成机器味，需要语言专项修订。",
+            }
+        )
+    return hits
 
 
 def detect_historical_anachronisms(
@@ -517,8 +711,18 @@ def manuscript_quality_report(
 
     template_hits = detect_template_phrases(cleaned)
     if template_hits:
-        warnings.append("正文命中模板句或机器味表达。")
+        severities = {str(item.get("severity") or "") for item in template_hits if isinstance(item, dict)}
+        if severities <= {"low"}:
+            warnings.append("正文存在高频慎用词或标点密度风险。")
+        else:
+            warnings.append("正文命中模板句或机器味表达。")
         risk_flags.extend(_hit_labels(template_hits))
+    dash_warning = _dash_density_warning(cleaned)
+    if dash_warning:
+        warnings.append(dash_warning)
+    dash_blocker = _dash_density_blocker(cleaned)
+    if dash_blocker:
+        blockers.append(dash_blocker)
 
     historical_hits: list[dict[str, int | str]] = []
     if _history_enabled(context):
@@ -530,6 +734,10 @@ def manuscript_quality_report(
     transition_warning = _transition_warning(cleaned, context)
     if transition_warning:
         warnings.append(transition_warning)
+
+    scene_continuity_problem = _scene_continuity_problem(cleaned, context)
+    if scene_continuity_problem:
+        blockers.append(scene_continuity_problem)
 
     opening_contract_problem = _opening_contract_problem(cleaned, context)
     if opening_contract_problem:
@@ -578,9 +786,23 @@ def quality_summary(report: dict[str, Any] | None) -> str:
 
 
 def blacklist_for_prompt() -> str:
-    phrase_lines = [f"- {phrase}" for phrase in DEFAULT_TEMPLATE_BLACKLIST]
+    hard_lines = [f"- {phrase}" for phrase in HARD_TEMPLATE_BLACKLIST]
     pattern_lines = [f"- {label}" for label, _ in DEFAULT_TEMPLATE_PATTERNS]
-    return "\n".join([*phrase_lines, *pattern_lines])
+    density_text = "、".join(DENSITY_SENSITIVE_PHRASES)
+    ending_text = "、".join(ENDING_TEMPLATE_PHRASES)
+    return "\n".join(
+        [
+            "强禁套路：",
+            *hard_lines,
+            "慎用句式：",
+            *pattern_lines,
+            "章尾慎用：",
+            f"- {ending_text}",
+            "密度慎用，不是绝对禁用：",
+            f"- {density_text}",
+            "原则：普通词可以合理使用，但不要在章首章尾、高频连续或相邻章节重复使用。",
+        ]
+    )
 
 
 def text_similarity(left: str, right: str) -> float:
@@ -702,17 +924,36 @@ def _transition_warning(text: str, context: dict[str, Any]) -> str:
     anchor = str(contract.get("must_use_concrete_anchor") or "").strip()
     if not anchor:
         return ""
-    first = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0][:360]
-    tokens = _anchor_tokens(anchor)
-    if tokens and not any(token in first for token in tokens):
+    first = first_screen(text, max_chars=520)
+    if not _text_mentions_anchor(first, anchor):
         return "开篇可能没有接住上一章接力棒中的具体锚点。"
+    return ""
+
+
+def _scene_continuity_problem(text: str, context: dict[str, Any]) -> str:
+    contract = context.get("chapter_transition_contract")
+    if not isinstance(contract, dict) or not contract:
+        return ""
+    if bool(contract.get("allowed_shift")):
+        return ""
+    screen = first_screen(text, max_chars=560)
+    if not screen:
+        return ""
+    last_visible = str(contract.get("last_visible_beat") or "").strip()
+    required_next = str(contract.get("required_next_beat") or contract.get("required_first_paragraph") or "").strip()
+    anchor_text = " ".join(part for part in [last_visible, required_next] if part)
+    if anchor_text and not _text_mentions_anchor(screen, anchor_text):
+        return "章首没有接住上一章最后可见画面，疑似重新开场；第一屏必须出现上一章留下的人、物、动作、证据、威胁或现场后果。"
+    if _looks_like_protagonist_reset(screen, context):
+        return "章首疑似使用“主角名+普通动作”重新开场；请改成上一章最后画面的下一拍动作或物件/对白/威胁承接。"
     return ""
 
 
 def _opening_contract_problem(text: str, context: dict[str, Any]) -> str:
     detail = _outline_detail(context)
-    first = first_paragraph(text, max_chars=360)
-    if not first or not detail:
+    first = first_paragraph(text, max_chars=220)
+    screen = first_screen(text, max_chars=560)
+    if not screen or not detail:
         return ""
 
     forbidden = " ".join(
@@ -724,20 +965,20 @@ def _opening_contract_problem(text: str, context: dict[str, Any]) -> str:
             else "",
         ]
     )
-    violation = _forbidden_opening_violation(first, forbidden)
+    violation = _forbidden_opening_violation(first, screen, forbidden)
     if violation:
         return violation
 
     debt = str(detail.get("continuity_debt") or detail.get("previous_anchor") or "").strip()
-    if debt and not _text_mentions_anchor(first, debt):
+    if debt and not _text_mentions_anchor(screen, debt):
         return "前 300 字没有处理章节任务单中的承接债，容易让上下章断裂。"
 
     trigger = str(detail.get("opening_trigger") or "").strip()
-    if trigger and not _text_mentions_anchor(first, trigger) and not _has_first_screen_hook(first):
+    if trigger and not _text_mentions_anchor(screen, trigger) and not _has_first_screen_hook(screen):
         return "前 300 字没有兑现章节任务单中的开头触发事件。"
 
     expected_mode = str(detail.get("opening_mode") or "").strip()
-    actual_mode = detect_opening_mode(first)
+    actual_mode = detect_opening_mode(screen)
     if expected_mode and expected_mode in OPENING_MODE_VALUES and actual_mode != expected_mode:
         if expected_mode not in {"其他"}:
             if actual_mode not in OPENING_MODE_COMPATIBLE.get(expected_mode, set()):
@@ -762,7 +1003,7 @@ def _outline_detail(context: dict[str, Any]) -> dict[str, Any]:
     return detail if isinstance(detail, dict) else {}
 
 
-def _forbidden_opening_violation(first: str, forbidden: str) -> str:
+def _forbidden_opening_violation(first: str, screen: str, forbidden: str) -> str:
     if not forbidden.strip():
         return ""
     compact = re.sub(r"\s+", "", first[:180])
@@ -773,21 +1014,67 @@ def _forbidden_opening_violation(first: str, forbidden: str) -> str:
         if any(flag in opening_pattern_flags(first) for flag in ["时间/时辰", "古装氛围词"]):
             return "章首违反任务单禁用开头：使用了时间或时辰式切入。"
     if "天气" in forbidden or "环境" in forbidden:
-        if any(flag in opening_pattern_flags(first) for flag in ["天气/环境", "古装氛围词"]):
+        if any(flag in opening_pattern_flags(first) for flag in ["天气/环境", "古装氛围词"]) and not _has_first_screen_hook(screen):
             return "章首违反任务单禁用开头：使用了天气或环境氛围切入。"
     return ""
 
 
 def _text_mentions_anchor(text: str, anchor: str) -> bool:
     tokens = _anchor_tokens(anchor)
-    if not tokens:
-        return False
-    if any(token in text for token in tokens[:6]):
+    if tokens and any(token in text for token in tokens[:8]):
         return True
     anchor_keywords = [word for word in ANCHOR_KEYWORDS if word in anchor]
-    if anchor_keywords and any(word in text for word in anchor_keywords):
+    if len(anchor_keywords) == 1 and anchor_keywords[0] in text:
+        return True
+    if len(anchor_keywords) >= 2 and sum(1 for word in anchor_keywords if word in text) >= 2:
+        return True
+    if _shared_chinese_terms(text, anchor) >= 2:
         return True
     return False
+
+
+def _looks_like_protagonist_reset(first: str, context: dict[str, Any]) -> bool:
+    first_sentence = re.split(r"[。！？!?]\s*", first_paragraph(first, max_chars=220), maxsplit=1)[0].strip()
+    if not first_sentence:
+        return False
+    names = _protagonist_names(context)
+    if not names:
+        names = ["秦桧", "主角"]
+    if not any(first_sentence.startswith(name) for name in names):
+        return False
+    if _has_first_screen_hook(first):
+        return False
+    if any(word in first_sentence[:120] for word in ["没有起身", "没有立刻", "停在", "递来", "接过", "拆开", "展开", "便条", "脚步", "门闩", "封条", "铜镇尺"]):
+        return False
+    reset_verbs = [
+        "走到",
+        "站在",
+        "坐在",
+        "看着",
+        "望见",
+        "睁眼",
+        "抬头",
+        "低头",
+        "伸手",
+        "用指尖",
+        "在轿中",
+        "从",
+        "将",
+        "把",
+    ]
+    return any(verb in first_sentence[:80] for verb in reset_verbs)
+
+
+def _protagonist_names(context: dict[str, Any]) -> list[str]:
+    result: list[str] = []
+    for item in context.get("characters") or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        name = str(item.get("name") or "").strip()
+        if name and ("主角" in role or role.lower() == "protagonist"):
+            result.append(name)
+    return result[:3]
 
 
 def _copied_outline_opening_warning(text: str, context: dict[str, Any]) -> str:
@@ -828,8 +1115,51 @@ def _opening_signature(text: str) -> str:
 
 def _anchor_tokens(anchor: str) -> list[str]:
     chunks = re.split(r"[，,。！？；;：:\s、]+", anchor)
-    tokens = [chunk.strip("“”\"'") for chunk in chunks if 2 <= len(chunk.strip("“”\"'")) <= 16]
-    return tokens[:5]
+    tokens: list[str] = []
+    for chunk in chunks:
+        cleaned = chunk.strip("“”\"'（）()")
+        if not cleaned:
+            continue
+        if 2 <= len(cleaned) <= 18:
+            tokens.append(cleaned)
+            continue
+        tokens.extend(re.findall(r"[\u4e00-\u9fff]{2,6}(?:册|稿|条|纸|信|令|文|印|石|门|窗|鼓|声|影|官|吏|人|案|房|角|页|名|帖|录|簿|抄本|封条|便条)", cleaned))
+    return _dedupe(tokens)[:10]
+
+
+def _shared_chinese_terms(text: str, anchor: str) -> int:
+    text_terms = set(re.findall(r"[\u4e00-\u9fff]{2,6}", str(text or "")))
+    anchor_terms = {
+        term
+        for term in re.findall(r"[\u4e00-\u9fff]{2,6}", str(anchor or ""))
+        if not _is_weak_anchor_term(term)
+    }
+    return len(text_terms.intersection(anchor_terms))
+
+
+def _is_weak_anchor_term(term: str) -> bool:
+    weak_terms = {
+        "下一章",
+        "第一句",
+        "第一段",
+        "必须",
+        "接住",
+        "承接",
+        "画面",
+        "立刻",
+        "随后",
+        "方向",
+        "是否",
+        "决定",
+        "没有",
+        "一个",
+        "这一",
+        "那个",
+        "正是",
+        "仍在",
+        "尚未",
+    }
+    return term in weak_terms or len(term) <= 1
 
 
 def _history_enabled(context: dict[str, Any]) -> bool:

@@ -618,9 +618,15 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
     transition = context.get("chapter_transition_contract")
     if isinstance(transition, dict) and transition:
         _section(lines, "章节交接口")
+        lines.append(f"上一章最后画面：{_text(transition.get('last_visible_beat'))}")
+        lines.append(f"下一拍动作：{_text(transition.get('required_next_beat'))}")
         lines.append(f"第一段任务：{_text(transition.get('required_first_paragraph'))}")
         lines.append(f"必须使用锚点：{_text(transition.get('must_use_concrete_anchor'))}")
         lines.append(f"禁用开头：{_text(transition.get('forbidden_opening'))}")
+        lines.append(f"句式守则：{_text(transition.get('style_guard'))}")
+        lines.append(f"镜头承接：{_text(transition.get('scene_continuity_guard'))}")
+        if transition.get("previous_rhetorical_flags"):
+            lines.append(f"上一章句式风险：{_text(transition.get('previous_rhetorical_flags'))}")
 
     opening_policy = context.get("opening_variation_policy")
     openings = [item for item in as_list(context.get("recent_chapter_openings")) if isinstance(item, dict)]
@@ -631,7 +637,9 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
         for item in openings:
             lines.append(
                 f"第{_text(item.get('chapter_number'))}章章首："
-                f"{_text(item.get('pattern'))}｜{_text(item.get('opening'))}"
+                f"{_text(item.get('pattern'))}"
+                f"｜句式：{_text(item.get('rhetorical_flags'), '无')}"
+                f"｜{_text(item.get('opening'))}"
             )
     else:
         lines.append("暂无最近章首记录。")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,10 @@ class WebState:
     def __init__(self) -> None:
         self.repo = Repository()
         self.workflow = NovelWorkflow(repo=self.repo, client=AIClient())
+        self.api_token = secrets.token_urlsafe(32)
         self.custom_export_dirs: dict[int, Path] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._task_cleanups: dict[str, Any] = {}
         self._task_lock = threading.Lock()
 
     def reload_config(self) -> None:
@@ -40,9 +43,16 @@ class WebState:
                 "error": "",
             }
 
+    def register_task_cleanup(self, task_id: str, cleanup: Any) -> None:
+        if not task_id or cleanup is None:
+            return
+        with self._task_lock:
+            self._task_cleanups[task_id] = cleanup
+
     def cancel_task(self, task_id: str) -> None:
         if not task_id:
             return
+        cleanup = None
         with self._task_lock:
             task = self._tasks.setdefault(
                 task_id,
@@ -57,6 +67,12 @@ class WebState:
             )
             if task.get("status") not in {"done", "failed", "cancelled"}:
                 task["status"] = "cancelling"
+                cleanup = self._task_cleanups.get(task_id)
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001
+                return
 
     def task_cancelled(self, task_id: str) -> bool:
         if not task_id:
@@ -76,6 +92,7 @@ class WebState:
             task["status"] = status
             task["finished_at"] = now_text()
             task["error"] = error
+            self._task_cleanups.pop(task_id, None)
 
     def task_status(self, task_id: str) -> dict[str, Any]:
         if not task_id:

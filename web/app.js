@@ -234,6 +234,7 @@ function parseJson(value, fallback) {
 
 async function api(path, options = {}) {
   const init = { method: options.method || "GET", headers: {} };
+  if (window.__HI_STORY_TOKEN__) init.headers["X-HiStory-Token"] = window.__HI_STORY_TOKEN__;
   if (options.signal) init.signal = options.signal;
   if (options.body !== undefined) {
     init.headers["Content-Type"] = "application/json; charset=utf-8";
@@ -494,7 +495,10 @@ async function cancelBackendTask(task) {
   try {
     const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/cancel`, {
       method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        ...(window.__HI_STORY_TOKEN__ ? { "X-HiStory-Token": window.__HI_STORY_TOKEN__ } : {}),
+      },
       body: "{}",
     });
     const payload = await response.json();
@@ -516,8 +520,8 @@ function stopTask() {
   state.task.status = "cancelling";
   cancelBackendTask(task);
   state.task.controller.abort();
-  log(`${state.task.title}已请求停止。`);
-  notify("已请求停止并丢弃迟到结果。", "warning");
+  log(`${state.task.title}已请求停止保存结果。`);
+  notify("已请求停止保存结果；已发出的模型请求可能仍会完成。", "warning");
   updateTaskUI();
 }
 
@@ -538,7 +542,7 @@ function updateTaskUI() {
   const active = Boolean(state.task);
   const title = active ? state.task.title : "暂无进行中的任务";
   const detail = active
-    ? state.task.stopped ? "已请求停止，后端返回的迟到结果会被丢弃。" : state.task.detail
+    ? state.task.stopped ? "已请求停止保存结果；外部模型请求可能仍在后台完成，迟到结果会被丢弃。" : state.task.detail
     : "生成设定、大纲、细纲和正文时，会在这里显示状态。";
   const status = active ? state.task.status || (state.task.stopped ? "cancelling" : "running") : "idle";
   $("taskTitle").textContent = title;
@@ -728,6 +732,7 @@ async function selectWork(workId, writeLog = true) {
   if (seq !== state.workLoadSeq) return;
   applyWorkState(data);
   if (writeLog) log(`已切换到《${state.work.title || "未命名文章"}》。`);
+  void refreshRecords({ silent: true });
 }
 
 function applyWorkState(data) {
@@ -735,8 +740,8 @@ function applyWorkState(data) {
   state.workData = data;
   state.work = data.work || null;
   state.works = data.works || state.works;
-  state.agentRuns = data.agent_runs || [];
-  state.taskRuns = data.task_runs || [];
+  if (Array.isArray(data.agent_runs)) state.agentRuns = data.agent_runs;
+  if (Array.isArray(data.task_runs)) state.taskRuns = data.task_runs;
   state.selectedWorkId = state.work ? state.work.id : null;
   const workChanged = previousWorkId && Number(state.selectedWorkId) !== Number(previousWorkId);
   if (workChanged) {
@@ -1909,7 +1914,8 @@ function fillChapter(data) {
   state.currentChapterWordTarget = data.chapter_word_target || data.context?.chapter_word_target || null;
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
-  $("chapterTextInput").value = chapter.status === "draft" && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "";
+  const isProblemDraft = chapter.status === "problem_draft";
+  $("chapterTextInput").value = (isProblemDraft || chapter.status === "draft") && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "";
   $("chapterOutlinePreview").textContent = formatChapterTask(chapter) || data.outline_readable || "暂无任务单。";
   $("contextPreview").textContent = data.context_error
     ? `上下文构建失败：${data.context_error}`
@@ -1928,19 +1934,22 @@ function updateChapterWordStatus() {
   const node = $("chapterWordStatus");
   if (!node) return;
   const count = countTextWords($("chapterTextInput")?.value || "");
+  const chapterStatus = state.currentChapter?.status || "";
   const target = state.currentChapterWordTarget || {};
   const label = target.label || "未设置";
   const min = Number(target.min || 0);
   const max = Number(target.max || 0);
   node.classList.remove("ok", "warn");
+  if (chapterStatus === "problem_draft") node.classList.add("warn");
+  const prefix = chapterStatus === "problem_draft" ? "问题稿：可直接保存为最终稿，也可生成记忆时自动转为最终稿。 " : "";
   if (min && max) {
     const status = count < min ? "偏短，建议扩写" : count > max ? "偏长，建议压缩" : "符合";
     node.classList.add(status === "符合" ? "ok" : "warn");
-    node.textContent = `当前正文：${count} 字；目标：${label}；建议范围：${min}-${max} 字；状态：${status}`;
+    node.textContent = `${prefix}当前正文：${count} 字；目标：${label}；建议范围：${min}-${max} 字；状态：${status}`;
     return;
   }
   const note = target.note || "优先保证章节完整。";
-  node.textContent = `当前正文：${count} 字；目标：${label}；${note}`;
+  node.textContent = `${prefix}当前正文：${count} 字；目标：${label}；${note}`;
 }
 
 function countTextWords(text) {
@@ -2198,6 +2207,11 @@ function showManualQualityNotice(qualityGate) {
   const message = formatQualityIssues(shownIssues);
   const fullMessage = formatQualityIssues(issues);
   const more = issues.length > shownIssues.length ? `\n还有 ${issues.length - shownIssues.length} 条，请查看运行记录。` : "";
+  if (qualityGate?.problem_draft) {
+    log(`手动保存发现质量问题，但已按你的操作保存为最终稿：\n${fullMessage}`, "warning");
+    notify(`已保存为最终稿，但有质量提醒：\n${message}${more}`, "warning");
+    return true;
+  }
   log(`手动保存质量提示：\n${fullMessage}`);
   notify(`已保存，但有质量提示：\n${message}${more}`, "warning");
   return true;
@@ -2316,8 +2330,9 @@ async function generateMemory() {
     if (taskWasStopped(task)) return;
     if (!editorIsShowing(workId, chapterNumber)) {
       if (data.work_state && Number(state.selectedWorkId) === Number(workId)) applyWorkState(data.work_state);
-      log(`第 ${chapterNumber} 章记忆已入库。`, "success", { chapter: chapterNumber, task: task.title });
-      notify(`第 ${chapterNumber} 章记忆已入库。`, "success");
+      const promoted = data.promoted_problem_draft ? "问题稿已先保存为最终稿，" : "";
+      log(`第 ${chapterNumber} 章${promoted}记忆已入库。`, "success", { chapter: chapterNumber, task: task.title });
+      notify(`第 ${chapterNumber} 章${promoted}记忆已入库。`, "success");
       return;
     }
     if (data.work_state) applyWorkState(data.work_state);
@@ -2327,8 +2342,9 @@ async function generateMemory() {
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "记忆卡已入库。");
     renderChapterLists();
     updateProgress();
-    log(`第 ${chapterNumber} 章记忆已入库。`);
-    notify(`第 ${chapterNumber} 章记忆已入库。`, "success");
+    const promoted = data.promoted_problem_draft ? "问题稿已先保存为最终稿，" : "";
+    log(`第 ${chapterNumber} 章${promoted}记忆已入库。`);
+    notify(`第 ${chapterNumber} 章${promoted}记忆已入库。`, "success");
   } catch (error) {
     if (taskWasStopped(task)) notify("记忆任务已停止。", "warning");
     else showError(error);
@@ -3169,6 +3185,7 @@ function chapterStatusText(chapterOrStatus) {
   const status = chapterStatusKey(chapterOrStatus);
   if (status === "memory") return "记忆已入库";
   if (status === "final") return "最终稿已保存";
+  if (status === "problem_draft") return "问题稿待修订";
   if (status === "draft") return "已有草稿";
   return "等待写作";
 }
@@ -3177,6 +3194,7 @@ function chapterStatusLabel(chapterOrStatus) {
   const status = chapterStatusKey(chapterOrStatus);
   if (status === "memory") return "已记忆";
   if (status === "final") return "已定稿";
+  if (status === "problem_draft") return "问题稿";
   if (status === "draft") return "有草稿";
   return "待写作";
 }
@@ -3185,8 +3203,8 @@ function currentFlowState(input) {
   if (state.task) {
     return {
       title: state.task.title,
-      description: state.task.stopped ? "已请求停止，迟到结果会被丢弃。" : state.task.detail,
-      action: state.task.stopped ? "等待请求结束，迟到结果不会写入界面。" : state.task.detail,
+      description: state.task.stopped ? "已请求停止保存结果；迟到结果会被丢弃。" : state.task.detail,
+      action: state.task.stopped ? "等待请求结束，外部模型请求可能仍会完成。" : state.task.detail,
       badge: state.task.stopped ? "停止中" : "运行中",
       tone: state.task.stopped ? "waiting" : "running",
     };

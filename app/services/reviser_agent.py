@@ -46,6 +46,7 @@ class ReviserAgent(BaseAgent):
         user_prompt = (
             "请对当前章节做首尾专项修订，只输出修订后的完整正文。\n"
             "重点只处理前 300 到 500 字和最后 200 到 300 字；中段剧情、事实、对白、人物关系和事件顺序尽量保持不变。\n"
+            "如果需要修复的问题包含“语言专项修订”或“破折号”，允许对全文做定向语言消毒：只减少破折号和模板句，保留剧情事实、场景顺序、对白含义和章末交接口。\n"
             "开头必须接住上一章锚点和第一屏冲突，避开禁用开头；结尾必须落到具体外部锚点，并给下一章第一段留下可执行动作。\n"
             "修复时必须按任务单中的 continuity_debt、opening_mode、opening_trigger、reader_question_in、reader_answer_out、new_question_out、next_continuity_debt 重建首尾承接链；不要把时间环境开头简单替换成人物普通动作开头。\n"
             "不要把正文改成另一章，不要新增无关设定，不要输出修改说明。\n\n"

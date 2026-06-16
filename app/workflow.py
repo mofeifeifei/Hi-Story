@@ -39,6 +39,7 @@ from app.utils.text_check import (
     opening_pattern_label,
     quality_summary,
     repeated_text_warnings,
+    rhetorical_pattern_flags,
 )
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.word_target import chapter_word_target_from_style
@@ -710,7 +711,8 @@ class NovelWorkflow:
                     *[f"初稿疑似重复：{warning}" for warning in draft_repeat_warnings],
                 ]
             )
-        draft_repair_issues = opening_ending_repair_issues(draft_quality) if (do_review and do_revise) else []
+        auto_revise = bool(do_review and do_revise)
+        draft_repair_issues = opening_ending_repair_issues(draft_quality) if auto_revise else []
         draft_blockers = self._quality_blockers(draft_quality, ignored=draft_repair_issues)
         if str(chapter.get("memory_json") or "").strip():
             self.repo.clear_chapter_memory(work_id, chapter["id"])
@@ -729,6 +731,7 @@ class NovelWorkflow:
         if draft_blockers:
             review = self._local_quality_review(draft_quality)
             self.repo.save_review(work_id, chapter["id"], review)
+            self.repo.save_problem_draft(work_id, chapter["id"], draft)
             return self._problem_draft_result(
                 work_id=work_id,
                 chapter=chapter,
@@ -760,8 +763,11 @@ class NovelWorkflow:
             )
 
         final_text = draft
-        if do_revise and review is not None:
+        if auto_revise:
             reviser_context = context_for_reviser(context)
+            if review is None:
+                review = self._local_quality_review(draft_quality)
+                self.repo.save_review(work_id, chapter["id"], review)
             final_text = self.reviser.revise_chapter(reviser_context, draft, review)
             final_text = strip_chapter_heading(final_text, chapter_number, chapter.get("title"))
             if stop_requested():
@@ -787,7 +793,20 @@ class NovelWorkflow:
                     should_stop=stop_requested,
                 )
                 final_quality = self._manuscript_quality_report("首尾专项修订稿", context, chapter, final_text)
-            self._raise_quality_blockers(chapter_number, final_quality)
+            final_blockers = self._quality_blockers(final_quality)
+            if final_blockers:
+                review = self._merge_quality_report_into_review(review or {}, final_quality)
+                self.repo.save_review(work_id, chapter["id"], review)
+                self.repo.save_problem_draft(work_id, chapter["id"], final_text)
+                return self._problem_draft_result(
+                    work_id=work_id,
+                    chapter=chapter,
+                    chapter_number=chapter_number,
+                    draft=final_text,
+                    review=review,
+                    draft_quality=final_quality,
+                    blockers=final_blockers,
+                )
             self.repo.log_agent_run(
                 work_id=work_id,
                 chapter_id=chapter["id"],
@@ -1120,8 +1139,34 @@ class NovelWorkflow:
             },
         }
         context["chapter_word_target"] = chapter_word_target_from_style((bundle.get("work") or {}).get("style", ""))
+        context["chapter_execution_card"] = self._chapter_execution_card(context)
         context["history_specialist"] = historical_context_for_bundle(context)
         return self.normalize_output_names(work_id, context)
+
+    @staticmethod
+    def _chapter_execution_card(context: dict[str, Any]) -> dict[str, Any]:
+        chapter = context.get("chapter") if isinstance(context.get("chapter"), dict) else {}
+        detail = chapter.get("outline_detail") if isinstance(chapter.get("outline_detail"), dict) else {}
+        contract = context.get("chapter_transition_contract") if isinstance(context.get("chapter_transition_contract"), dict) else {}
+        return {
+            "priority": "最高优先级：正文第一屏必须先执行本卡，再展开其他内容。",
+            "last_visible_beat": contract.get("last_visible_beat") or contract.get("previous_ending_hook") or "",
+            "first_screen_task": contract.get("required_next_beat") or contract.get("required_first_paragraph") or detail.get("opening_trigger") or "",
+            "must_include_anchors": [
+                item
+                for item in [
+                    contract.get("must_use_concrete_anchor"),
+                    detail.get("previous_anchor"),
+                    detail.get("continuity_debt"),
+                ]
+                if str(item or "").strip()
+            ][:3],
+            "forbidden_opening": contract.get("forbidden_opening") or detail.get("forbidden_opening") or "",
+            "chapter_goal": detail.get("chapter_goal") or chapter.get("outline") or "",
+            "chapter_payoff": detail.get("reader_answer_out") or detail.get("chapter_payoff") or "",
+            "dash_budget": "正式稿破折号 0 到 2 处；章首前 300 字不用破折号，除非对白或突发动作被打断。",
+            "final_gate": "没有接住上一章最后画面、破折号超标、字数明显不足或章首模板化时，只能保存为问题稿，不能入记忆。",
+        }
 
     def _recent_chapter_openings(self, work_id: int, chapter_number: int, limit: int = 5) -> list[dict[str, Any]]:
         rows = list(reversed(self.repo.get_recent_chapter_texts(work_id, chapter_number, limit=limit)))
@@ -1132,6 +1177,7 @@ class NovelWorkflow:
             if not opening:
                 continue
             flags = opening_pattern_flags(opening)
+            rhetorical_flags = rhetorical_pattern_flags(opening, opening=True)
             openings.append(
                 {
                     "chapter_number": row.get("chapter_number"),
@@ -1139,6 +1185,7 @@ class NovelWorkflow:
                     "opening": opening,
                     "pattern": opening_pattern_label(opening),
                     "pattern_flags": flags,
+                    "rhetorical_flags": rhetorical_flags,
                     "opening_mode": detect_opening_mode(opening),
                 }
             )
@@ -1149,9 +1196,30 @@ class NovelWorkflow:
         recent = openings[-3:]
         flag_sets = [set(item.get("pattern_flags") or []) for item in recent if item.get("pattern_flags")]
         repeated_flags = sorted(set.intersection(*flag_sets)) if len(flag_sets) >= 2 else []
+        rhetorical_sets = [
+            set(item.get("rhetorical_flags") or [])
+            for item in recent
+            if item.get("rhetorical_flags")
+        ]
+        repeated_rhetorical_flags = sorted(set.intersection(*rhetorical_sets)) if len(rhetorical_sets) >= 2 else []
+        recent_rhetorical_flags = sorted(
+            {
+                str(flag)
+                for item in recent
+                for flag in (item.get("rhetorical_flags") or [])
+                if str(flag).strip()
+            }
+        )
         modes = [str(item.get("opening_mode") or "").strip() for item in recent if item.get("opening_mode")]
         repeated_mode = modes[-1] if len(modes) >= 2 and modes[-1] == modes[-2] else ""
-        if repeated_flags:
+        if repeated_rhetorical_flags:
+            instruction = (
+                "最近章节章首已经连续出现"
+                + "、".join(repeated_rhetorical_flags)
+                + "。本章第一段禁止再用“不是…是/而是/却…”或破折号补充说明制造转折；"
+                "必须承接上一章事实锚点，用动作、对白、物件变化、证据异常、威胁抵达或关系逼问直接开场。"
+            )
+        elif repeated_flags:
             instruction = (
                 "最近章节章首已经连续出现"
                 + "、".join(repeated_flags)
@@ -1163,6 +1231,13 @@ class NovelWorkflow:
                 f"最近章节章首开头方式连续接近“{repeated_mode}”。本章必须换成不同 opening_mode，"
                 "例如物件、对白、异常、后果、反应、命令、缺席、冲突、时间压力或环境异常中的另一种，并让开头触发新事件。"
             )
+        elif recent_rhetorical_flags:
+            instruction = (
+                "最近章节章首出现过"
+                + "、".join(recent_rhetorical_flags)
+                + "。本章第一段避免复用这些修辞手势；"
+                "优先承接上一章事实锚点，用动作、对白、物件变化、证据异常、威胁抵达或关系逼问开场。"
+            )
         else:
             instruction = (
                 "章首可用物件、对白、异常、后果、反应、命令、缺席、冲突、时间压力、环境异常或人物动作；"
@@ -1171,6 +1246,8 @@ class NovelWorkflow:
         return {
             "recent_opening_count": len(openings),
             "repeated_opening_flags": repeated_flags,
+            "recent_rhetorical_flags": recent_rhetorical_flags,
+            "repeated_rhetorical_flags": repeated_rhetorical_flags,
             "recent_opening_modes": modes,
             "repeated_opening_mode": repeated_mode,
             "instruction": instruction,
@@ -1183,15 +1260,46 @@ class NovelWorkflow:
         required_opening = (
             handoff.get("next_first_paragraph_task")
             or handoff.get("next_opening_must_continue")
+            or handoff.get("next_opening_action")
             or handoff.get("next_continuity_debt")
             or previous_chapter.get("ending_hook")
             or ""
+        )
+        last_visible_beat = (
+            handoff.get("last_visible_anchor")
+            or handoff.get("last_external_action")
+            or handoff.get("active_object")
+            or previous_chapter.get("ending_hook", "")
+        )
+        required_next_beat = (
+            handoff.get("next_opening_action")
+            or handoff.get("next_first_paragraph_task")
+            or handoff.get("next_opening_must_continue")
+            or handoff.get("next_continuity_debt")
+            or previous_chapter.get("ending_hook", "")
         )
         forbidden_opening = (
             handoff.get("forbidden_next_opening")
             or handoff.get("forbidden_opening")
             or handoff.get("forbidden_jump")
             or "禁止跳过上一章结尾，禁止先写天气、时间跳转、回忆或背景说明。"
+        )
+        previous_bridge_text = " ".join(
+            str(value or "")
+            for value in [
+                previous_chapter.get("tail", ""),
+                previous_chapter.get("ending_hook", ""),
+                previous_chapter.get("handoff", ""),
+            ]
+        )
+        rhetorical_flags = rhetorical_pattern_flags(previous_bridge_text, opening=False)
+        style_guard = (
+            "必须承接上一章的人、物、动作、对白、证据、威胁或后果；"
+            "如果上一章接力棒含“不是…是/而是/却…”或破折号结构，只承接事实锚点，禁止复制句式。"
+        )
+        scene_continuity_guard = (
+            "默认同场景或同事件连续承接。第一句要像上一章最后可见画面之后的下一拍；"
+            "除非任务单明确允许换视角/换阶段，否则禁止用“主角名+普通动作”、时间地点、天气、回忆或解释重新开场。"
         )
         return {
             "previous_chapter_number": previous_chapter.get("chapter_number"),
@@ -1200,7 +1308,14 @@ class NovelWorkflow:
             "previous_ending_hook": previous_chapter.get("ending_hook", ""),
             "handoff": handoff,
             "required_first_paragraph": required_opening,
+            "last_visible_beat": last_visible_beat,
+            "required_next_beat": required_next_beat,
             "forbidden_opening": forbidden_opening,
+            "style_guard": style_guard,
+            "scene_continuity_guard": scene_continuity_guard,
+            "allowed_shift": False,
+            "shift_reason": "",
+            "previous_rhetorical_flags": rhetorical_flags,
             "must_use_concrete_anchor": (
                 handoff.get("active_object")
                 or handoff.get("last_visible_anchor")
