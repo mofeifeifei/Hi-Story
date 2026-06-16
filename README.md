@@ -296,24 +296,9 @@ Hi Story 默认将数据保存在项目本地：
 
 这些文件是本地运行数据，不是源码。请按自己的方式备份重要作品。
 
-## 开发检查
-
-后端使用 Python 标准库 `http.server` 提供本地服务，数据层使用 SQLite。前端使用原生 HTML、CSS 和 JavaScript，不需要构建步骤。
-
-常用检查：
-
-```bash
-python -B -c "import app.web.server; print('server import ok')"
-python -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding='utf-8')) for p in ['app/web/server.py','app/web/state.py','app/services/ai_client.py']]"
-node --check web/app.js
-```
-
-如果没有安装 Node.js，可以跳过 JavaScript 语法检查。
 
 ## 注意事项
 
-- `config.json`、`data/`、数据库文件和导出文件不要提交到 GitHub。
 - 取消生成时，系统会尽量关闭本地请求，并阻止迟到结果入库；已经发出的模型请求不一定能在服务商侧立刻停止。
 - 多个长任务会使用独立的 workflow 和 AI client，减少并发串状态的风险。
 - 质量闸门不能替代人工审稿。它负责拦截明显坏稿，最终文本仍需要作者判断。
-- 当前仓库暂未附带 LICENSE 文件。
