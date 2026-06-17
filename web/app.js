@@ -2290,6 +2290,19 @@ async function reviseWithInstruction() {
     if (data.work_state && Number(state.selectedWorkId) === Number(workId)) {
       applyWorkState(data.work_state);
     }
+    if (data.candidate_only) {
+      addPendingChapterResult({
+        workId,
+        chapterNumber,
+        title: state.currentChapter?.title || "",
+        kind: "revise",
+        text: data.revised_text || "",
+      });
+      const reasons = (data.style_regression_warnings || []).join("；");
+      log(`第 ${chapterNumber} 章修订稿风格退化，未覆盖最终稿。${reasons}`, "warning", { chapter: chapterNumber, task: task.title });
+      notify(`修订稿未覆盖最终稿，已放入候选稿。${reasons ? "请查看运行记录。" : ""}`, "warning");
+      return;
+    }
     const memoryNotice = data.memory_invalidated ? "旧记忆已清空，请重新生成记忆。" : "";
     if (editorIsShowing(workId, chapterNumber)) {
       fillChapter(data);

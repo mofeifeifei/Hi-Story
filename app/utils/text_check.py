@@ -61,19 +61,40 @@ DENSITY_SENSITIVE_PHRASES = [
 ]
 
 DEFAULT_TEMPLATE_PATTERNS: list[tuple[str, str]] = [
-    ("不是A，而是B式句式", r"不是[^，。！？\n]{1,24}[，,]\s*而是[^，。！？\n]{1,40}"),
-    ("不是A，是B式句式", r"不是[^，。！？\n—-]{1,36}(?:[，,]|——|—|--)\s*(?!而)是[^，。！？\n]{1,50}"),
-    ("不是A——B式对照", r"不是[^。！？\n]{1,48}(?:——|—|--)[^。！？\n]{1,60}"),
-    ("不是A却B式句式", r"不是[^，。！？\n]{1,36}[，,]?\s*却[^，。！？\n]{1,50}"),
-    ("不是A不是B而是C式句式", r"不是[^，。！？\n]{1,16}[，,]\s*不是[^，。！？\n]{1,16}[，,]\s*而是"),
-    ("连续不是对照句式", r"不是[^。！？\n]{0,80}不是[^。！？\n]{0,80}"),
+    ("对照判断句式-转折型", r"不是[^，。！？\n]{1,24}[，,]\s*而是[^，。！？\n]{1,40}"),
+    ("对照判断句式-逗号判断型", r"不是[^，。！？\n—-]{1,36}(?:[，,]|——|—|--)\s*(?!而)是[^，。！？\n]{1,50}"),
+    ("对照判断句式-破折号型", r"不是[^。！？\n]{1,48}(?:——|—|--)[^。！？\n]{1,60}"),
+    ("对照判断句式-让步型", r"不是[^，。！？\n]{1,36}[，,]?\s*却[^，。！？\n]{1,50}"),
+    ("对照判断句式-短句判断型", r"不是[^。！？\n]{1,24}。\s*是[^。！？\n]{1,30}"),
+    ("对照判断句式-连续堆叠型", r"不是[^，。！？\n]{1,16}[，,]\s*不是[^，。！？\n]{1,16}[，,]\s*而是"),
+    ("对照判断句式-连续重复型", r"不是[^。！？\n]{0,80}不是[^。！？\n]{0,80}"),
     ("万能带着状语", r"[，,]\s*带着[^，。！？\n]{1,24}"),
-    ("声音不大却带着式句式", r"声音不大[，,]\s*却[^。！？\n]{1,40}"),
+    ("万能声音状语模板", r"声音不大[，,]\s*却[^。！？\n]{1,40}"),
     ("章末预告式空悬念", r"不?知道的是[^。！？\n]{1,40}(风暴|危险|真相|阴谋|开始)"),
     ("章末总结顿悟", r"(终于明白|这才意识到|这一刻[^。！？\n]{0,20}明白)"),
-    ("眼神闪过一丝式描写", r"(眼中|眼底|眸中)[^。！？\n]{0,10}闪过[^。！？\n]{0,12}(一丝|一抹|几分)"),
-    ("嘴角勾起一抹式描写", r"嘴角[^。！？\n]{0,8}(勾起|扬起)[^。！？\n]{0,12}(一抹|一丝)"),
+    ("眼神闪动模板", r"(眼中|眼底|眸中)[^。！？\n]{0,10}闪过[^。！？\n]{0,12}(一丝|一抹|几分)"),
+    ("嘴角弧度模板", r"嘴角[^。！？\n]{0,8}(勾起|扬起)[^。！？\n]{0,12}(一抹|一丝)"),
 ]
+
+DENSITY_SENSITIVE_LABELS = {
+    "不易察觉": "含糊感知词",
+    "眼中闪过": "眼神闪动模板",
+    "眼底闪过": "眼神闪动模板",
+    "嘴角微扬": "嘴角弧度模板",
+    "嘴角勾起": "嘴角弧度模板",
+    "嘴角勾起一抹": "嘴角弧度模板",
+    "心中涌起": "心绪涌动模板",
+    "心头一震": "心绪震动模板",
+    "心中暗道": "内心独白模板",
+    "深吸一口气": "泛化动作模板",
+    "映入眼帘": "镜头套话",
+    "不由自主": "泛化反应词",
+    "不禁": "泛化反应词",
+    "仿佛": "泛化比喻词",
+    "宛若": "泛化比喻词",
+    "犹如": "泛化比喻词",
+    "与此同时": "机械转场词",
+}
 
 DEFAULT_HISTORICAL_ANACHRONISMS = [
     "手机",
@@ -169,6 +190,70 @@ CONCRETE_ENDING_ACTION_RE = re.compile(
     r"(递|推|按|扣|拔|落|砸|撕|扔|握|攥|掀|打开|关上|敲|撞|跪|站|退|冲|追|抓|拖|刺|砍|咬|吐|流|亮出|交出|藏起|封住|拦住|逼近|停住|响起)"
 )
 
+ENDING_ANCHOR_GROUPS = {
+    "证据/文书": [
+        "证据",
+        "线索",
+        "账册",
+        "录簿",
+        "抄本",
+        "册页",
+        "案卷",
+        "牍",
+        "文书",
+        "移文",
+        "批文",
+        "封筒",
+        "便笺",
+        "纸条",
+        "条记",
+        "拓片",
+        "原单",
+        "残件",
+        "保甲册",
+        "奏疏",
+        "草稿",
+    ],
+    "物件状态": [
+        "鱼符",
+        "蜡丸",
+        "蜡封",
+        "铜镇尺",
+        "镇尺",
+        "鹅卵石",
+        "钥匙",
+        "令牌",
+        "刀",
+        "匕首",
+        "箭杆",
+        "门闩",
+        "窗扇",
+        "封条",
+        "茶盏",
+        "木疤",
+        "疤结",
+    ],
+    "威胁抵达": [
+        "脚步",
+        "靴底",
+        "巡兵",
+        "追兵",
+        "暗梢",
+        "皇城司",
+        "内侍",
+        "书吏",
+        "敲门",
+        "逼近",
+        "搜查",
+        "盘查",
+        "召见",
+        "传旨",
+    ],
+    "关系压力": ["王氏", "夫人", "赵构", "官家", "万俟卨", "冯益", "龚茂良", "陈四", "摊牌", "质问", "审视", "决定"],
+    "行动中断": ["停住", "停下", "回头", "转身", "钻进", "推开", "合上", "塞进", "压住", "握着", "站起", "走向", "跨过"],
+    "时间/地点转换": ["鼓声", "梆子", "更夫", "午时", "申时", "夜色", "日光", "府门", "政事堂", "驿铺", "码头", "渡口"],
+}
+
 OPENING_ENDING_REPAIR_MARKERS = [
     "章首",
     "开篇",
@@ -179,6 +264,7 @@ OPENING_ENDING_REPAIR_MARKERS = [
     "抽象氛围",
     "外部锚点",
     "章末",
+    "章尾",
     "结尾",
     "承接债",
     "开头方式",
@@ -375,7 +461,7 @@ LOW_VALUE_OPENING_RE = re.compile(
 )
 DASH_RE = re.compile(r"——|--|—")
 BUSHI_CONTRAST_RE = re.compile(
-    r"不是[^。！？\n]{1,90}(?:而是|[，,]\s*是|(?:——|—|--)\s*是|却|不是)"
+    r"不是[^。！？\n]{1,90}(?:而是|[，,]\s*是|。\s*是|(?:——|—|--)\s*是|却|不是)"
 )
 
 
@@ -404,6 +490,28 @@ def first_screen(text: str, *, max_chars: int = 520) -> str:
     return "\n".join(parts)
 
 
+def last_screen(text: str, *, max_chars: int = 420) -> str:
+    parts: list[str] = []
+    total = 0
+    paragraphs = [
+        re.sub(r"\s+", " ", part.strip())
+        for part in re.split(r"\n\s*\n|\r\n\s*\r\n", str(text or "").strip())
+        if part.strip()
+    ]
+    for part in reversed(paragraphs):
+        remaining = max_chars - total
+        if remaining <= 0:
+            break
+        if len(part) > remaining and parts:
+            parts.append(part[-remaining:])
+            break
+        parts.append(part[-remaining:])
+        total += len(parts[-1])
+        if total >= max_chars:
+            break
+    return "\n".join(reversed(parts))
+
+
 def opening_pattern_flags(opening: str) -> list[str]:
     first = first_paragraph(opening, max_chars=160)
     first_sentence = re.split(r"[。！？!?]\s*", first, maxsplit=1)[0].strip()
@@ -425,10 +533,10 @@ def opening_pattern_label(opening: str) -> str:
 
 
 def rhetorical_pattern_flags(text: str, *, opening: bool = False) -> list[str]:
-    sample = first_paragraph(text, max_chars=360) if opening else str(text or "")
+    sample = first_screen(text, max_chars=360) if opening else str(text or "")
     flags: list[str] = []
     if _has_bushi_contrast(sample):
-        flags.append("不是对照句式")
+        flags.append("对照判断句式")
     dash_count = _dash_count(sample)
     if opening and dash_count:
         first_sentence = re.split(r"[。！？!?]\s*", sample, maxsplit=1)[0].strip()
@@ -439,6 +547,129 @@ def rhetorical_pattern_flags(text: str, *, opening: bool = False) -> list[str]:
     elif not opening and _dash_density_warning(sample):
         flags.append("破折号密度偏高")
     return _dedupe(flags)
+
+
+def style_risk_profile(text: str) -> dict[str, Any]:
+    content = str(text or "")
+    opening = first_screen(content, max_chars=320)
+    template_hits = detect_template_phrases(content)
+    bushi_hits = [
+        hit
+        for hit in template_hits
+        if "对照判断句式" in str(hit.get("phrase") or "")
+    ]
+    dash_total = _dash_count(content)
+    dash_opening = _dash_count(_strip_dialogue_text(opening))
+    return {
+        "visible_chars": _visible_length(content),
+        "dash_total": dash_total,
+        "dash_opening": dash_opening,
+        "bushi_contrast_total": sum(int(hit.get("count") or 0) for hit in bushi_hits),
+        "template_hit_total": sum(int(hit.get("count") or 0) for hit in template_hits),
+        "opening_flags": rhetorical_pattern_flags(content, opening=True),
+        "rhetorical_flags": rhetorical_pattern_flags(content, opening=False),
+    }
+
+
+def style_regression_warnings(before: str, after: str) -> list[str]:
+    old = style_risk_profile(before)
+    new = style_risk_profile(after)
+    warnings: list[str] = []
+    if int(new["dash_opening"]) > int(old["dash_opening"]):
+        warnings.append(
+            f"修订稿章首破折号从 {old['dash_opening']} 处增加到 {new['dash_opening']} 处。"
+        )
+    if int(new["dash_total"]) >= max(3, int(old["dash_total"]) + 3):
+        warnings.append(
+            f"修订稿破折号从 {old['dash_total']} 处增加到 {new['dash_total']} 处。"
+        )
+    if int(new["bushi_contrast_total"]) > int(old["bushi_contrast_total"]):
+        warnings.append(
+            f"修订稿对照判断句式从 {old['bushi_contrast_total']} 处增加到 {new['bushi_contrast_total']} 处。"
+        )
+    old_opening = set(old.get("opening_flags") or [])
+    new_opening = set(new.get("opening_flags") or [])
+    added_opening = sorted(new_opening - old_opening)
+    if added_opening:
+        warnings.append("修订稿章首新增高风险句式：" + "、".join(added_opening) + "。")
+    return warnings
+
+
+def style_guard_warnings(text: str) -> list[str]:
+    profile = style_risk_profile(text)
+    warnings: list[str] = []
+    if int(profile["dash_opening"]) >= 1:
+        warnings.append("语言专项修订：章首前 300 字出现破折号解释式表达。")
+    dash_total = int(profile["dash_total"])
+    if dash_total >= max(_dash_density_limit(str(text or "")), 3):
+        warnings.append(f"语言专项修订：正文破折号过多（约 {dash_total} 处）。")
+    contrast_total = int(profile["bushi_contrast_total"])
+    if contrast_total >= 3:
+        warnings.append(f"语言专项修订：正文对照判断句式偏多（约 {contrast_total} 处）。")
+    elif "对照判断句式" in set(profile.get("opening_flags") or []):
+        warnings.append("语言专项修订：章首使用对照判断句式。")
+    return _dedupe(warnings)
+
+
+def ending_signature(text: str) -> dict[str, Any]:
+    tail = last_screen(text)
+    compact_tail = re.sub(r"\s+", "", tail)
+    anchor_type = _ending_anchor_type(compact_tail)
+    anchors = _ending_concrete_anchors(compact_tail)
+    contrast_count = 1 if _has_bushi_contrast(compact_tail) else 0
+    dash_count = _dash_count(_strip_dialogue_text(compact_tail))
+    abstract_forecast = bool(
+        any(phrase in compact_tail for phrase in EMPTY_ENDING_PHRASES)
+        or (
+            any(word in compact_tail for word in ABSTRACT_ENDING_WORDS)
+            and not _has_concrete_ending_anchor(compact_tail)
+        )
+    )
+    return {
+        "tail": tail,
+        "anchor_type": anchor_type,
+        "concrete_anchors": anchors,
+        "rhetorical_flags": rhetorical_pattern_flags(compact_tail, opening=False),
+        "dash_count": dash_count,
+        "contrast_count": contrast_count,
+        "abstract_forecast": abstract_forecast,
+    }
+
+
+def chapter_ending_warning(text: str, context: dict[str, Any]) -> str:
+    signature = ending_signature(text)
+    anchor_type = str(signature.get("anchor_type") or "")
+    anchors = [str(item) for item in signature.get("concrete_anchors") or [] if str(item).strip()]
+    if signature.get("abstract_forecast") or (anchor_type == "抽象/氛围" and not anchors):
+        return "章尾落在抽象预告或氛围判断上，缺少下一章第一段可直接承接的外部锚点。"
+
+    recent = context.get("recent_chapter_endings")
+    if not isinstance(recent, list):
+        recent = []
+    recent = [item for item in recent[-3:] if isinstance(item, dict)]
+    if not recent:
+        return ""
+
+    recent_types = [str(item.get("anchor_type") or "") for item in recent if item.get("anchor_type")]
+    if anchor_type and anchor_type != "其他" and recent_types.count(anchor_type) >= 2:
+        return f"章尾落点连续重复为“{anchor_type}”，容易形成同款收束；请换成不同外部锚点或下一章动作。"
+
+    if int(signature.get("contrast_count") or 0) and any(int(item.get("contrast_count") or 0) for item in recent):
+        return "章尾连续使用对照判断句式，容易形成AI味；请改成动作、对白、物件状态或证据变化收束。"
+
+    if int(signature.get("dash_count") or 0) and any(int(item.get("dash_count") or 0) for item in recent):
+        return "章尾连续使用破折号解释或转折，容易形成模板化悬念；请用自然断句、动作推进或具体物件状态收束。"
+
+    recent_anchors = [
+        str(anchor)
+        for item in recent
+        for anchor in (item.get("concrete_anchors") or [])
+        if str(anchor).strip()
+    ]
+    repeated_anchors = [anchor for anchor in anchors if recent_anchors.count(anchor) >= 2]
+    if repeated_anchors:
+        return "章尾连续围绕同一类锚点收束：" + "、".join(repeated_anchors[:4]) + "。请改换章末外部锚点。"
+    return ""
 
 
 def detect_opening_mode(opening: str) -> str:
@@ -550,11 +781,11 @@ def _opening_rhetorical_warning(text: str, context: dict[str, Any]) -> str:
         if isinstance(item, dict):
             recent_flags.extend(str(flag) for flag in item.get("rhetorical_flags") or [])
     repeated = sorted(set(flags).intersection(recent_flags))
-    if "不是对照句式" in flags:
-        prefix = "章首连续使用" if "不是对照句式" in repeated else "章首使用"
+    if "对照判断句式" in flags:
+        prefix = "章首连续使用" if "对照判断句式" in repeated else "章首使用"
         return (
             prefix
-            + "“不是…是/而是/却…”对照句式，容易形成AI味；请保留上一章事实锚点，改成具体动作、对白、证据、物件变化或场面反应。"
+            + "对照判断句式，容易形成AI味；请保留上一章事实锚点，改成具体动作、对白、证据、物件变化或场面反应。"
         )
     if "破折号解释式开头" in flags:
         if "破折号解释式开头" in repeated:
@@ -620,7 +851,7 @@ def detect_template_phrases(
         if count:
             hits.append(
                 {
-                    "phrase": phrase,
+                    "phrase": DENSITY_SENSITIVE_LABELS.get(phrase, "密度慎用表达"),
                     "count": count,
                     "severity": "high",
                     "reason": "强套路或非小说化表达，建议避免。",
@@ -723,6 +954,12 @@ def manuscript_quality_report(
     dash_blocker = _dash_density_blocker(cleaned)
     if dash_blocker:
         blockers.append(dash_blocker)
+    style_warnings = style_guard_warnings(cleaned)
+    for item in style_warnings:
+        if "章首使用对照判断句式" in item or "对照判断句式偏多" in item:
+            blockers.append(item)
+        else:
+            warnings.append(item)
 
     historical_hits: list[dict[str, int | str]] = []
     if _history_enabled(context):
@@ -745,10 +982,14 @@ def manuscript_quality_report(
 
     opening_warning = chapter_opening_warning(cleaned, context)
     if opening_warning:
-        if opening_warning.startswith("章首连续使用"):
+        if opening_warning.startswith("章首连续使用") or "对照判断句式" in opening_warning:
             blockers.append(opening_warning)
         else:
             warnings.append(opening_warning)
+
+    ending_warning = chapter_ending_warning(cleaned, context)
+    if ending_warning:
+        warnings.append(ending_warning)
 
     return {
         "stage": stage,
@@ -760,6 +1001,7 @@ def manuscript_quality_report(
         "length_problem": "" if length_problem and length_problem.startswith("严重") else length_problem,
         "visible_chars": visible_chars,
         "opening_mode": detect_opening_mode(cleaned),
+        "ending_signature": ending_signature(cleaned),
     }
 
 
@@ -788,8 +1030,6 @@ def quality_summary(report: dict[str, Any] | None) -> str:
 def blacklist_for_prompt() -> str:
     hard_lines = [f"- {phrase}" for phrase in HARD_TEMPLATE_BLACKLIST]
     pattern_lines = [f"- {label}" for label, _ in DEFAULT_TEMPLATE_PATTERNS]
-    density_text = "、".join(DENSITY_SENSITIVE_PHRASES)
-    ending_text = "、".join(ENDING_TEMPLATE_PHRASES)
     return "\n".join(
         [
             "强禁套路：",
@@ -797,9 +1037,9 @@ def blacklist_for_prompt() -> str:
             "慎用句式：",
             *pattern_lines,
             "章尾慎用：",
-            f"- {ending_text}",
-            "密度慎用，不是绝对禁用：",
-            f"- {density_text}",
+            "- 空泛预告、命运式旁白、顿悟式收束、泛化新篇章表达。",
+            "密度慎用，可合理少量使用：",
+            "- 万能状语、眼神闪动、嘴角弧度、心绪涌动、无功能轻动作、泛化比喻和过度连接词。",
             "原则：普通词可以合理使用，但不要在章首章尾、高频连续或相邻章节重复使用。",
         ]
     )
@@ -915,6 +1155,32 @@ def _has_concrete_ending_anchor(tail: str) -> bool:
     if CONCRETE_ENDING_ACTION_RE.search(tail) and any(word in tail for word in CONCRETE_ENDING_WORDS):
         return True
     return False
+
+
+def _ending_anchor_type(tail: str) -> str:
+    counts = {
+        label: sum(1 for word in words if word in tail)
+        for label, words in ENDING_ANCHOR_GROUPS.items()
+    }
+    best_label = ""
+    best_count = 0
+    for label, count in counts.items():
+        if count > best_count:
+            best_label = label
+            best_count = count
+    if best_label:
+        return best_label
+    if any(word in tail for word in ABSTRACT_ENDING_WORDS):
+        return "抽象/氛围"
+    return "其他"
+
+
+def _ending_concrete_anchors(tail: str) -> list[str]:
+    anchors: list[str] = []
+    for words in ENDING_ANCHOR_GROUPS.values():
+        anchors.extend(word for word in words if word in tail)
+    anchors.extend(word for word in CONCRETE_ENDING_WORDS if word in tail)
+    return _dedupe(anchors)[:8]
 
 
 def _transition_warning(text: str, context: dict[str, Any]) -> str:

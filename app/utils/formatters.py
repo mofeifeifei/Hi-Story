@@ -644,6 +644,23 @@ def format_context_readable(context: dict[str, Any] | None) -> str:
     else:
         lines.append("暂无最近章首记录。")
 
+    ending_policy = context.get("ending_variation_policy")
+    endings = [item for item in as_list(context.get("recent_chapter_endings")) if isinstance(item, dict)]
+    _section(lines, "章尾避重")
+    if isinstance(ending_policy, dict):
+        lines.append(f"本章策略：{_text(ending_policy.get('instruction'))}")
+    if endings:
+        for item in endings:
+            lines.append(
+                f"第{_text(item.get('chapter_number'))}章章尾："
+                f"{_text(item.get('anchor_type'))}"
+                f"｜句式：{_text(item.get('rhetorical_flags'), '无')}"
+                f"｜锚点：{_text(item.get('concrete_anchors'), '无')}"
+                f"｜{_text(item.get('ending'))}"
+            )
+    else:
+        lines.append("暂无最近章尾记录。")
+
     _section(lines, "最近三章摘要")
     summaries = [item for item in as_list(context.get("recent_three_chapter_summaries")) if isinstance(item, dict)]
     if summaries:

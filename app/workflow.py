@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from app.database.repository import Repository
+from app.database.repository_legacy import now_text
 from app.services.ai_client import AIClient
 from app.services.base_agent import JsonValidationError
 from app.services.memory_agent import MemoryAgent
@@ -32,7 +33,9 @@ from app.utils.text_check import (
     DEFAULT_TEMPLATE_BLACKLIST,
     blacklist_for_prompt,
     detect_opening_mode,
+    ending_signature,
     first_paragraph,
+    last_screen,
     manuscript_quality_report,
     opening_ending_repair_issues,
     opening_pattern_flags,
@@ -40,6 +43,8 @@ from app.utils.text_check import (
     quality_summary,
     repeated_text_warnings,
     rhetorical_pattern_flags,
+    style_guard_warnings,
+    style_regression_warnings,
 )
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.word_target import chapter_word_target_from_style
@@ -772,6 +777,50 @@ class NovelWorkflow:
             final_text = strip_chapter_heading(final_text, chapter_number, chapter.get("title"))
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章修订稿已返回，但未保存最终稿。".format(chapter_number))
+            regression_warnings = self._dedupe_texts(
+                [*style_regression_warnings(draft, final_text), *style_guard_warnings(final_text)]
+            )
+            if regression_warnings:
+                self.repo.add_version(
+                    work_id,
+                    chapter["id"],
+                    f"reviser_rejected_style_{now_text()}",
+                    final_text,
+                )
+                rejected_text = final_text
+                cleaned_text = self.reviser.sanitize_style(reviser_context, final_text, regression_warnings)
+                cleaned_text = strip_chapter_heading(cleaned_text, chapter_number, chapter.get("title"))
+                if stop_requested():
+                    raise RuntimeError("任务已停止：第 {0} 章语言清理稿已返回，但未保存最终稿。".format(chapter_number))
+                cleaned_text = self.normalize_output_names(work_id, cleaned_text)
+                cleaned_warnings = self._dedupe_texts(
+                    [*style_regression_warnings(draft, cleaned_text), *style_guard_warnings(cleaned_text)]
+                )
+                if cleaned_warnings:
+                    final_text = draft
+                    review = self._merge_quality_report_into_review(
+                        review or {},
+                        {
+                            "warnings": [
+                                "修订稿因风格退化未覆盖初稿：" + "；".join(regression_warnings)
+                            ],
+                            "template_hits": [],
+                            "risk_flags": ["修订风格退化"],
+                        },
+                    )
+                    self.repo.save_review(work_id, chapter["id"], review)
+                else:
+                    final_text = cleaned_text
+                    self.repo.log_agent_run(
+                        work_id=work_id,
+                        chapter_id=chapter["id"],
+                        agent_name="reviser",
+                        model=self.client.model_for("reviser"),
+                        prompt_name="reviser_prompt.md",
+                        input_preview=json_dumps({"context": reviser_context, "style_cleanup": regression_warnings, "draft": rejected_text[:3000]}),
+                        output=cleaned_text,
+                        **self.client.last_usage("reviser"),
+                    )
             final_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, final_text)
             if final_repeat_warnings:
                 raise ValueError("本章修订稿疑似重复，已停止保存：" + "；".join(final_repeat_warnings))
@@ -902,6 +951,27 @@ class NovelWorkflow:
         repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, revised)
         if repeat_warnings:
             raise ValueError("本章首尾专项修订稿疑似重复，已停止保存：" + "；".join(repeat_warnings))
+        regression_warnings = self._dedupe_texts(
+            [*style_regression_warnings(final_text, revised), *style_guard_warnings(revised)]
+        )
+        if regression_warnings:
+            self.repo.add_version(
+                work_id,
+                chapter["id"],
+                f"reviser_rejected_style_{now_text()}",
+                revised,
+            )
+            cleaned = self.reviser.sanitize_style(reviser_context, revised, regression_warnings)
+            cleaned = strip_chapter_heading(cleaned, chapter_number, chapter.get("title"))
+            if should_stop():
+                raise RuntimeError("任务已停止：第 {0} 章语言清理稿已返回，但未保存最终稿。".format(chapter_number))
+            cleaned = self.normalize_output_names(work_id, cleaned)
+            cleaned_warnings = self._dedupe_texts(
+                [*style_regression_warnings(final_text, cleaned), *style_guard_warnings(cleaned)]
+            )
+            if cleaned_warnings:
+                return final_text
+            revised = cleaned
         revised = self.normalize_output_names(work_id, revised)
         self.repo.log_agent_run(
             work_id=work_id,
@@ -1109,6 +1179,7 @@ class NovelWorkflow:
         recent_outlines = self.repo.get_recent_chapter_outlines(work_id, chapter_number, limit=5)
         previous_chapter = self.repo.get_previous_chapter_context(work_id, chapter_number)
         recent_openings = self._recent_chapter_openings(work_id, chapter_number)
+        recent_endings = self._recent_chapter_endings(work_id, chapter_number)
         context = {
             **bundle,
             "chapter": {
@@ -1123,7 +1194,9 @@ class NovelWorkflow:
             "recent_three_chapter_summaries": self.repo.get_recent_summaries(work_id, chapter_number, limit=3),
             "recent_chapter_outlines": recent_outlines,
             "recent_chapter_openings": recent_openings,
+            "recent_chapter_endings": recent_endings,
             "opening_variation_policy": self._opening_variation_policy(recent_openings),
+            "ending_variation_policy": self._ending_variation_policy(recent_endings),
             "repeat_risk_warnings": repeat_risk_warnings(outline_detail, recent_outlines),
             "chapter_notes": self.repo.list_chapter_notes(work_id, chapter_number),
             "previous_chapter": previous_chapter,
@@ -1135,7 +1208,7 @@ class NovelWorkflow:
                 "per_chapter_memory_loop": "每章生成后必须审稿、修订、生成记忆卡，再进入下一章。",
                 "locked_fact_rule": "锁定设定、人物档案、世界观规则不能擅自修改。",
                 "revision_layers": "修订时按结构、情绪、语言三层内部检查，只输出最终正文。",
-                "quality_gate": "程序会在保存前检查章节标题泄漏、短摘要、字数偏差、空泛章尾、模板句、历史违和词和开篇接力棒。",
+                "quality_gate": "程序会在保存前检查章节标题泄漏、短摘要、字数偏差、空泛章尾、章尾重复、模板句、历史违和词和开篇接力棒。",
             },
         }
         context["chapter_word_target"] = chapter_word_target_from_style((bundle.get("work") or {}).get("style", ""))
@@ -1190,6 +1263,30 @@ class NovelWorkflow:
                 }
             )
         return openings
+
+    def _recent_chapter_endings(self, work_id: int, chapter_number: int, limit: int = 5) -> list[dict[str, Any]]:
+        rows = list(reversed(self.repo.get_recent_chapter_texts(work_id, chapter_number, limit=limit)))
+        endings: list[dict[str, Any]] = []
+        for row in rows:
+            text = str(row.get("final_text") or row.get("draft") or "")
+            tail = last_screen(text)
+            if not tail:
+                continue
+            signature = ending_signature(tail)
+            endings.append(
+                {
+                    "chapter_number": row.get("chapter_number"),
+                    "title": row.get("title", ""),
+                    "ending": tail,
+                    "anchor_type": signature.get("anchor_type"),
+                    "concrete_anchors": signature.get("concrete_anchors") or [],
+                    "rhetorical_flags": signature.get("rhetorical_flags") or [],
+                    "dash_count": signature.get("dash_count") or 0,
+                    "contrast_count": signature.get("contrast_count") or 0,
+                    "abstract_forecast": bool(signature.get("abstract_forecast")),
+                }
+            )
+        return endings
 
     @staticmethod
     def _opening_variation_policy(openings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1250,6 +1347,60 @@ class NovelWorkflow:
             "repeated_rhetorical_flags": repeated_rhetorical_flags,
             "recent_opening_modes": modes,
             "repeated_opening_mode": repeated_mode,
+            "instruction": instruction,
+        }
+
+    @staticmethod
+    def _ending_variation_policy(endings: list[dict[str, Any]]) -> dict[str, Any]:
+        recent = endings[-3:]
+        types = [str(item.get("anchor_type") or "").strip() for item in recent if item.get("anchor_type")]
+        repeated_type = types[-1] if len(types) >= 2 and types[-1] == types[-2] else ""
+        recent_flags = sorted(
+            {
+                str(flag)
+                for item in recent
+                for flag in (item.get("rhetorical_flags") or [])
+                if str(flag).strip()
+            }
+        )
+        repeated_dash = sum(1 for item in recent if int(item.get("dash_count") or 0) > 0) >= 2
+        repeated_contrast = sum(1 for item in recent if int(item.get("contrast_count") or 0) > 0) >= 2
+        anchors = [
+            str(anchor)
+            for item in recent
+            for anchor in (item.get("concrete_anchors") or [])
+            if str(anchor).strip()
+        ]
+        repeated_anchors = sorted({anchor for anchor in anchors if anchors.count(anchor) >= 2})
+        if repeated_contrast or repeated_dash:
+            instruction = (
+                "最近章尾出现对照判断句式或破折号解释式收束。本章章尾必须避开同类句式，"
+                "用具体动作、对白后果、物件状态、证据变化或威胁抵达留下下一章可承接的外部锚点。"
+            )
+        elif repeated_type:
+            instruction = (
+                f"最近章尾落点连续接近“{repeated_type}”。本章章尾要换收束方式，"
+                "不要继续用同类物件/文书/鼓声/日光做悬念，改用不同的人物动作、关系压力、现场变化或新证据。"
+            )
+        elif repeated_anchors:
+            instruction = (
+                "最近章尾反复使用这些锚点："
+                + "、".join(repeated_anchors[:5])
+                + "。本章章尾请换一个可被下一章第一段承接的外部锚点。"
+            )
+        else:
+            instruction = (
+                "章尾必须交付本章回报，并留下下一章第一段可直接接住的外部锚点；"
+                "优先用行动未完成、证据状态变化、关系逼问、命令抵达、脚步/敲门等具体事件收束，避免抽象预告。"
+            )
+        return {
+            "recent_ending_count": len(endings),
+            "recent_anchor_types": types,
+            "repeated_anchor_type": repeated_type,
+            "recent_rhetorical_flags": recent_flags,
+            "repeated_dash_ending": repeated_dash,
+            "repeated_contrast_ending": repeated_contrast,
+            "repeated_concrete_anchors": repeated_anchors[:8],
             "instruction": instruction,
         }
 

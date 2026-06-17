@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any, Callable
 
 from app.utils.name_normalizer import character_identity_key, normalize_character_name
@@ -135,6 +136,8 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("ending_hook", "")
         item.setdefault("handoff", "")
         item.setdefault("forbidden", "")
+        for key in ["chapter_goal", "chapter_payoff", "opening_hook", "ending_hook"]:
+            item[key] = _remove_visible_protocol_labels(item.get(key))
         _fill_missing_ending_hook(item)
         normalized_chapters.append(item)
     result["chapters"] = normalized_chapters
@@ -151,7 +154,7 @@ def _fill_missing_ending_hook(item: dict[str, Any]) -> None:
         or str(item.get("handoff") or "").strip()
     )
     if anchor:
-        item["ending_hook"] = f"【章尾钩子：承接压力】【强度：中】{anchor}"
+        item["ending_hook"] = f"承接压力：{anchor}"
 
 
 def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> dict[str, Any]:
@@ -206,6 +209,7 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
             normalized_history.append(update)
         memory["historical_updates"] = normalized_history
     memory.setdefault("ending_hook", "")
+    memory["ending_hook"] = _remove_visible_protocol_labels(memory.get("ending_hook"))
     ending_hook = str(memory.get("ending_hook") or "").strip()
     handoff = memory.get("handoff")
     if not isinstance(handoff, dict):
@@ -227,6 +231,20 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     handoff.setdefault("next_continuity_debt", handoff.get("next_first_paragraph_task", ""))
     handoff.setdefault("suggested_opening_modes", [])
     handoff.setdefault("forbidden_next_opening", handoff.get("forbidden_opening", ""))
+    for key in [
+        "next_opening_must_continue",
+        "last_external_action",
+        "active_object",
+        "open_conflict",
+        "next_first_paragraph_task",
+        "ending_style",
+        "last_visible_anchor",
+        "next_opening_action",
+        "ending_anchor_type",
+        "next_continuity_debt",
+    ]:
+        if key in handoff:
+            handoff[key] = _remove_visible_protocol_labels(handoff.get(key))
     if ending_hook and not str(handoff.get("next_opening_must_continue") or "").strip():
         handoff["next_opening_must_continue"] = f"承接本章结尾钩子：{ending_hook}"
     if not str(handoff.get("next_first_paragraph_task") or "").strip():
@@ -271,6 +289,32 @@ def _object_or_empty(data: Any) -> dict[str, Any]:
     if isinstance(data, dict):
         return deepcopy(data)
     return {}
+
+
+_VISIBLE_PROTOCOL_LABEL_RE = re.compile(r"^【(?P<label>目的词|回报类型|章首钩子|章尾钩子)：(?P<value>[^】]+)】")
+_VISIBLE_STRENGTH_LABEL_RE = re.compile(r"^【强度：[^】]+】")
+
+
+def _remove_visible_protocol_labels(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    label_value = ""
+    while text:
+        match = _VISIBLE_PROTOCOL_LABEL_RE.match(text)
+        if match:
+            label_value = match.group("value").strip()
+            text = text[match.end() :].strip()
+            continue
+        strength = _VISIBLE_STRENGTH_LABEL_RE.match(text)
+        if strength:
+            text = text[strength.end() :].strip()
+            continue
+        break
+    if not label_value:
+        return text
+    text = text.lstrip("：:，,；;。 ")
+    return f"{label_value}：{text}" if text else label_value
 
 
 def _normalize_plan_characters(plan: dict[str, Any]) -> None:

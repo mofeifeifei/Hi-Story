@@ -33,7 +33,7 @@ from app.utils.context_filter import context_for_memory, context_for_reviser
 from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.outline_utils import normalize_chapter_outline
 from app.utils.text_cleaner import strip_chapter_heading
-from app.utils.text_check import manuscript_quality_report, quality_summary
+from app.utils.text_check import manuscript_quality_report, quality_summary, style_guard_warnings, style_regression_warnings
 from app.utils.word_target import chapter_word_target_from_style
 from app.web.config_api import public_config, sanitize_config_update
 from app.web.state import STATE
@@ -911,6 +911,38 @@ def _revise_chapter_with_instruction(
     _validate_chapter_request(work_id, chapter_number, body, latest_chapter, require_identity=True)
     revised = workflow.normalize_output_names(work_id, revised)
     revised = strip_chapter_heading(revised, chapter_number, latest_chapter.get("title"))
+    regression_warnings = [
+        *style_regression_warnings(current_text, revised),
+        *style_guard_warnings(revised),
+    ]
+    regression_warnings = list(dict.fromkeys(item for item in regression_warnings if str(item).strip()))
+    if regression_warnings:
+        STATE.repo.add_version(
+            work_id,
+            chapter["id"],
+            "web_user_instruction_rejected_style",
+            revised,
+        )
+        cleaned = workflow.reviser.sanitize_style(reviser_context, revised, regression_warnings)
+        if should_stop and should_stop():
+            raise RuntimeError("任务已停止：语言清理稿已返回，但未写入界面。")
+        cleaned = workflow.normalize_output_names(work_id, strip_chapter_heading(cleaned, chapter_number, latest_chapter.get("title")))
+        cleaned_warnings = [
+            *style_regression_warnings(current_text, cleaned),
+            *style_guard_warnings(cleaned),
+        ]
+        cleaned_warnings = list(dict.fromkeys(item for item in cleaned_warnings if str(item).strip()))
+        if cleaned_warnings:
+            return {
+                **_chapter_state(work_id, chapter_number),
+                "revised_text": cleaned,
+                "saved": False,
+                "candidate_only": True,
+                "style_regression_warnings": cleaned_warnings,
+                "message": "修订稿风格退化，已作为候选稿保留，未覆盖最终稿。",
+                "work_state": _work_state(work_id),
+            }
+        revised = cleaned
     memory_invalidated = bool(str(latest_chapter.get("memory_json") or "").strip())
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
     STATE.repo.save_final_after_manual_edit(

@@ -273,6 +273,8 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "recent_three_chapter_summaries": context.get("recent_three_chapter_summaries", []),
                 "recent_chapter_openings": context.get("recent_chapter_openings", []),
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
+                "recent_chapter_endings": context.get("recent_chapter_endings", []),
+                "ending_variation_policy": context.get("ending_variation_policy", {}),
                 "repeat_risk_warnings": context.get("repeat_risk_warnings", []),
                 "forbidden_template_phrases": context.get("forbidden_template_phrases", []),
                 "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
@@ -286,6 +288,8 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
                 "recent_chapter_openings": context.get("recent_chapter_openings", [])[-3:],
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
+                "recent_chapter_endings": context.get("recent_chapter_endings", [])[-3:],
+                "ending_variation_policy": context.get("ending_variation_policy", {}),
                 "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
             }
         )
