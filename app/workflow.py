@@ -40,6 +40,7 @@ from app.utils.text_check import (
     opening_ending_repair_issues,
     opening_pattern_flags,
     opening_pattern_label,
+    opening_signature,
     quality_summary,
     repeated_text_warnings,
     rhetorical_pattern_flags,
@@ -626,6 +627,9 @@ class NovelWorkflow:
             "recent_chapter_outlines": self.repo.get_recent_chapter_outlines(work_id, start_chapter, limit=5),
             "recent_summaries": self.repo.get_recent_summaries(work_id, start_chapter, limit=3),
         }
+        recent_openings = self._recent_chapter_openings(work_id, start_chapter)
+        context["recent_chapter_openings"] = recent_openings
+        context["opening_variation_policy"] = self._opening_variation_policy(recent_openings)
         volume_state = self._volume_state(work_id)
         volume_transition_context = self._volume_transition_context(work_id, start_chapter, volume_state)
         context["volume_state"] = {
@@ -1251,6 +1255,7 @@ class NovelWorkflow:
                 continue
             flags = opening_pattern_flags(opening)
             rhetorical_flags = rhetorical_pattern_flags(opening, opening=True)
+            signature = opening_signature(opening)
             openings.append(
                 {
                     "chapter_number": row.get("chapter_number"),
@@ -1260,6 +1265,12 @@ class NovelWorkflow:
                     "pattern_flags": flags,
                     "rhetorical_flags": rhetorical_flags,
                     "opening_mode": detect_opening_mode(opening),
+                    "opening_signature": signature,
+                    "opening_engine": signature.get("opening_engine"),
+                    "surface_anchors": signature.get("surface_anchors"),
+                    "primary_surface_anchor": signature.get("primary_surface_anchor"),
+                    "subject_type": signature.get("subject_type"),
+                    "syntax_shape": signature.get("syntax_shape"),
                 }
             )
         return openings
@@ -1309,7 +1320,66 @@ class NovelWorkflow:
         )
         modes = [str(item.get("opening_mode") or "").strip() for item in recent if item.get("opening_mode")]
         repeated_mode = modes[-1] if len(modes) >= 2 and modes[-1] == modes[-2] else ""
-        if repeated_rhetorical_flags:
+        signature_recent = [item for item in openings[-5:] if isinstance(item.get("opening_signature"), dict)]
+        surface_anchors = [
+            str((item.get("opening_signature") or {}).get("primary_surface_anchor") or "")
+            for item in signature_recent
+            if str((item.get("opening_signature") or {}).get("primary_surface_anchor") or "")
+        ]
+        repeated_surface_anchors = sorted(
+            {
+                anchor
+                for anchor in surface_anchors
+                if anchor not in {"其他", "问题/威胁/证据", "对白"} and surface_anchors.count(anchor) >= 2
+            }
+        )
+        engines = [
+            str((item.get("opening_signature") or {}).get("opening_engine") or "")
+            for item in signature_recent[-3:]
+            if str((item.get("opening_signature") or {}).get("opening_engine") or "")
+        ]
+        repeated_engine = engines[-1] if len(engines) >= 2 and engines[-1] == engines[-2] else ""
+        shapes = [
+            str((item.get("opening_signature") or {}).get("syntax_shape") or "")
+            for item in signature_recent[-4:]
+            if str((item.get("opening_signature") or {}).get("syntax_shape") or "")
+        ]
+        repeated_syntax_shapes = sorted(
+            {
+                shape
+                for shape in shapes
+                if shape not in {"其他"} and shapes.count(shape) >= 2
+            }
+        )
+        subjects = [
+            str((item.get("opening_signature") or {}).get("subject_type") or "")
+            for item in signature_recent[-4:]
+            if str((item.get("opening_signature") or {}).get("subject_type") or "")
+        ]
+        repeated_subject = subjects[-1] if len(subjects) >= 3 and subjects[-1] == subjects[-2] == subjects[-3] else ""
+        if repeated_surface_anchors:
+            instruction = (
+                "最近章节章首表层锚点重复："
+                + "、".join(repeated_surface_anchors)
+                + "。本章不要继续让同类声音、时间、天气光线、门窗出入、文书消息、物件触感或普通动作承担第一屏发动机；"
+                "若必须出现，只能作为背景，第一屏要改由新证据、对白逼问、威胁抵达、关系冲突、选择逼近或现场异常发动。"
+            )
+        elif repeated_engine:
+            instruction = (
+                f"最近章节章首剧情发动方式连续接近“{repeated_engine}”。本章必须换一种发动方式，"
+                "不要只替换词语；优先从证据、对白、威胁、关系压力、缺席、选择或对手动作切入。"
+            )
+        elif repeated_syntax_shapes:
+            instruction = (
+                "最近章节章首句式形状重复："
+                + "、".join(repeated_syntax_shapes)
+                + "。本章第一句必须换句法和第一眼落点，避免同款时间起句、声音起句、物件触感起句、人物动作起句或破折号解释。"
+            )
+        elif repeated_subject:
+            instruction = (
+                f"最近章节章首第一眼连续落在“{repeated_subject}”。本章优先换成物件、对白、缺席者、对手动作、群体反应或现场异常。"
+            )
+        elif repeated_rhetorical_flags:
             instruction = (
                 "最近章节章首已经连续出现"
                 + "、".join(repeated_rhetorical_flags)
@@ -1347,6 +1417,14 @@ class NovelWorkflow:
             "repeated_rhetorical_flags": repeated_rhetorical_flags,
             "recent_opening_modes": modes,
             "repeated_opening_mode": repeated_mode,
+            "recent_surface_anchors": surface_anchors,
+            "repeated_surface_anchors": repeated_surface_anchors,
+            "recent_opening_engines": engines,
+            "repeated_opening_engine": repeated_engine,
+            "recent_syntax_shapes": shapes,
+            "repeated_syntax_shapes": repeated_syntax_shapes,
+            "recent_subject_types": subjects,
+            "repeated_subject_type": repeated_subject,
             "instruction": instruction,
         }
 

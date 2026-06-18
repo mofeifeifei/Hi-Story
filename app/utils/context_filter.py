@@ -298,6 +298,10 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
             {
                 "characters": _compact_items(context.get("characters"), _character_memory_keys(), 6),
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
+                "recent_chapter_openings": context.get("recent_chapter_openings", [])[-5:],
+                "opening_variation_policy": context.get("opening_variation_policy", {}),
+                "recent_chapter_endings": context.get("recent_chapter_endings", [])[-3:],
+                "ending_variation_policy": context.get("ending_variation_policy", {}),
             }
         )
     return _drop_empty(result)

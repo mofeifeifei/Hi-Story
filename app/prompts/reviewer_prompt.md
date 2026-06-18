@@ -31,6 +31,7 @@ output_contract: 结构化数据
 - **承接**：开篇是否接住上一章结尾、接力棒和 `chapter_transition_contract.required_first_paragraph`？是否跳过了 `forbidden_jump` 或 `forbidden_opening`？
 - **承接债**：如果任务单包含 `continuity_debt`，前 300 字是否真正处理了这个未闭合内容？它可以是对白、动作、物件、威胁、选择、证据、关系、缺席或环境异常，不要求强行对白接对白。
 - **开头功能**：正文开头是否兑现 `opening_mode`、`opening_subject` 和 `opening_trigger`？如果只把禁用的时间环境开头换成普通“人物名 + 动作”，仍然要判为开头公式化。
+- **章首指纹**：必须读取 `recent_chapter_openings` 和 `opening_variation_policy`。如果本章继续复用最近章节高频出现的开头发动机、表层锚点、第一眼主体或句式形状，要标为中高风险；问题不在某个词本身，而在同一种开头发动方式反复出现。
 - **读者问题链**：`reader_question_in` 是否进入正文处理流程？`reader_answer_out` 是否在本章给出阶段性回答？`new_question_out` 是否形成新的具体问题，避免停在“继续调查”“局势复杂”这类泛化表达？
 - **上一章锚点**：如果章节任务单包含 `previous_anchor`，第一段是否接住这个可见锚点对应的人、物、动作、对白、证据、威胁或问题？
 - **第一段交接**：第一段是否出现上一章末尾的具体人物、物件、动作、对白、证据、威胁或未解决问题？是否先写天气、时间跳转、人物醒来、背景说明或回忆来逃避承接？

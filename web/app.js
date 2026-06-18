@@ -20,9 +20,15 @@ const state = {
   tab: "project",
   outline: { full_outline: "", volume_outline: [], chapters: [] },
   outlineSelection: { type: "full" },
+  outlineRenderedSelection: { type: "full" },
   outlineExpandedVolumes: [],
   writingExpandedVolumes: [],
   outlineTargetVolume: null,
+  outlineScrollPositions: {
+    tree: {},
+    panel: {},
+    fields: {},
+  },
   libraryKind: "characters",
   libraryItem: null,
   runLogs: [],
@@ -32,6 +38,7 @@ const state = {
   taskSerial: 0,
   pendingChapterResults: [],
   pendingResultSerial: 0,
+  chapterScrollPositions: {},
   styleExtraLines: [],
   confirmResolver: null,
 };
@@ -42,6 +49,146 @@ function clampNumber(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function chapterScrollKey(workId, chapterNumber) {
+  return `${Number(workId || 0)}:${Number(chapterNumber || 0)}`;
+}
+
+function saveCurrentChapterScroll() {
+  const input = $("chapterTextInput");
+  if (!input || !state.editor.workId || !state.editor.chapterNumber) return;
+  rememberChapterScroll(state.editor.workId, state.editor.chapterNumber, state.editor.updatedAt || "", input.scrollTop || 0);
+}
+
+function rememberChapterScroll(workId, chapterNumber, updatedAt = "", scrollTop = 0) {
+  if (!workId || !chapterNumber) return;
+  state.chapterScrollPositions[chapterScrollKey(workId, chapterNumber)] = {
+    scrollTop: Math.max(0, Number(scrollTop || 0)),
+    updatedAt: updatedAt || "",
+  };
+}
+
+function resetChapterScroll(workId, chapterNumber, updatedAt = "") {
+  rememberChapterScroll(workId, chapterNumber, updatedAt, 0);
+  const input = $("chapterTextInput");
+  if (!input) return;
+  requestAnimationFrame(() => {
+    input.scrollTop = 0;
+  });
+}
+
+function restoreChapterScroll(workId, chapterNumber, updatedAt = "") {
+  const input = $("chapterTextInput");
+  if (!input) return;
+  const cached = state.chapterScrollPositions[chapterScrollKey(workId, chapterNumber)];
+  const sameVersion = cached && String(cached.updatedAt || "") === String(updatedAt || "");
+  const targetScrollTop = sameVersion ? Number(cached.scrollTop || 0) : 0;
+  requestAnimationFrame(() => {
+    input.scrollTop = Math.max(0, Math.min(targetScrollTop, input.scrollHeight || targetScrollTop));
+  });
+}
+
+function outlineSelectionKey(selection = state.outlineSelection || { type: "full" }) {
+  if (selection.type === "volume") return `volume:${Number(selection.index || 0)}`;
+  if (selection.type === "chapter") return `chapter:${Number(selection.chapter_number || 0)}`;
+  return "full";
+}
+
+function cloneOutlineSelection(selection = { type: "full" }) {
+  return {
+    type: selection?.type || "full",
+    index: selection?.index,
+    chapter_number: selection?.chapter_number,
+  };
+}
+
+function outlineTreeScrollKey(workId = state.selectedWorkId, keyword = "") {
+  return `${Number(workId || 0)}|${String(keyword || "").trim().toLowerCase()}`;
+}
+
+function outlineEditorScrollKey(workId = state.selectedWorkId, selection = state.outlineSelection || { type: "full" }) {
+  return `${Number(workId || 0)}|${outlineSelectionKey(selection)}`;
+}
+
+function outlineFieldScrollKey(workId, selection, fieldName) {
+  return `${outlineEditorScrollKey(workId, selection)}|${fieldName}`;
+}
+
+function outlineEditorPanel() {
+  return document.querySelector("#tab-outline .editor-panel");
+}
+
+function saveOutlineTreeScroll() {
+  const tree = $("outlineTree");
+  if (!tree || !state.selectedWorkId) return;
+  const keyword = ($("outlineSearchInput")?.value || "").trim();
+  state.outlineScrollPositions.tree[outlineTreeScrollKey(state.selectedWorkId, keyword)] = tree.scrollTop || 0;
+}
+
+function restoreOutlineTreeScroll() {
+  const tree = $("outlineTree");
+  if (!tree || !state.selectedWorkId) return;
+  const keyword = ($("outlineSearchInput")?.value || "").trim();
+  const key = outlineTreeScrollKey(state.selectedWorkId, keyword);
+  const targetScrollTop = Number(state.outlineScrollPositions.tree[key] || 0);
+  requestAnimationFrame(() => {
+    tree.scrollTop = Math.max(0, targetScrollTop);
+  });
+}
+
+function saveOutlineEditorPanelScroll(selection = state.outlineRenderedSelection || state.outlineSelection || { type: "full" }) {
+  const panel = outlineEditorPanel();
+  if (!panel || !state.selectedWorkId) return;
+  const key = outlineEditorScrollKey(state.selectedWorkId, selection);
+  state.outlineScrollPositions.panel[key] = panel.scrollTop || 0;
+}
+
+function saveOutlineEditorFieldScroll(node, selection = state.outlineRenderedSelection || state.outlineSelection || { type: "full" }) {
+  if (!node || !state.selectedWorkId) return;
+  const fieldName = node.id === "outlineFullEdit" ? "full_outline" : node.dataset.field;
+  if (!fieldName) return;
+  const key = outlineFieldScrollKey(state.selectedWorkId, selection, fieldName);
+  state.outlineScrollPositions.fields[key] = node.scrollTop || 0;
+}
+
+function saveCurrentOutlineEditorScroll() {
+  const editor = $("outlineEditor");
+  const selection = state.outlineRenderedSelection || state.outlineSelection || { type: "full" };
+  saveOutlineEditorPanelScroll(selection);
+  if (!editor) return;
+  editor.querySelectorAll("textarea[data-field], #outlineFullEdit").forEach((node) => {
+    saveOutlineEditorFieldScroll(node, selection);
+  });
+}
+
+function bindOutlineEditorFieldScrollListeners() {
+  const editor = $("outlineEditor");
+  if (!editor) return;
+  editor.querySelectorAll("textarea[data-field], #outlineFullEdit").forEach((node) => {
+    if (node.dataset.scrollBound === "1") return;
+    node.dataset.scrollBound = "1";
+    node.addEventListener("scroll", () => saveOutlineEditorFieldScroll(node));
+  });
+}
+
+function restoreOutlineEditorScroll() {
+  const panel = outlineEditorPanel();
+  const editor = $("outlineEditor");
+  if (!panel || !editor || !state.selectedWorkId) return;
+  const selection = state.outlineSelection || { type: "full" };
+  const panelKey = outlineEditorScrollKey(state.selectedWorkId, selection);
+  const panelScrollTop = Number(state.outlineScrollPositions.panel[panelKey] || 0);
+  const fieldNodes = [...editor.querySelectorAll("textarea[data-field], #outlineFullEdit")];
+  requestAnimationFrame(() => {
+    panel.scrollTop = Math.max(0, panelScrollTop);
+    for (const node of fieldNodes) {
+      const fieldName = node.id === "outlineFullEdit" ? "full_outline" : node.dataset.field;
+      if (!fieldName) continue;
+      const key = outlineFieldScrollKey(state.selectedWorkId, selection, fieldName);
+      node.scrollTop = Math.max(0, Number(state.outlineScrollPositions.fields[key] || 0));
+    }
+  });
 }
 
 const STYLE_SELECT_WHITELIST = {
@@ -620,6 +767,8 @@ function bindEvents() {
   $("generateOutlineBtn").addEventListener("click", generateOutline);
   $("saveOutlineBtn").addEventListener("click", saveOutline);
   $("outlineSearchInput").addEventListener("input", renderOutlineTree);
+  $("outlineTree").addEventListener("scroll", saveOutlineTreeScroll);
+  document.querySelector("#tab-outline .editor-panel")?.addEventListener("scroll", saveOutlineEditorPanelScroll);
   $("outlineExpandAllBtn").addEventListener("click", expandAllVolumes);
   $("outlineCollapseAllBtn").addEventListener("click", collapseAllVolumes);
   $("generateChapterOutlinesBtn").addEventListener("click", generateChapterOutlines);
@@ -629,6 +778,7 @@ function bindEvents() {
   $("refreshRecordsBtn").addEventListener("click", refreshRecords);
   $("chapterSearchInput").addEventListener("input", renderChapterLists);
   $("chapterTextInput").addEventListener("input", updateChapterWordStatus);
+  $("chapterTextInput").addEventListener("scroll", saveCurrentChapterScroll);
   $("loadChapterBtn").addEventListener("click", () => loadChapter(Number($("writingChapterNumberInput").value || 1), "writing"));
   $("generateChapterBtn").addEventListener("click", generateChapter);
   $("saveChapterBtn").addEventListener("click", saveChapterText);
@@ -801,12 +951,15 @@ function clearWorkState() {
   if (state.contextLoadController) state.contextLoadController.abort();
   state.contextLoadController = null;
   state.chapterLoadController = null;
+  state.chapterScrollPositions = {};
+  state.outlineScrollPositions = { tree: {}, panel: {}, fields: {} };
   state.pendingPlan = null;
   state.pendingPlanReadable = "";
   state.pendingPlanWorkId = null;
   state.pendingChapterResults = [];
   state.outline = { full_outline: "", volume_outline: [], chapters: [] };
   state.outlineSelection = { type: "full" };
+  state.outlineRenderedSelection = { type: "full" };
   state.outlineExpandedVolumes = [];
   state.writingExpandedVolumes = [];
   state.outlineTargetVolume = null;
@@ -1177,6 +1330,7 @@ async function applyPlan() {
 }
 
 function renderOutlineTree() {
+  saveOutlineTreeScroll();
   const tree = $("outlineTree");
   const keyword = ($("outlineSearchInput")?.value || "").trim().toLowerCase();
   ensureChapterVolumeNumbers();
@@ -1194,6 +1348,7 @@ function renderOutlineTree() {
     empty.textContent = "暂无分卷。";
     tree.appendChild(empty);
     updateOutlineGenerateControls();
+    restoreOutlineTreeScroll();
     return;
   }
   volumes.forEach((volume, index) => {
@@ -1218,9 +1373,11 @@ function renderOutlineTree() {
   });
   if (!matchCount) {
     tree.innerHTML = '<div class="empty">没有匹配的大纲条目。</div>';
+    restoreOutlineTreeScroll();
     return;
   }
   updateOutlineGenerateControls();
+  restoreOutlineTreeScroll();
 }
 
 function outlineTreeItem(kind, title, selection, expanded) {
@@ -1230,6 +1387,8 @@ function outlineTreeItem(kind, title, selection, expanded) {
   const marker = kind === "volume" ? `<span class="tree-marker">${expanded ? "▾" : "▸"}</span>` : "";
   item.innerHTML = `${marker}<div class="item-title">${escapeHtml(title)}</div>`;
   item.addEventListener("click", () => {
+    saveOutlineTreeScroll();
+    saveCurrentOutlineEditorScroll();
     commitOutlineEditor();
     state.outlineSelection = selection;
     if (kind === "volume") {
@@ -1251,13 +1410,17 @@ function sameSelection(a, b) {
 }
 
 function renderOutlineEditor() {
+  saveCurrentOutlineEditorScroll();
   const editor = $("outlineEditor");
   const selection = state.outlineSelection || { type: "full" };
+  state.outlineRenderedSelection = cloneOutlineSelection(selection);
   editor.innerHTML = "";
   if (selection.type === "full") {
     $("outlineEditorTitle").textContent = "全书大纲";
     $("outlineEditorHint").textContent = "";
     editor.innerHTML = `<textarea id="outlineFullEdit" rows="20">${escapeHtml(state.outline.full_outline || "")}</textarea>`;
+    bindOutlineEditorFieldScrollListeners();
+    restoreOutlineEditorScroll();
     return;
   }
   if (selection.type === "volume") {
@@ -1285,6 +1448,8 @@ function renderOutlineEditor() {
         ${textareaField("ending", "结尾状态", volume.ending || "")}
       </div>
     `;
+    bindOutlineEditorFieldScrollListeners();
+    restoreOutlineEditorScroll();
     return;
   }
   const chapter = chapterByNumber(selection.chapter_number) || { chapter_number: selection.chapter_number || 1 };
@@ -1311,7 +1476,10 @@ function renderOutlineEditor() {
     const list = $("sceneList");
     if (list.querySelector(".empty")) list.innerHTML = "";
     list.insertAdjacentHTML("beforeend", renderSceneCards([{}], list.querySelectorAll("[data-scene]").length));
+    bindOutlineEditorFieldScrollListeners();
   });
+  bindOutlineEditorFieldScrollListeners();
+  restoreOutlineEditorScroll();
 }
 
 function inputField(name, label, value, type = "text") {
@@ -1405,6 +1573,8 @@ async function generateOutline() {
     return;
   }
   const workId = state.selectedWorkId;
+  saveOutlineTreeScroll();
+  saveCurrentOutlineEditorScroll();
   const task = startTask("outline", "生成全书大纲", "策划 AI 正在梳理全书主线、分卷目标和阶段推进。", { workId });
   try {
     log("策划 AI 正在生成全书大纲...");
@@ -1432,6 +1602,8 @@ async function generateOutline() {
 async function saveOutline() {
   if (!requireWork()) return;
   const workId = state.selectedWorkId;
+  saveOutlineTreeScroll();
+  saveCurrentOutlineEditorScroll();
   commitOutlineEditor();
   try {
     const data = await persistOutline(workId);
@@ -1483,6 +1655,8 @@ async function generateChapterOutlines() {
     return;
   }
   const workId = state.selectedWorkId;
+  saveOutlineTreeScroll();
+  saveCurrentOutlineEditorScroll();
   commitOutlineEditor();
   updateOutlineGenerateControls();
   const start = Number($("chapterStartInput").value || 1);
@@ -1713,6 +1887,7 @@ async function loadChapter(chapterNumber, targetTab) {
   if (!requireWork()) return;
   const workId = state.selectedWorkId;
   const seq = ++state.chapterLoadSeq;
+  saveCurrentChapterScroll();
   state.contextLoadSeq += 1;
   state.contextLoadedFor = null;
   if (state.chapterLoadController) state.chapterLoadController.abort();
@@ -1793,7 +1968,10 @@ function clearEditor() {
   state.contextLoadController = null;
   if ($("writingChapterNumberInput")) $("writingChapterNumberInput").value = state.selectedChapter || 1;
   if ($("chapterTitleInput")) $("chapterTitleInput").value = "";
-  if ($("chapterTextInput")) $("chapterTextInput").value = "";
+  if ($("chapterTextInput")) {
+    $("chapterTextInput").value = "";
+    $("chapterTextInput").scrollTop = 0;
+  }
   if ($("chapterOutlinePreview")) $("chapterOutlinePreview").textContent = "未载入章节。";
   if ($("contextPreview")) $("contextPreview").textContent = "未载入章节。";
   if ($("reviewPreview")) $("reviewPreview").textContent = "暂无审稿结果。";
@@ -1928,6 +2106,7 @@ function fillChapter(data) {
   $("exportStartInput").value = chapter.chapter_number || 1;
   $("exportEndInput").value = chapter.chapter_number || 1;
   updateChapterWordStatus();
+  restoreChapterScroll(state.selectedWorkId, chapter.chapter_number, chapter.updated_at || "");
 }
 
 function updateChapterWordStatus() {
@@ -2091,6 +2270,7 @@ async function handlePendingResultClick(event) {
     $("chapterTextInput").value = item.text;
     $("revisionInstructionInput").value = "";
     updateChapterWordStatus();
+    resetChapterScroll(item.workId, item.chapterNumber, state.editor.updatedAt || "");
     removePendingResult(item.id);
     notify(`已把修订结果载入第 ${item.chapterNumber} 章编辑区，确认后请保存最终稿。`, "success");
   }
@@ -2137,14 +2317,20 @@ async function generateChapter() {
       setEditorOwner(data.chapter);
       state.currentChapterWordTarget = data.context?.chapter_word_target || state.currentChapterWordTarget;
     }
-    if (data.final_text || data.draft) $("chapterTextInput").value = data.final_text || data.draft;
+    if (data.final_text || data.draft) {
+      $("chapterTextInput").value = data.final_text || data.draft;
+      resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
+    }
     updateChapterWordStatus();
     $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "暂无记忆卡。");
     $("draftPreview").textContent = data.draft || "暂无初稿。";
     if (data.work_state) applyWorkState(data.work_state);
     if (isProblemDraft) {
-      if (data.draft) $("chapterTextInput").value = data.draft;
+      if (data.draft) {
+        $("chapterTextInput").value = data.draft;
+        resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
+      }
       showProblemDraftNotice(data, chapterNumber);
       return;
     }
@@ -2156,6 +2342,7 @@ async function generateChapter() {
     }
     $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, $("memoryPreview").textContent || "暂无记忆卡。");
+    resetChapterScroll(workId, chapterNumber, state.editor.updatedAt || data.chapter?.updated_at || "");
     log(`第 ${chapterNumber} 章生成完成。`);
     notify(`第 ${chapterNumber} 章生成完成。`, "success");
   } catch (error) {
@@ -2225,7 +2412,9 @@ async function saveChapterText() {
     return;
   }
   const { workId, chapterNumber, chapterId, updatedAt } = target;
-  const currentText = $("chapterTextInput").value;
+  const textInput = $("chapterTextInput");
+  const currentText = textInput.value;
+  const currentScrollTop = textInput.scrollTop || 0;
   const previousText = state.currentChapter?.final_text || "";
   const hasMemory = Boolean(String(state.currentChapter?.memory_json || "").trim());
   let invalidateMemory = false;
@@ -2250,6 +2439,9 @@ async function saveChapterText() {
     if (Number(state.selectedWorkId) !== Number(workId)) return;
     if (editorIsShowing(workId, chapterNumber)) {
       fillChapter(data);
+      const savedUpdatedAt = data.chapter?.updated_at || state.editor.updatedAt || "";
+      rememberChapterScroll(workId, chapterNumber, savedUpdatedAt, currentScrollTop);
+      restoreChapterScroll(workId, chapterNumber, savedUpdatedAt);
     }
     if (!showManualQualityNotice(data.quality_gate)) {
       notify(`第 ${chapterNumber} 章最终稿已保存。`, "success");
@@ -2306,6 +2498,7 @@ async function reviseWithInstruction() {
     const memoryNotice = data.memory_invalidated ? "旧记忆已清空，请重新生成记忆。" : "";
     if (editorIsShowing(workId, chapterNumber)) {
       fillChapter(data);
+      resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
       $("revisionInstructionInput").value = "";
       log(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success", { chapter: chapterNumber, task: task.title });
       notify(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success");

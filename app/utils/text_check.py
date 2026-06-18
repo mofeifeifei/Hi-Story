@@ -269,6 +269,10 @@ OPENING_ENDING_REPAIR_MARKERS = [
     "承接债",
     "开头方式",
     "开头触发",
+    "表层锚点",
+    "剧情发动方式",
+    "句式形状",
+    "第一眼",
     "语言专项修订",
     "破折号",
 ]
@@ -444,6 +448,125 @@ OPENING_ATMOSPHERE_WORDS = [
     "亥时",
 ]
 
+OPENING_SURFACE_ANCHORS: dict[str, list[str]] = {
+    "时间声音": [
+        "更鼓",
+        "鼓声",
+        "鼓楼",
+        "梆子",
+        "钟声",
+        "铃声",
+        "警报",
+        "广播",
+        "号角",
+        "汽笛",
+        "钟响",
+        "铃响",
+        "闹钟",
+    ],
+    "时间标记": [
+        "卯时",
+        "辰时",
+        "巳时",
+        "午时",
+        "子时",
+        "清晨",
+        "黄昏",
+        "入夜",
+        "深夜",
+        "黎明",
+        "拂晓",
+        "翌日",
+        "次日",
+    ],
+    "天气光线": [
+        "晨光",
+        "日光",
+        "阳光",
+        "天光",
+        "月色",
+        "夜色",
+        "雨声",
+        "风声",
+        "雪",
+        "雾",
+        "灯火",
+        "烛火",
+    ],
+    "门窗出入": [
+        "门",
+        "窗",
+        "轿帘",
+        "帘",
+        "廊",
+        "门槛",
+        "门闩",
+        "舱门",
+        "车门",
+        "电梯门",
+        "舱口",
+    ],
+    "文书消息": [
+        "便条",
+        "纸条",
+        "信",
+        "文书",
+        "账册",
+        "录簿",
+        "抄本",
+        "案卷",
+        "奏疏",
+        "草稿",
+        "短信",
+        "消息",
+        "屏幕",
+        "终端",
+    ],
+    "物件触感": [
+        "硌",
+        "压",
+        "捏",
+        "握",
+        "攥",
+        "木屑",
+        "石",
+        "钥匙",
+        "令牌",
+        "刀",
+        "杯",
+        "茶盏",
+        "镇尺",
+        "戒指",
+        "项链",
+    ],
+    "普通人物动作": [
+        "抬起头",
+        "低头",
+        "伸手",
+        "站起",
+        "坐下",
+        "走进",
+        "走出",
+        "看了看",
+        "看着",
+        "拿起",
+        "放下",
+        "推开",
+    ],
+    "内心判断": [
+        "意识到",
+        "明白",
+        "知道",
+        "觉得",
+        "想起",
+        "心里",
+        "念头",
+        "判断",
+        "他知道",
+        "她知道",
+    ],
+}
+
 FIRST_SCREEN_HOOK_RE = re.compile(
     r"(?:"
     r"不对|不见|消失|失踪|异常|反常|可疑|破绽|矛盾|漏洞|假|伪|错|换|动过|多出|少了|"
@@ -530,6 +653,21 @@ def opening_pattern_flags(opening: str) -> list[str]:
 def opening_pattern_label(opening: str) -> str:
     flags = opening_pattern_flags(opening)
     return " + ".join(flags) if flags else "动作/对白/冲突"
+
+
+def opening_signature(text: str) -> dict[str, Any]:
+    first = first_paragraph(text, max_chars=360)
+    screen = first_screen(text, max_chars=560)
+    mode = detect_opening_mode(first or screen)
+    surface_anchors = _opening_surface_anchors(screen or first)
+    syntax_shape = _opening_syntax_shape(first)
+    return {
+        "opening_engine": mode,
+        "surface_anchors": surface_anchors,
+        "primary_surface_anchor": surface_anchors[0] if surface_anchors else "其他",
+        "subject_type": _opening_subject_type(first),
+        "syntax_shape": syntax_shape,
+    }
 
 
 def rhetorical_pattern_flags(text: str, *, opening: bool = False) -> list[str]:
@@ -700,6 +838,67 @@ def detect_opening_mode(opening: str) -> str:
     return "其他"
 
 
+def _opening_surface_anchors(text: str) -> list[str]:
+    sample = first_screen(text, max_chars=360)
+    anchors: list[str] = []
+    for label, words in OPENING_SURFACE_ANCHORS.items():
+        if any(word in sample for word in words):
+            anchors.append(label)
+    if OPENING_TIME_RE.search(sample[:120]) and "时间标记" not in anchors:
+        anchors.append("时间标记")
+    if (OPENING_ENV_RE.search(sample[:120]) or OPENING_ENV_NEAR_RE.search(sample[:140])) and "天气光线" not in anchors:
+        anchors.append("天气光线")
+    if (OPENING_PLACE_RE.search(sample[:120]) or OPENING_PLACE_NEAR_RE.search(sample[:140])) and "地点陈列" not in anchors:
+        anchors.append("地点陈列")
+    if "“" in sample[:160] or '"' in sample[:160]:
+        anchors.append("对白")
+    if FIRST_SCREEN_HOOK_RE.search(sample[:260]):
+        anchors.append("问题/威胁/证据")
+    return _dedupe(anchors)[:5]
+
+
+def _opening_subject_type(first: str) -> str:
+    text = first_paragraph(first, max_chars=180)
+    if not text:
+        return "其他"
+    if text.startswith(("“", "\"")):
+        return "对白"
+    if any(word in text[:120] for word in ["信", "纸", "便条", "账册", "录簿", "钥匙", "令牌", "门", "窗", "杯", "石", "刀", "屏幕", "终端"]):
+        return "物件"
+    if any(word in text[:120] for word in ["不见", "没有来", "空无一人", "缺席", "无人"]):
+        return "缺席者"
+    if any(word in text[:120] for word in ["众人", "人群", "士卒", "巡兵", "同僚", "宾客", "队伍"]):
+        return "群体"
+    if re.match(r"^\s*[\u4e00-\u9fff]{1,4}(?:把|从|在|向|没有|低头|抬头|伸手|走|站|坐|跨|推|掀)", text):
+        return "人物"
+    return "场景/其他"
+
+
+def _opening_syntax_shape(first: str) -> str:
+    sentence = re.split(r"[。！？!?]\s*", first_paragraph(first, max_chars=180), maxsplit=1)[0].strip()
+    if not sentence:
+        return "其他"
+    if DASH_RE.search(sentence):
+        return "破折号解释"
+    if _has_bushi_contrast(sentence):
+        return "对照判断"
+    if OPENING_TIME_RE.search(sentence):
+        return "时间起句"
+    if OPENING_PLACE_RE.search(sentence) or OPENING_PLACE_NEAR_RE.search(sentence[:90]):
+        return "地点起句"
+    if OPENING_ENV_RE.search(sentence) or OPENING_ENV_NEAR_RE.search(sentence[:90]):
+        return "环境起句"
+    if sentence.startswith(("“", "\"")):
+        return "对白起句"
+    if any(word in sentence[:80] for word in OPENING_SURFACE_ANCHORS.get("时间声音", [])):
+        return "声音起句"
+    if any(word in sentence[:100] for word in OPENING_SURFACE_ANCHORS.get("文书消息", [])):
+        return "物件/消息起句"
+    if re.match(r"^\s*[\u4e00-\u9fff]{1,4}(?:把|从|在|向|没有|低头|抬头|伸手|走|站|坐|跨|推|掀)", sentence):
+        return "人物动作起句"
+    return "其他"
+
+
 def _has_first_screen_hook(text: str) -> bool:
     first = first_paragraph(text, max_chars=320)
     if not first:
@@ -816,6 +1015,9 @@ def chapter_opening_warning(text: str, context: dict[str, Any]) -> str:
     copied_outline = _copied_outline_opening_warning(text, context)
     if copied_outline:
         return copied_outline
+    signature_warning = _opening_signature_warning(text, context)
+    if signature_warning:
+        return signature_warning
     rhetorical_warning = _opening_rhetorical_warning(text, context)
     if rhetorical_warning:
         return rhetorical_warning
@@ -838,6 +1040,66 @@ def chapter_opening_warning(text: str, context: dict[str, Any]) -> str:
         return "章首连续使用" + "、".join(repeated) + "开头，AI味明显；请换成不同的第一屏策略，并让开头带出问题、压力、异常、威胁、选择或反证。"
     if len(current_flags) >= 2 and not _has_first_screen_hook(text):
         return "章首使用时间/地点/环境式静态开场，但第一屏没有形成问题、压力、异常、威胁、选择或反证。"
+    return ""
+
+
+def _opening_signature_warning(text: str, context: dict[str, Any]) -> str:
+    current = opening_signature(text)
+    recent_raw = context.get("recent_chapter_openings")
+    if not isinstance(recent_raw, list):
+        recent_raw = []
+    recent: list[dict[str, Any]] = []
+    for item in recent_raw[-5:]:
+        if not isinstance(item, dict):
+            continue
+        sig = item.get("opening_signature")
+        if isinstance(sig, dict):
+            recent.append(sig)
+    if not recent:
+        return ""
+
+    current_anchor = str(current.get("primary_surface_anchor") or "")
+    if current_anchor and current_anchor not in {"其他", "问题/威胁/证据", "对白"}:
+        recent_anchors = [
+            str(sig.get("primary_surface_anchor") or "")
+            for sig in recent
+            if str(sig.get("primary_surface_anchor") or "")
+        ]
+        if recent_anchors.count(current_anchor) >= 2:
+            return (
+                f"章首表层锚点连续偏向“{current_anchor}”，容易形成同款开场；"
+                "请把它降为背景，改由证据、对白、威胁、关系冲突、选择或现场异常发动第一屏。"
+            )
+
+    engine = str(current.get("opening_engine") or "")
+    recent_engines = [
+        str(sig.get("opening_engine") or "")
+        for sig in recent[-3:]
+        if str(sig.get("opening_engine") or "")
+    ]
+    if engine and engine != "其他" and recent_engines.count(engine) >= 2:
+        return (
+            f"章首剧情发动方式连续接近“{engine}”，需要换一种第一屏发动机；"
+            "不要只替换词语，要换成不同的动作、对白、证据、威胁、关系压力或选择。"
+        )
+
+    shape = str(current.get("syntax_shape") or "")
+    recent_shapes = [
+        str(sig.get("syntax_shape") or "")
+        for sig in recent[-4:]
+        if str(sig.get("syntax_shape") or "")
+    ]
+    if shape and shape not in {"其他"} and recent_shapes.count(shape) >= 2:
+        return f"章首句式形状连续接近“{shape}”，容易模板化；请换成不同句法和不同第一眼落点。"
+
+    subject = str(current.get("subject_type") or "")
+    recent_subjects = [
+        str(sig.get("subject_type") or "")
+        for sig in recent[-4:]
+        if str(sig.get("subject_type") or "")
+    ]
+    if subject and subject == "人物" and recent_subjects.count(subject) >= 3:
+        return "最近章首第一眼连续落在人物动作上，本章优先从物件、对白、缺席者、对手动作或现场异常切入。"
     return ""
 
 
@@ -982,7 +1244,14 @@ def manuscript_quality_report(
 
     opening_warning = chapter_opening_warning(cleaned, context)
     if opening_warning:
-        if opening_warning.startswith("章首连续使用") or "对照判断句式" in opening_warning:
+        if (
+            opening_warning.startswith("章首连续使用")
+            or "对照判断句式" in opening_warning
+            or "章首表层锚点" in opening_warning
+            or "章首剧情发动方式" in opening_warning
+            or "章首句式形状" in opening_warning
+            or "第一眼连续落在" in opening_warning
+        ):
             blockers.append(opening_warning)
         else:
             warnings.append(opening_warning)
@@ -1001,6 +1270,7 @@ def manuscript_quality_report(
         "length_problem": "" if length_problem and length_problem.startswith("严重") else length_problem,
         "visible_chars": visible_chars,
         "opening_mode": detect_opening_mode(cleaned),
+        "opening_signature": opening_signature(cleaned),
         "ending_signature": ending_signature(cleaned),
     }
 
