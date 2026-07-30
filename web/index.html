@@ -296,13 +296,19 @@
             <div class="mini-tabs" id="inspectorTabs">
               <button data-inspector="outline" class="active">任务单</button>
               <button data-inspector="context">上下文</button>
-              <button data-inspector="review">审稿</button>
+              <button data-inspector="revision">修订</button>
               <button data-inspector="memory">记忆</button>
               <button data-inspector="draft">初稿</button>
             </div>
             <pre id="chapterOutlinePreview" class="inspector-pane active" data-pane="outline">未载入章节。</pre>
             <pre id="contextPreview" class="inspector-pane" data-pane="context">未载入章节。</pre>
-            <pre id="reviewPreview" class="inspector-pane" data-pane="review">暂无审稿结果。</pre>
+            <div id="revisionAdvicePane" class="inspector-pane revision-advice-pane" data-pane="revision">
+              <div class="revision-advice-head">
+                <strong>修订建议</strong>
+                <button id="copyRevisionAdviceBtn" type="button">复制</button>
+              </div>
+              <pre id="revisionAdviceText">暂无修订建议。</pre>
+            </div>
             <pre id="memoryPreview" class="inspector-pane" data-pane="memory">暂无记忆卡。</pre>
             <pre id="draftPreview" class="inspector-pane" data-pane="draft">暂无初稿。</pre>
           </aside>
@@ -427,7 +433,7 @@
           </div>
           <div class="button-row">
             <button class="primary" id="saveConfigBtn">保存设置</button>
-            <button id="testApiBtn">测试 API</button>
+            <button id="testApiBtn">测试连接</button>
           </div>
         </div>
 
@@ -436,26 +442,26 @@
             <h3>常用 AI 配置</h3>
             <div class="grid two">
               <label>模型供应商<input id="modelProviderInput"></label>
-              <label>Base URL<input id="baseUrlInput"></label>
-              <label>Wire API
+              <label>服务地址<input id="baseUrlInput"></label>
+              <label>请求协议
                 <select id="wireApiInput">
-                  <option value="chat_completions">chat_completions</option>
-                  <option value="responses">responses</option>
+                  <option value="chat_completions">对话补全（chat_completions）</option>
+                  <option value="responses">统一响应（responses）</option>
                 </select>
               </label>
               <label>主模型<input id="defaultModelInput"></label>
               <label>超时秒数<input id="timeoutInput" type="number" min="10" max="1800"></label>
               <label>最大重试<input id="maxRetriesInput" type="number" min="0" max="5"></label>
             </div>
-            <label>API Key
+            <label>接口密钥
               <div class="secret-field">
                 <input id="apiKeyInput" type="password">
                 <button type="button" id="toggleApiKeyBtn">显示</button>
               </div>
             </label>
             <div class="button-row wrap">
-              <label class="check"><input id="mockModeInput" type="checkbox"> mock 模式</label>
-              <label class="check"><input id="singleModelInput" type="checkbox"> 所有 Agent 使用主模型</label>
+              <label class="check"><input id="mockModeInput" type="checkbox"> 模拟模式</label>
+              <label class="check"><input id="singleModelInput" type="checkbox"> 所有智能体使用主模型</label>
             </div>
           </div>
 
@@ -464,20 +470,20 @@
             <div class="grid two after-summary">
               <label>审稿模型<input id="reviewModelInput"></label>
               <label>策划模型<input id="plannerModelInput"></label>
-              <label>写稿模型<input id="writerModelInput"></label>
-              <label>审稿 Agent 模型<input id="reviewerModelInput"></label>
+              <label>正文写作模型<input id="writerModelInput"></label>
+              <label>审稿智能体模型<input id="reviewerModelInput"></label>
               <label>修订模型<input id="reviserModelInput"></label>
               <label>记忆模型<input id="memoryModelInput"></label>
               <label>推理强度
                 <select id="reasoningEffortInput">
                   <option value=""></option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
+                  <option value="low">低（low）</option>
+                  <option value="medium">中（medium）</option>
+                  <option value="high">高（high）</option>
+                  <option value="xhigh">极高（xhigh）</option>
                 </select>
               </label>
-              <label>最大输出 Token<input id="maxOutputTokensInput" type="number" min="0" max="200000"></label>
+              <label>最大输出令牌<input id="maxOutputTokensInput" type="number" min="0" max="200000"></label>
               <label>上下文窗口<input id="contextWindowInput" type="number" min="4096" max="2000000"></label>
               <label>自动压缩阈值<input id="autoCompactInput" type="number" min="4096" max="2000000"></label>
             </div>

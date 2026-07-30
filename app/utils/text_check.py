@@ -635,6 +635,24 @@ def last_screen(text: str, *, max_chars: int = 420) -> str:
     return "\n".join(reversed(parts))
 
 
+def paragraph_structure_warnings(text: str) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n|\r\n\s*\r\n", str(text or "")) if part.strip()]
+    visible_chars = _visible_length(str(text or ""))
+    if not paragraphs or visible_chars < 1200:
+        return []
+    lengths = [len(re.sub(r"\s+", "", part)) for part in paragraphs]
+    warnings: list[str] = []
+    if len(paragraphs) < 8:
+        warnings.append("正文段落过少，移动阅读时可能形成大段堆叠；请按动作、信息或情绪转折自然分段。")
+    long_count = sum(1 for length in lengths if length > 320)
+    if long_count >= 3 and long_count / len(lengths) >= 0.2:
+        warnings.append("正文存在较多超长段落；保留必要说明，但应在行动、对白或信息变化处断开。")
+    short_count = sum(1 for length in lengths if length <= 12)
+    if len(paragraphs) >= 20 and short_count / len(lengths) >= 0.6:
+        warnings.append("短段比例过高，可能削弱场景连贯性；请合并没有独立动作、信息或情绪功能的碎段。")
+    return warnings
+
+
 def opening_pattern_flags(opening: str) -> list[str]:
     first = first_paragraph(opening, max_chars=160)
     first_sentence = re.split(r"[。！？!?]\s*", first, maxsplit=1)[0].strip()
@@ -1259,6 +1277,7 @@ def manuscript_quality_report(
     ending_warning = chapter_ending_warning(cleaned, context)
     if ending_warning:
         warnings.append(ending_warning)
+    warnings.extend(paragraph_structure_warnings(cleaned))
 
     return {
         "stage": stage,

@@ -23,6 +23,8 @@ def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         conn.executescript(schema)
+        _ensure_column(conn, "chapters", "revision", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chapters", "memory_revision", "INTEGER")
         apply_migrations(conn, MIGRATIONS_DIR)
         _ensure_column(conn, "works", "book_bible_json", "TEXT")
         _ensure_column(conn, "works", "settings_locked", "INTEGER DEFAULT 0")
@@ -55,6 +57,8 @@ def init_db(db_path: Path) -> None:
             ("hook_score", "INTEGER"),
             ("historical_score", "INTEGER"),
             ("repeat_risk", "TEXT"),
+            ("revision_plan", "TEXT"),
+            ("revision_check", "TEXT"),
         ]:
             _ensure_column(conn, "reviews", column, definition)
         conn.execute(

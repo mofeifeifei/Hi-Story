@@ -29,6 +29,7 @@ ALLOWED_CONFIG_KEYS = {
 }
 
 AGENT_MODEL_KEYS = {"planner", "writer", "reviewer", "reviser", "memory"}
+API_KEY_MASK = "********"
 
 
 def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
@@ -39,6 +40,8 @@ def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dic
     config = dict(current)
     for key in ALLOWED_CONFIG_KEYS:
         if key in body:
+            if key == "api_key" and body[key] == API_KEY_MASK:
+                continue
             config[key] = body[key]
 
     config["provider"] = _text(config.get("provider"), "OpenAI")
@@ -82,7 +85,7 @@ def public_config(config: dict[str, Any]) -> dict[str, Any]:
         "base_url": config.get("base_url", ""),
         "wire_api": config.get("wire_api", ""),
         "requires_openai_auth": bool(config.get("requires_openai_auth", True)),
-        "api_key": config.get("api_key", ""),
+        "api_key": API_KEY_MASK if config.get("api_key") else "",
         "default_model": config.get("default_model", ""),
         "review_model": config.get("review_model", ""),
         "agent_models": config.get("agent_models", {}),

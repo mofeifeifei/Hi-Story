@@ -13,18 +13,19 @@ class ReviserAgent(BaseAgent):
 
     def revise_chapter(self, context: dict[str, Any], draft: str, review: dict[str, Any]) -> str:
         history_section = history_prompt_section(context, task="reviser")
+        revision_plan = review.get("revision_plan") if isinstance(review, dict) else []
         user_prompt = (
-            "请根据审稿意见修订章节正文，只输出修订后的正文。\n\n"
-            "修订时必须保留并兑现章节目的词、目标情绪、读者期待和本章回报；必要事实以 minimal_memory_pack 为准。\n\n"
-            "修订时必须保留或增强 continuity_debt、opening_mode、opening_trigger、reader_question_in、reader_answer_out、new_question_out、next_continuity_debt；不要把有功能的开头改成时辰/天气/环境铺垫，也不要改成普通人物动作模板。\n\n"
-            "如果审稿意见指出字数问题，必须依据 chapter_word_target 的动态目标修订，不能写成短摘要，也不能注水。\n\n"
-            "必须读取 recent_chapter_endings 和 ending_variation_policy；如果审稿指出章尾重复或机器味收束，优先重写最后 200 到 500 字，保留事实和钩子含义，换成新的外部锚点、动作状态、关系压力、证据变化或威胁抵达。\n\n"
+            "请根据修订计划修订章节正文，只输出修订后的正文。\n\n"
+            "优先修复高优先级的承接、因果、人物和回报问题；保留 chapter_task_sheet、chapter_execution_card、"
+            "minimal_memory_pack 和锁定事实中的有效内容。开头必须继续执行交接口，结尾必须保留下一章可接的外部锚点。\n"
+            "依据 recent_style_signatures 和避重策略处理重复章首、章尾、破折号或对照句，但不要把语言改成新模板。"
+            "字数按 chapter_word_target 调整，扩写只增加有效场景，压缩只删重复表达。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
-            f"审稿意见：\n{json_dumps(review)}\n\n"
+            f"修订计划：\n{json_dumps(revision_plan)}\n\n"
             f"初稿：\n{draft}"
         )
-        return self.complete(user_prompt, mock_hint={"draft": draft, "review": review}).strip()
+        return self.complete(user_prompt, mock_hint={"draft": draft, "revision_plan": revision_plan}).strip()
 
     def revise_with_instruction(self, context: dict[str, Any], draft: str, instruction: str) -> str:
         history_section = history_prompt_section(context, task="reviser")
@@ -32,10 +33,8 @@ class ReviserAgent(BaseAgent):
             "请根据用户修改意见修订章节正文，只输出修订后的正文。\n"
             "用户意见优先级最高；在不违背锁定设定、细纲和上下文的前提下，尽量保留当前正文中可用的段落、对白和事件，"
             "不要从零重写成另一章。\n\n"
-            "必要事实以 minimal_memory_pack 为准；不要为局部修订新增无关设定或改掉章末交接口。\n\n"
-            "如果修改涉及开头或结尾，必须保留 continuity_debt、opening_trigger、reader_answer_out、new_question_out 和 next_continuity_debt 对应的承接链；不要因为润色把可承接的外部锚点改成抽象感慨。\n\n"
-            "如果修改涉及结尾，必须读取 recent_chapter_endings 和 ending_variation_policy；不要继续使用最近章节已高频出现的同类章尾落点、破折号解释式或对照判断句式。\n\n"
-            "同时保留 chapter_word_target 的动态字数要求；扩写要增加有效剧情，压缩要删冗余表达。\n\n"
+            "必要事实以 minimal_memory_pack、chapter_task_sheet 和章节交接口为准；不要新增无关设定或让下一章承接债失效。"
+            "开头、结尾和语言的改动同时遵守 recent_style_signatures、避重策略和 chapter_word_target。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
             f"用户修改意见：\n{instruction.strip()}\n\n"
@@ -48,10 +47,9 @@ class ReviserAgent(BaseAgent):
         user_prompt = (
             "请对当前章节做首尾专项修订，只输出修订后的完整正文。\n"
             "重点只处理前 300 到 500 字和最后 200 到 300 字；中段剧情、事实、对白、人物关系和事件顺序尽量保持不变。\n"
-            "如果需要修复的问题包含“语言专项修订”或“破折号”，允许对全文做定向语言消毒：只减少破折号和模板句，保留剧情事实、场景顺序、对白含义和章末交接口。\n"
-            "开头必须接住上一章锚点和第一屏冲突，避开禁用开头；结尾必须落到具体外部锚点，并给下一章第一段留下可执行动作。\n"
-            "如果问题包含章尾重复，最后 200 到 500 字必须换章尾指纹：避开 recent_chapter_endings 中重复出现的同类锚点、破折号解释式和对照判断句式。\n"
-            "修复时必须按任务单中的 continuity_debt、opening_mode、opening_trigger、reader_question_in、reader_answer_out、new_question_out、next_continuity_debt 重建首尾承接链；不要把时间环境开头简单替换成人物普通动作开头。\n"
+            "开头接住 chapter_transition_contract 的具体锚点和第一屏冲突；结尾落到新的外部锚点并给下一章第一段留下可执行动作。\n"
+            "如果问题涉及语言或章尾重复，只做必要的定向改写，保留剧情事实、场景顺序、对白含义和章末交接口；"
+            "不要把时间环境开头简单替换成人物普通动作模板。\n"
             "不要把正文改成另一章，不要新增无关设定，不要输出修改说明。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"

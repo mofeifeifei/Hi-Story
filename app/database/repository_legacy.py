@@ -13,7 +13,7 @@ from typing import Any
 
 from app.database.db import connect, init_db, row_to_dict
 from app.exporters.naming import safe_filename
-from app.core.contracts import normalize_work_plan
+from app.core.contracts import localize_visible_protocol_terms, normalize_review, normalize_work_plan
 from app.utils.config import INDEX_DB_PATH, LEGACY_DB_PATH, ROOT_DIR, WORKS_DIR
 from app.utils.history import (
     HISTORICAL_PROFILE_FIELDS,
@@ -32,7 +32,7 @@ from app.utils.outline_utils import chapter_outline_json
 
 
 def now_text() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 def _estimate_tokens_from_chars(chars: int) -> int:
@@ -572,9 +572,12 @@ class Repository:
             raise ValueError(f"章节不存在: work_id={work_id}, chapter={chapter_number}")
         if str(result.get("status") or "") == "problem_draft":
             result["status"] = "problem_draft"
-        elif str(result.get("memory_json") or "").strip():
+        elif (
+            str(result.get("memory_json") or "").strip()
+            and self._optional_int(result.get("memory_revision")) == self._optional_int(result.get("revision"))
+        ):
             result["status"] = "memory"
-        return result
+        return self._localize_chapter_protocol_text(result)
 
     def list_chapters(self, work_id: int) -> list[dict[str, Any]]:
         self.init()
@@ -596,7 +599,7 @@ class Repository:
                 """,
                 (work_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._localize_chapter_protocol_text(dict(row)) for row in rows]
 
     def list_chapter_outlines(self, work_id: int) -> list[dict[str, Any]]:
         self.init()
@@ -617,7 +620,7 @@ class Repository:
                 """,
                 (work_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._localize_chapter_protocol_text(dict(row)) for row in rows]
 
     def get_recent_chapter_outlines(self, work_id: int, before_chapter: int, limit: int = 5) -> list[dict[str, Any]]:
         with connect(self._db_path_for_work(work_id)) as conn:
@@ -638,7 +641,25 @@ class Repository:
                 """,
                 (work_id, before_chapter, limit),
             ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [self._localize_chapter_protocol_text(dict(row)) for row in reversed(rows)]
+
+    @staticmethod
+    def _localize_chapter_protocol_text(chapter: dict[str, Any]) -> dict[str, Any]:
+        localized = dict(chapter)
+        for key in ["outline", "ending_hook", "handoff"]:
+            if key in localized:
+                localized[key] = localize_visible_protocol_terms(localized.get(key))
+        for key in ["outline_json", "scene_cards_json"]:
+            raw = localized.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                localized[key] = localize_visible_protocol_terms(raw)
+            else:
+                localized[key] = json_dumps(localize_visible_protocol_terms(parsed))
+        return localized
 
     def delete_chapter(self, work_id: int, chapter_number: int, *, delete_related: bool = True) -> bool:
         self.init()
@@ -694,8 +715,9 @@ class Repository:
             conn.execute(
                 """
                 UPDATE chapters
-                SET draft = '', final_text = '', summary = '', handoff = '',
-                    memory_json = '', status = 'outline', updated_at = ?
+                SET draft = '', final_text = '', summary = '', ending_hook = '', handoff = '',
+                    memory_json = '', memory_revision = NULL, status = 'outline',
+                    revision = revision + 1, updated_at = ?
                 WHERE id = ? AND work_id = ?
                 """,
                 (timestamp, chapter_id, work_id),
@@ -772,13 +794,22 @@ class Repository:
             conn.execute("DELETE FROM characters WHERE id = ? AND work_id = ?", (character_id, work_id))
             conn.commit()
 
-    def list_chapter_notes(self, work_id: int, chapter_number: int | None = None) -> list[dict[str, Any]]:
+    def list_chapter_notes(
+        self,
+        work_id: int,
+        chapter_number: int | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM chapter_notes WHERE work_id = ?"
         params: list[Any] = [work_id]
         if chapter_number is not None:
             query += " AND (chapter_number = ? OR chapter_number IS NULL OR chapter_number = 0)"
             params.append(chapter_number)
         query += " ORDER BY COALESCE(chapter_number, 0), id"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(1, int(limit)))
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
@@ -1185,6 +1216,10 @@ class Repository:
 
     def save_draft(self, work_id: int, chapter_id: int, draft: str) -> None:
         draft = self.normalize_official_names(work_id, draft)
+        with connect(self._db_path_for_work(work_id)) as conn:
+            conn.execute("DELETE FROM reviews WHERE chapter_id = ?", (chapter_id,))
+            conn.commit()
+        self.clear_chapter_candidates(work_id, chapter_id)
         self._update_chapter_text(work_id, chapter_id, draft=draft, status="draft")
         self.add_version(work_id, chapter_id, f"draft_ai_{now_text()}", draft)
 
@@ -1232,20 +1267,72 @@ class Repository:
         handoff: str | None = None,
         memory_json: str | None = None,
         invalidate_memory: bool = False,
-    ) -> None:
-        if invalidate_memory:
-            self.clear_chapter_memory(work_id, chapter_id)
-            handoff = ""
-            memory_json = ""
-        self.save_final(
-            work_id,
-            chapter_id,
-            final_text,
-            title=title,
-            ending_hook=ending_hook,
-            handoff=handoff,
-            memory_json=memory_json,
-        )
+        expected_revision: int | None = None,
+    ) -> bool:
+        final_text = self.normalize_official_names(work_id, final_text)
+        title = self.normalize_official_names(work_id, title)
+        ending_hook = self.normalize_official_names(work_id, ending_hook)
+        handoff = self.normalize_official_names(work_id, handoff)
+        memory_json = self.normalize_official_names(work_id, memory_json)
+        timestamp = now_text()
+        with connect(self._db_path_for_work(work_id)) as conn:
+            row = conn.execute(
+                """
+                SELECT chapter_number, title, final_text, revision, memory_json, memory_revision
+                FROM chapters
+                WHERE id = ? AND work_id = ?
+                """,
+                (chapter_id, work_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("章节不存在，无法保存正文。")
+            current_revision = int(row["revision"] or 0)
+            if expected_revision is not None and current_revision != int(expected_revision):
+                raise ValueError("该章节已被其他操作更新，请重新载入章节后再保存。")
+            content_changed = str(row["final_text"] or "") != str(final_text or "")
+            had_memory = bool(str(row["memory_json"] or "").strip())
+            clear_memory = bool(invalidate_memory or (content_changed and had_memory))
+            if clear_memory:
+                self._clear_chapter_memory_side_effects(conn, work_id, int(row["chapter_number"]), timestamp)
+                ending_hook = ""
+                handoff = ""
+                memory_json = ""
+            next_revision = current_revision + 1
+            next_memory_revision = None
+            if not clear_memory and str(memory_json or row["memory_json"] or "").strip():
+                next_memory_revision = next_revision
+            conn.execute(
+                """
+                UPDATE chapters
+                SET title = ?, final_text = ?, ending_hook = ?, handoff = ?, memory_json = ?,
+                    memory_revision = ?, status = 'final', revision = ?, updated_at = ?
+                WHERE id = ? AND work_id = ? AND revision = ?
+                """,
+                (
+                    title if title is not None else row["title"],
+                    final_text,
+                    ending_hook,
+                    handoff,
+                    memory_json,
+                    next_memory_revision,
+                    next_revision,
+                    timestamp,
+                    chapter_id,
+                    work_id,
+                    current_revision,
+                ),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("该章节已被其他操作更新，请重新载入章节后再保存。")
+            conn.execute(
+                """
+                INSERT INTO versions (chapter_id, version_name, content, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chapter_id, f"final_{timestamp}", final_text, timestamp),
+            )
+            conn.commit()
+        return bool(clear_memory and had_memory)
 
     def clear_chapter_memory(self, work_id: int, chapter_id: int) -> None:
         with connect(self._db_path_for_work(work_id)) as conn:
@@ -1260,7 +1347,8 @@ class Repository:
             conn.execute(
                 """
                 UPDATE chapters
-                SET summary = '', handoff = '', memory_json = '', status = 'final', updated_at = ?
+                SET summary = '', ending_hook = '', handoff = '', memory_json = '', memory_revision = NULL,
+                    status = 'final', updated_at = ?
                 WHERE id = ? AND work_id = ?
                 """,
                 (now_text(), chapter_id, work_id),
@@ -1268,7 +1356,7 @@ class Repository:
             conn.commit()
 
     def save_review(self, work_id: int, chapter_id: int, review: dict[str, Any]) -> int:
-        review = self.normalize_official_names(work_id, review)
+        review = normalize_review(self.normalize_official_names(work_id, review))
         timestamp = now_text()
         with connect(self._db_path_for_work(work_id)) as conn:
             cur = conn.execute(
@@ -1277,8 +1365,8 @@ class Repository:
                   chapter_id, continuity_score, character_score, emotion_score,
                   rhythm_score, foreshadow_score, payoff_score, hook_score,
                   historical_score, repeat_risk, problems, suggestions, template_hits,
-                  risk_flags, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  risk_flags, revision_plan, revision_check, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chapter_id,
@@ -1295,11 +1383,43 @@ class Repository:
                     json_dumps(review.get("suggestions", [])),
                     json_dumps(review.get("template_hits", [])),
                     json_dumps(review.get("risk_flags", [])),
+                    json_dumps(review.get("revision_plan", [])),
+                    json_dumps(review.get("revision_check", {})),
                     timestamp,
                 ),
             )
             conn.commit()
             return int(cur.lastrowid)
+
+    def get_latest_review(self, work_id: int, chapter_id: int) -> dict[str, Any] | None:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM reviews
+                WHERE chapter_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chapter_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        review = dict(row)
+        for key, fallback in [
+            ("repeat_risk", []),
+            ("problems", []),
+            ("suggestions", []),
+            ("template_hits", []),
+            ("risk_flags", []),
+            ("revision_plan", []),
+            ("revision_check", {}),
+        ]:
+            try:
+                parsed = json.loads(str(review.get(key) or ""))
+            except (TypeError, json.JSONDecodeError):
+                parsed = fallback
+            review[key] = parsed if isinstance(parsed, type(fallback)) else fallback
+        return normalize_review(review)
 
     def add_version(self, work_id: int, chapter_id: int, version_name: str, content: str) -> int:
         with connect(self._db_path_for_work(work_id)) as conn:
@@ -1313,6 +1433,56 @@ class Repository:
             conn.commit()
             return int(cur.lastrowid)
 
+    def list_chapter_candidates(self, work_id: int, chapter_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, chapter_id, version_name, content, created_at
+                FROM versions
+                WHERE chapter_id = ?
+                  AND version_name IN (
+                    'web_user_instruction_rejected_style',
+                    'web_user_instruction_candidate_style'
+                  )
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chapter_id, max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_chapter_candidate(self, work_id: int, chapter_id: int, version_id: int) -> bool:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM versions
+                WHERE id = ? AND chapter_id = ?
+                  AND version_name IN (
+                    'web_user_instruction_rejected_style',
+                    'web_user_instruction_candidate_style'
+                  )
+                """,
+                (version_id, chapter_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount)
+
+    def clear_chapter_candidates(self, work_id: int, chapter_id: int) -> int:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM versions
+                WHERE chapter_id = ?
+                  AND version_name IN (
+                    'web_user_instruction_rejected_style',
+                    'web_user_instruction_candidate_style'
+                  )
+                """,
+                (chapter_id,),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def apply_memory_card(
         self,
         *,
@@ -1320,8 +1490,10 @@ class Repository:
         chapter_id: int,
         chapter_number: int,
         memory: dict[str, Any],
+        title: str | None = None,
     ) -> None:
         memory = self.normalize_official_names(work_id, memory)
+        title = self.normalize_official_names(work_id, title)
         timestamp = now_text()
         handoff = memory.get("handoff", {})
         handoff_text = json_dumps(handoff)
@@ -1330,10 +1502,12 @@ class Repository:
             conn.execute(
                 """
                 UPDATE chapters
-                SET summary = ?, ending_hook = ?, handoff = ?, memory_json = ?, status = 'memory', updated_at = ?
+                SET title = COALESCE(NULLIF(?, ''), title), summary = ?, ending_hook = ?, handoff = ?, memory_json = ?,
+                    memory_revision = revision, status = 'memory', updated_at = ?
                 WHERE id = ?
                 """,
                 (
+                    title,
                     memory.get("summary", ""),
                     memory.get("ending_hook", ""),
                     handoff_text,
@@ -1621,7 +1795,12 @@ class Repository:
             rows = conn.execute(
                 """
                 SELECT
-                  agent_runs.*,
+                  agent_runs.id, agent_runs.work_id, agent_runs.chapter_id,
+                  agent_runs.agent_name, agent_runs.model, agent_runs.prompt_name,
+                  agent_runs.status, agent_runs.error, agent_runs.created_at,
+                  agent_runs.input_chars, agent_runs.output_chars,
+                  agent_runs.estimated_input_tokens, agent_runs.estimated_output_tokens,
+                  agent_runs.estimated_total_tokens, agent_runs.elapsed_seconds,
                   chapters.chapter_number AS chapter_number
                 FROM agent_runs
                 LEFT JOIN chapters ON chapters.id = agent_runs.chapter_id
@@ -1711,6 +1890,26 @@ class Repository:
             item["duration_seconds"] = _duration_seconds(item.get("created_at"), end_time, now=now)
             result.append(item)
         return result
+
+    def interrupt_unfinished_task_runs(self, work_id: int) -> int:
+        timestamp = now_text()
+        with connect(self._db_path_for_work(work_id)) as conn:
+            cur = conn.execute(
+                """
+                UPDATE task_runs
+                SET status = 'interrupted',
+                    error = CASE
+                      WHEN COALESCE(TRIM(error), '') = '' THEN '程序上次退出时任务尚未正常结束。'
+                      ELSE error
+                    END,
+                    updated_at = ?, finished_at = ?
+                WHERE status IN ('running', 'cancelling')
+                  AND COALESCE(TRIM(finished_at), '') = ''
+                """,
+                (timestamp, timestamp),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
 
     def work_dir(self, work_id: int) -> Path:
         return self._work_dir_from_record(self._work_record(work_id))
@@ -3432,6 +3631,7 @@ class Repository:
         updates = {key: value for key, value in fields.items() if key in allowed and value is not None}
         updates["updated_at"] = now_text()
         assignments = ", ".join(f"{key} = ?" for key in updates)
+        assignments += ", revision = revision + 1"
         params = list(updates.values()) + [chapter_id]
         with connect(self._db_path_for_work(work_id)) as conn:
             conn.execute(f"UPDATE chapters SET {assignments} WHERE id = ?", params)

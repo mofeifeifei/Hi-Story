@@ -267,20 +267,53 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     if method == "PUT":
                         return _save_chapter_text(work_id, chapter_number, body)
                     if method == "DELETE":
-                        _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
-                        STATE.repo.delete_chapter(work_id, chapter_number, delete_related=True)
+                        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                        chapter_id = int(chapter["id"])
+                        owner_id = f"delete-{uuid.uuid4().hex}"
+                        STATE.claim_chapter(owner_id, work_id, chapter_id)
+                        try:
+                            chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                            _validate_chapter_request(
+                                work_id,
+                                chapter_number,
+                                body,
+                                chapter,
+                                require_identity=True,
+                            )
+                            STATE.repo.delete_chapter(work_id, chapter_number, delete_related=True)
+                        finally:
+                            STATE.release_chapter(owner_id, work_id, chapter_id)
                         return _work_state(work_id)
                 if len(parts) == 6 and parts[5] == "outline" and method == "PUT":
                     return _save_chapter_outline(work_id, chapter_number, body)
                 if len(parts) == 6 and parts[5] == "context" and method == "GET":
                     return _chapter_context_state(work_id, chapter_number)
                 if len(parts) == 6 and parts[5] == "clear-text" and method == "POST":
-                    _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
-                    STATE.repo.clear_chapter_text(work_id, chapter_number)
+                    chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                    owner_id = f"clear-{uuid.uuid4().hex}"
+                    STATE.claim_chapter(owner_id, work_id, int(chapter["id"]))
+                    try:
+                        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                        _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
+                        STATE.repo.clear_chapter_text(work_id, chapter_number)
+                    finally:
+                        STATE.release_chapter(owner_id, work_id, int(chapter["id"]))
                     return _work_state(work_id)
                 if len(parts) == 6 and parts[5] == "delete-from" and method == "DELETE":
-                    _validate_chapter_request(work_id, chapter_number, body, require_identity=True)
-                    deleted = STATE.repo.delete_chapters_from(work_id, chapter_number, delete_related=True)
+                    chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                    chapter_ids = [
+                        int(item["id"])
+                        for item in STATE.repo.list_chapters(work_id)
+                        if int(item.get("chapter_number") or 0) >= chapter_number
+                    ]
+                    owner_id = f"delete-from-{uuid.uuid4().hex}"
+                    STATE.claim_chapters(owner_id, work_id, chapter_ids)
+                    try:
+                        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                        _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
+                        deleted = STATE.repo.delete_chapters_from(work_id, chapter_number, delete_related=True)
+                    finally:
+                        STATE.release_chapters(owner_id, work_id, chapter_ids)
                     return {**_work_state(work_id), "deleted_count": deleted}
                 if len(parts) == 6 and parts[5] == "generate" and method == "POST":
                     task_id = _task_id(body)
@@ -332,6 +365,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         return _generate_memory(
                             work_id,
                             chapter_number,
+                            body,
                             workflow=workflow,
                             should_stop=lambda: STATE.task_cancelled(task_id),
                         )
@@ -368,6 +402,11 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     finally:
                         if not STATE.task_status(task_id).get("finished_at"):
                             _finish_task(task_id, work_id, chapter_id=chapter_id)
+                if len(parts) == 7 and parts[5] == "versions" and method == "DELETE":
+                    chapter = STATE.repo.get_chapter(work_id, chapter_number)
+                    version_id = _to_int(parts[6], "版本 ID")
+                    deleted = STATE.repo.delete_chapter_candidate(work_id, int(chapter["id"]), version_id)
+                    return {"deleted": deleted}
 
         raise ValueError("未知接口。")
 
@@ -520,17 +559,21 @@ def _start_task(
     chapter_id: int | None = None,
     input_data: dict[str, Any] | None = None,
 ) -> None:
-    STATE.start_task(task_id, kind=kind, title=title)
-    STATE.repo.log_task_run(
-        task_id=task_id,
-        work_id=work_id,
-        chapter_id=chapter_id,
-        kind=kind,
-        title=title,
-        stage=stage,
-        status="running",
-        input_json=json_dumps(input_data or {}),
-    )
+    STATE.start_task(task_id, kind=kind, title=title, work_id=work_id, chapter_id=chapter_id)
+    try:
+        STATE.repo.log_task_run(
+            task_id=task_id,
+            work_id=work_id,
+            chapter_id=chapter_id,
+            kind=kind,
+            title=title,
+            stage=stage,
+            status="running",
+            input_json=json_dumps(input_data or {}),
+        )
+    except Exception:
+        STATE.finish_task(task_id, status="failed", error="任务记录初始化失败。")
+        raise
 
 
 def _finish_task(
@@ -585,15 +628,14 @@ def _work_state(work_id: int) -> dict[str, Any]:
         "workflow_state": STATE.repo.workflow_state(work_id),
         "project_readable": format_project_readable(bundle),
         "outline": outline,
-        "outline_readable": format_outline_readable(outline),
         "characters": STATE.repo.list_characters(work_id),
         "world_rules": STATE.repo.list_world_rules(work_id),
         "plot_threads": STATE.repo.list_plot_threads(work_id),
         "timeline": STATE.repo.list_timeline(work_id, limit=50),
         "historical_profile": STATE.repo.get_historical_profile(work_id),
-        "historical_facts": STATE.repo.list_historical_facts(work_id),
-        "chapter_notes": STATE.repo.list_chapter_notes(work_id),
-        "sync_events": STATE.repo.list_sync_events(work_id),
+        "historical_facts": STATE.repo.list_historical_facts(work_id, limit=80),
+        "chapter_notes": STATE.repo.list_chapter_notes(work_id, limit=100),
+        "sync_events": STATE.repo.list_sync_events(work_id, limit=100),
         "export_dir": str(_current_export_dir(work_id)),
         "default_export_dir": str(STATE.repo.export_dir(work_id)),
         "custom_export_dir": work_id in STATE.custom_export_dirs,
@@ -604,8 +646,12 @@ def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     memory = parse_json_object(chapter.get("memory_json") or "{}", default={}) or {}
     chapter_word_target = _chapter_word_target(work_id)
+    review = STATE.repo.get_latest_review(work_id, int(chapter["id"]))
     return {
         "chapter": chapter,
+        "review": review,
+        "review_readable": format_review_readable(review),
+        "candidate_versions": STATE.repo.list_chapter_candidates(work_id, int(chapter["id"]), limit=10),
         "chapter_word_target": chapter_word_target,
         "context": {"chapter_word_target": chapter_word_target},
         "context_readable": "",
@@ -710,6 +756,21 @@ def _quality_issue_lines(values: list[Any]) -> list[str]:
 
 def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    owner_id = f"manual-save-{uuid.uuid4().hex}"
+    STATE.claim_chapter(owner_id, work_id, int(chapter["id"]))
+    try:
+        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+        return _save_chapter_text_claimed(work_id, chapter_number, body, chapter)
+    finally:
+        STATE.release_chapter(owner_id, work_id, int(chapter["id"]))
+
+
+def _save_chapter_text_claimed(
+    work_id: int,
+    chapter_number: int,
+    body: dict[str, Any],
+    chapter: dict[str, Any],
+) -> dict[str, Any]:
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     title = str(body.get("title") or chapter.get("title") or f"第{chapter_number}章").strip()
     text = strip_chapter_heading(str(body.get("final_text") or ""), chapter_number, title)
@@ -729,7 +790,7 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
         raise ValueError("正文不能保存：" + "；".join(hard_blockers))
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
-    STATE.repo.save_final_after_manual_edit(
+    memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
         text,
@@ -738,7 +799,9 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
         handoff=chapter.get("handoff") or "",
         memory_json=chapter.get("memory_json") or "",
         invalidate_memory=bool(body.get("invalidate_memory", False)),
+        expected_revision=int(chapter.get("revision") or 0),
     )
+    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
     return {
         **_chapter_state(work_id, chapter_number),
         "quality_gate": {
@@ -747,6 +810,7 @@ def _save_chapter_text(work_id: int, chapter_number: int, body: dict[str, Any]) 
             "warning_only": True,
             "saved_as_final": True,
         },
+        "memory_invalidated": memory_invalidated,
     }
 
 
@@ -831,16 +895,26 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
 def _generate_memory(
     work_id: int,
     chapter_number: int,
+    body: dict[str, Any],
     *,
     workflow: NovelWorkflow,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     final_text = str(chapter.get("final_text") or "").strip()
     promoted_problem_draft = False
-    if not final_text and chapter.get("status") == "problem_draft":
-        final_text = str(chapter.get("draft") or "").strip()
-        if final_text:
+    if chapter.get("status") == "problem_draft":
+        problem_draft = str(chapter.get("draft") or "").strip()
+        if problem_draft:
+            if final_text and final_text != problem_draft:
+                STATE.repo.add_version(
+                    work_id,
+                    chapter["id"],
+                    "web_problem_draft_before_promote",
+                    final_text,
+                )
+            final_text = problem_draft
             STATE.repo.save_final_after_manual_edit(
                 work_id,
                 chapter["id"],
@@ -850,6 +924,7 @@ def _generate_memory(
                 handoff=chapter.get("handoff") or "",
                 memory_json="",
                 invalidate_memory=True,
+                expected_revision=int(chapter.get("revision") or 0),
             )
             chapter = STATE.repo.get_chapter(work_id, chapter_number)
             promoted_problem_draft = True
@@ -911,6 +986,14 @@ def _revise_chapter_with_instruction(
     _validate_chapter_request(work_id, chapter_number, body, latest_chapter, require_identity=True)
     revised = workflow.normalize_output_names(work_id, revised)
     revised = strip_chapter_heading(revised, chapter_number, latest_chapter.get("title"))
+    before_context = workflow.build_chapter_context(work_id, chapter_number)
+    before_quality = manuscript_quality_report(
+        current_text,
+        before_context,
+        chapter_number=chapter_number,
+        chapter_title=latest_chapter.get("title") or "",
+        stage="修订前",
+    )
     regression_warnings = [
         *style_regression_warnings(current_text, revised),
         *style_guard_warnings(revised),
@@ -933,11 +1016,18 @@ def _revise_chapter_with_instruction(
         ]
         cleaned_warnings = list(dict.fromkeys(item for item in cleaned_warnings if str(item).strip()))
         if cleaned_warnings:
+            candidate_version_id = STATE.repo.add_version(
+                work_id,
+                chapter["id"],
+                "web_user_instruction_candidate_style",
+                cleaned,
+            )
             return {
                 **_chapter_state(work_id, chapter_number),
                 "revised_text": cleaned,
                 "saved": False,
                 "candidate_only": True,
+                "candidate_version_id": candidate_version_id,
                 "style_regression_warnings": cleaned_warnings,
                 "message": "修订稿风格退化，已作为候选稿保留，未覆盖最终稿。",
                 "work_state": _work_state(work_id),
@@ -945,7 +1035,7 @@ def _revise_chapter_with_instruction(
         revised = cleaned
     memory_invalidated = bool(str(latest_chapter.get("memory_json") or "").strip())
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
-    STATE.repo.save_final_after_manual_edit(
+    memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
         revised,
@@ -954,7 +1044,21 @@ def _revise_chapter_with_instruction(
         handoff=latest_chapter.get("handoff") or "",
         memory_json=latest_chapter.get("memory_json") or "",
         invalidate_memory=memory_invalidated,
+        expected_revision=int(latest_chapter.get("revision") or 0),
     )
+    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
+    after_quality = manuscript_quality_report(
+        revised,
+        before_context,
+        chapter_number=chapter_number,
+        chapter_title=latest_chapter.get("title") or "",
+        stage="修订后",
+    )
+    latest_review = STATE.repo.get_latest_review(work_id, int(chapter["id"])) or {}
+    revision_plan = latest_review.get("revision_plan") if isinstance(latest_review, dict) else []
+    if revision_plan:
+        latest_review["revision_check"] = workflow.revision_check(before_quality, after_quality, revision_plan)
+        STATE.repo.save_review(work_id, int(chapter["id"]), latest_review)
     STATE.repo.log_agent_run(
         work_id=work_id,
         chapter_id=chapter["id"],
@@ -1241,7 +1345,11 @@ def _validate_chapter_request(
         raise ValueError("当前编辑区与目标章节不一致，请重新载入章节后再操作。")
     request_updated_at = str(body.get("updated_at") or "").strip()
     current_updated_at = str(chapter.get("updated_at") or "").strip()
-    if request_updated_at and current_updated_at and request_updated_at != current_updated_at:
+    request_revision = body.get("revision")
+    current_revision = int(chapter.get("revision") or 0)
+    if request_revision not in (None, "") and int(request_revision) != current_revision:
+        raise ValueError("该章节已被其他操作更新，请重新载入章节后再操作。")
+    if request_revision in (None, "") and request_updated_at and current_updated_at and request_updated_at != current_updated_at:
         raise ValueError("该章节已被其他操作更新，请重新载入章节后再操作。")
 
 

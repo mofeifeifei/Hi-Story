@@ -264,6 +264,8 @@ class AIClient:
         max_retries = max(0, int(self.config.get("max_retries", 2) or 0))
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
+            if self._closed:
+                raise AIClientError("AI 请求已取消。")
             session = self._requests_session(requests_module)
             session.trust_env = bool(self.config.get("use_system_proxy", False))
             try:
@@ -285,7 +287,7 @@ class AIClient:
                             max_retries,
                             delay,
                         )
-                        time.sleep(delay)
+                        self._interruptible_sleep(delay)
                         continue
                 return response
             except requests_module.exceptions.RequestException as exc:
@@ -301,8 +303,15 @@ class AIClient:
                     delay,
                     exc,
                 )
-                time.sleep(delay)
+                self._interruptible_sleep(delay)
         raise AIClientError(self._friendly_request_error(last_error, api_name, url, timeout))
+
+    def _interruptible_sleep(self, delay: float) -> None:
+        deadline = time.monotonic() + max(0.0, delay)
+        while time.monotonic() < deadline:
+            if self._closed:
+                raise AIClientError("AI 请求已取消。")
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def _requests_session(self, requests_module: Any) -> Any:
         if self._closed:

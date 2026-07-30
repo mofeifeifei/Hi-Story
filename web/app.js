@@ -6,7 +6,10 @@ const state = {
   selectedChapter: 1,
   currentChapter: null,
   currentChapterWordTarget: null,
-  editor: { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" },
+  editor: { workId: null, chapterId: null, chapterNumber: null, updatedAt: "", revision: 0 },
+  editorDirty: false,
+  suppressEditorDirty: false,
+  restoredLocalDraftKey: "",
   chapterLoadSeq: 0,
   chapterLoadController: null,
   contextLoadSeq: 0,
@@ -44,6 +47,100 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+const AGENT_NAME_LABELS = {
+  planner: "策划",
+  writer: "正文写作",
+  reviewer: "审稿",
+  reviser: "修订",
+  memory: "记忆",
+};
+
+const TASK_KIND_LABELS = {
+  plan: "设定草稿",
+  outline: "全书大纲",
+  chapterOutlines: "章节细纲",
+  chapter: "正文生成",
+  memory: "记忆入库",
+  revise: "正文修订",
+};
+
+const TASK_STAGE_LABELS = {
+  project: "作品设定",
+  project_setup: "作品设定",
+  book_contract: "题材契约卡",
+  outline: "全书大纲",
+  chapter_outline: "章节细纲",
+  chapter_planning: "章节细纲",
+  writing: "正文写作",
+  chapter_execution: "正文写作",
+  finalize: "保存最终稿",
+  memory: "记忆入库",
+  revision: "正文修订",
+  completed: "当前规划已完成",
+};
+
+const PROMPT_NAME_LABELS = {
+  "planner_prompt.md": "策划提示词",
+  "writer_prompt.md": "正文写作提示词",
+  "reviewer_prompt.md": "审稿提示词",
+  "reviser_prompt.md": "修订提示词",
+  "memory_prompt.md": "记忆提示词",
+  "history_prompt.md": "历史资料提示词",
+};
+
+const INTERNAL_PROTOCOL_DISPLAY_LABELS = {
+  allowed_shift: "允许转视角或跨阶段",
+  chapter_execution_card: "章节执行卡",
+  chapter_task_sheet: "章节任务单",
+  chapter_transition_contract: "章节交接规则",
+  chapter_word_target: "单章字数要求",
+  ending_variation_policy: "章尾避重规则",
+  first_screen_task: "第一屏任务",
+  genre_contract: "题材契约卡",
+  last_visible_beat: "上一章最后画面",
+  minimal_memory_pack: "最小记忆包",
+  must_use_concrete_anchor: "必须承接的具体锚点",
+  opening_variation_policy: "章首避重规则",
+  recent_style_signatures: "近期章首章尾避重记录",
+};
+
+function localizeVisibleProtocolText(value) {
+  return String(value || "").replace(
+    /(^|[^a-z0-9_])([a-z][a-z0-9_]*_[a-z0-9_]+)(?![a-z0-9_])/g,
+    (match, prefix, token) => `${prefix}${INTERNAL_PROTOCOL_DISPLAY_LABELS[token] || "内部规则"}`
+  );
+}
+
+function localizeVisibleProtocolValue(value) {
+  if (Array.isArray(value)) return value.map(localizeVisibleProtocolValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, localizeVisibleProtocolValue(item)]));
+  }
+  return typeof value === "string" ? localizeVisibleProtocolText(value) : value;
+}
+
+function displayLabel(value, labels, fallback = "") {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  return labels[text] || labels[text.toLowerCase()] || text;
+}
+
+function agentNameText(value) {
+  return displayLabel(value, AGENT_NAME_LABELS, "未知智能体");
+}
+
+function taskKindText(value) {
+  return displayLabel(value, TASK_KIND_LABELS, "未分类任务");
+}
+
+function taskStageText(value) {
+  return displayLabel(value, TASK_STAGE_LABELS, "未记录阶段");
+}
+
+function promptNameText(value) {
+  return displayLabel(value, PROMPT_NAME_LABELS, "未记录");
+}
 
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -87,6 +184,141 @@ function restoreChapterScroll(workId, chapterNumber, updatedAt = "") {
   requestAnimationFrame(() => {
     input.scrollTop = Math.max(0, Math.min(targetScrollTop, input.scrollHeight || targetScrollTop));
   });
+}
+
+function chapterDraftKey(workId, chapterNumber) {
+  return `hi-story:draft:${Number(workId || 0)}:${Number(chapterNumber || 0)}`;
+}
+
+function chapterServerText(chapter = state.currentChapter || {}) {
+  const isProblemDraft = chapter.status === "problem_draft" || chapter.status === "draft";
+  if (isProblemDraft && chapter.draft) return chapter.draft || "";
+  return chapter.final_text || chapter.draft || "";
+}
+
+function setChapterTextValue(text) {
+  const input = $("chapterTextInput");
+  if (!input) return;
+  state.suppressEditorDirty = true;
+  input.value = text || "";
+  state.suppressEditorDirty = false;
+}
+
+function markEditorClean() {
+  state.editorDirty = false;
+}
+
+function markEditorDirty() {
+  if (state.suppressEditorDirty) return;
+  const target = loadedEditorTarget();
+  if (!target) return;
+  const text = $("chapterTextInput")?.value || "";
+  const title = $("chapterTitleInput")?.value || "";
+  const serverText = chapterServerText(state.currentChapter);
+  state.editorDirty = text !== serverText || title !== (state.currentChapter?.title || "");
+  if (state.editorDirty) saveLocalChapterDraft();
+}
+
+function saveLocalChapterDraft() {
+  const target = loadedEditorTarget();
+  const input = $("chapterTextInput");
+  if (!target || !input) return;
+  try {
+    localStorage.setItem(chapterDraftKey(target.workId, target.chapterNumber), JSON.stringify({
+      text: input.value || "",
+      title: $("chapterTitleInput")?.value || "",
+      updatedAt: target.updatedAt || "",
+      revision: target.revision,
+      savedAt: new Date().toISOString(),
+    }));
+  } catch {
+    // localStorage may be unavailable in private mode; the dirty prompt still protects this session.
+  }
+}
+
+function clearLocalChapterDraft(workId, chapterNumber) {
+  try {
+    localStorage.removeItem(chapterDraftKey(workId, chapterNumber));
+  } catch {
+    // Ignore localStorage failures.
+  }
+  if (Number(state.editor.workId) === Number(workId) && Number(state.editor.chapterNumber) === Number(chapterNumber)) {
+    state.restoredLocalDraftKey = "";
+  }
+}
+
+function restoreLocalChapterDraftIfNeeded() {
+  const target = loadedEditorTarget();
+  if (!target) return false;
+  const key = chapterDraftKey(target.workId, target.chapterNumber);
+  let draft = null;
+  try {
+    draft = JSON.parse(localStorage.getItem(key) || "null");
+  } catch {
+    draft = null;
+  }
+  if (!draft || typeof draft.text !== "string") return false;
+  const currentText = $("chapterTextInput")?.value || "";
+  if (draft.text === currentText && (draft.title || "") === ($("chapterTitleInput")?.value || "")) {
+    return false;
+  }
+  const revisionChanged = draft.revision !== undefined
+    && Number(draft.revision) !== Number(target.revision);
+  const legacyTimestampChanged = draft.revision === undefined
+    && draft.updatedAt
+    && target.updatedAt
+    && String(draft.updatedAt) !== String(target.updatedAt);
+  if (revisionChanged || legacyTimestampChanged) {
+    window.setTimeout(() => offerLocalDraftConflict(target, draft, key), 0);
+    return false;
+  }
+  setChapterTextValue(draft.text);
+  if ($("chapterTitleInput") && draft.title) $("chapterTitleInput").value = draft.title;
+  state.editorDirty = true;
+  state.restoredLocalDraftKey = key;
+  updateChapterWordStatus();
+  notify(`已恢复第 ${target.chapterNumber} 章未保存的本地临时稿，请确认后保存最终稿。`, "warning");
+  return true;
+}
+
+async function offerLocalDraftConflict(target, draft, key) {
+  if (!editorIsShowing(target.workId, target.chapterNumber) || state.restoredLocalDraftKey === key) return;
+  const keep = await confirmAction(
+    `第 ${target.chapterNumber} 章的本地临时稿与数据库版本不同。恢复本地稿后，保存时仍会再次校验版本。是否恢复？`,
+    "本地稿版本冲突",
+    "恢复本地稿"
+  );
+  if (!keep || !editorIsShowing(target.workId, target.chapterNumber)) return;
+  setChapterTextValue(draft.text);
+  if ($("chapterTitleInput") && draft.title) $("chapterTitleInput").value = draft.title;
+  state.editorDirty = true;
+  state.restoredLocalDraftKey = key;
+  updateChapterWordStatus();
+  notify("已恢复本地临时稿。保存时若数据库仍有新版本，系统会阻止覆盖。", "warning");
+}
+
+function ensureEditorReadyForOperation(message = "当前章节有未保存修改，请先保存正文后再执行该操作。") {
+  if (!state.editorDirty) return true;
+  saveLocalChapterDraft();
+  notify(message, "warning");
+  return false;
+}
+
+function handleChapterTextInput() {
+  updateChapterWordStatus();
+  markEditorDirty();
+}
+
+async function confirmLeaveDirtyChapter() {
+  if (!state.editorDirty) return true;
+  saveLocalChapterDraft();
+  const target = loadedEditorTarget();
+  const chapterLabel = target ? `第 ${target.chapterNumber} 章` : "当前章节";
+  return confirmAction(
+    `${chapterLabel} 有未保存修改，已自动暂存到本地。继续切换会暂时显示数据库里的旧稿，回到本章会自动恢复这份临时稿。是否继续切换？`,
+    "未保存修改",
+    "暂存并切换"
+  );
 }
 
 function outlineSelectionKey(selection = state.outlineSelection || { type: "full" }) {
@@ -461,9 +693,9 @@ function renderTaskRuns() {
     const duration = taskDurationText(run);
     const deletedNote = deletedChapterRunNote(run);
     const meta = [
-      run.kind ? `类型：${run.kind}` : "",
-      run.stage ? `阶段：${run.stage}` : "",
-      run.chapter_id ? `章节 ID：${run.chapter_id}` : "",
+      run.kind ? `类型：${taskKindText(run.kind)}` : "",
+      run.stage ? `阶段：${taskStageText(run.stage)}` : "",
+      run.chapter_id ? `章节编号：${run.chapter_id}` : "",
       deletedNote,
     ].filter(Boolean).join(" · ");
     item.innerHTML = `
@@ -504,8 +736,8 @@ function renderAgentRuns() {
     const usage = agentUsageText(run);
     item.innerHTML = `
       <div class="log-time">${escapeHtml(run.created_at || "")}</div>
-      <div class="log-message">${escapeHtml(run.agent_name || "未知 Agent")} · ${escapeHtml(run.status || "未知状态")}</div>
-      <div class="log-meta">${escapeHtml(chapter)} · 模型：${escapeHtml(run.model || "未记录")} · 提示词：${escapeHtml(run.prompt_name || "未记录")}</div>
+      <div class="log-message">${escapeHtml(agentNameText(run.agent_name))} · ${escapeHtml(statusText(run.status || ""))}</div>
+      <div class="log-meta">${escapeHtml(chapter)} · 模型：${escapeHtml(run.model || "未记录")} · 提示词：${escapeHtml(promptNameText(run.prompt_name))}</div>
       ${usage ? `<div class="log-meta">${escapeHtml(usage)}</div>` : ""}
       ${run.error ? `<div class="log-meta">错误：${escapeHtml(run.error)}</div>` : ""}
     `;
@@ -531,9 +763,9 @@ function agentUsageText(run) {
   const elapsed = Number(run.elapsed_seconds || 0);
   if (!inputChars && !outputChars && !totalTokens) return "";
   const parts = [
-    `输入：${formatNumber(inputChars)} 字符 / 约 ${formatNumber(inputTokens)} token`,
-    `输出：${formatNumber(outputChars)} 字符 / 约 ${formatNumber(outputTokens)} token`,
-    `合计：约 ${formatNumber(totalTokens)} token`,
+    `输入：${formatNumber(inputChars)} 字符 / 约 ${formatNumber(inputTokens)} 令牌`,
+    `输出：${formatNumber(outputChars)} 字符 / 约 ${formatNumber(outputTokens)} 令牌`,
+    `合计：约 ${formatNumber(totalTokens)} 令牌`,
   ];
   if (elapsed > 0) parts.push(`耗时：${formatDurationSeconds(elapsed)}`);
   return parts.join(" · ");
@@ -677,7 +909,7 @@ function finishTask(kind, status = "done") {
     state.task.status = status;
     state.task = null;
     updateTaskUI();
-    if (state.selectedWorkId) void refreshRecords({ silent: true });
+    if (state.selectedWorkId && state.tab === "records") void refreshRecords({ silent: true });
   }
 }
 
@@ -734,10 +966,12 @@ function statusText(status) {
     running: "生成中",
     cancelling: "停止中",
     cancelled: "已停止",
+    interrupted: "异常中断",
     failed: "失败",
     done: "完成",
+    ok: "完成",
   };
-  return labels[status] || "生成中";
+  return displayLabel(status, labels, "状态未知");
 }
 
 function setTab(tab) {
@@ -749,6 +983,7 @@ function setTab(tab) {
     panel.classList.toggle("active", panel.id === `tab-${tab}`);
   });
   if (tab === "outline") updateOutlineGenerateControls();
+  if (tab === "records" && state.selectedWorkId) void refreshRecords({ silent: true });
 }
 
 function bindEvents() {
@@ -777,7 +1012,8 @@ function bindEvents() {
   $("clearLogBtn").addEventListener("click", clearRunLogs);
   $("refreshRecordsBtn").addEventListener("click", refreshRecords);
   $("chapterSearchInput").addEventListener("input", renderChapterLists);
-  $("chapterTextInput").addEventListener("input", updateChapterWordStatus);
+  $("chapterTextInput").addEventListener("input", handleChapterTextInput);
+  $("chapterTitleInput").addEventListener("input", markEditorDirty);
   $("chapterTextInput").addEventListener("scroll", saveCurrentChapterScroll);
   $("loadChapterBtn").addEventListener("click", () => loadChapter(Number($("writingChapterNumberInput").value || 1), "writing"));
   $("generateChapterBtn").addEventListener("click", generateChapter);
@@ -789,6 +1025,7 @@ function bindEvents() {
   $("reviseWithInstructionBtn").addEventListener("click", reviseWithInstruction);
   $("pendingResultList").addEventListener("click", handlePendingResultClick);
   $("inspectorTabs").addEventListener("click", switchInspector);
+  $("copyRevisionAdviceBtn").addEventListener("click", copyRevisionAdvice);
   $("refreshLibraryBtn").addEventListener("click", refreshLibrary);
   $("librarySearchInput").addEventListener("input", renderLibraryList);
   $("addLibraryItemBtn").addEventListener("click", addLibraryItem);
@@ -809,6 +1046,12 @@ function bindEvents() {
   $("confirmModal").addEventListener("click", (event) => {
     if (event.target.id === "confirmModal") closeConfirmModal(false);
   });
+  window.addEventListener("beforeunload", (event) => {
+    if (!state.editorDirty) return;
+    saveLocalChapterDraft();
+    event.preventDefault();
+    event.returnValue = "";
+  });
 }
 
 async function init() {
@@ -826,7 +1069,7 @@ async function init() {
 async function loadHealth() {
   const health = await api("/api/health");
   $("connectionText").textContent = `本地服务运行中 · 模型 ${health.model || "未设置"}`;
-  $("modeBadge").textContent = health.mock_mode ? "mock 模式" : "真实 API";
+  $("modeBadge").textContent = health.mock_mode ? "模拟模式" : "真实接口";
 }
 
 async function loadConfig() {
@@ -869,7 +1112,7 @@ function renderWorks() {
     item.className = `work-item ${Number(work.id) === Number(state.selectedWorkId) ? "active" : ""}`;
     item.innerHTML = `
       <div class="item-title">${escapeHtml(work.title || "未命名文章")}</div>
-      <div class="item-meta">ID ${escapeHtml(work.id)} · ${escapeHtml(work.updated_at || work.created_at || "")}</div>
+      <div class="item-meta">编号 ${escapeHtml(work.id)} · ${escapeHtml(work.updated_at || work.created_at || "")}</div>
     `;
     item.addEventListener("click", () => selectWork(work.id));
     list.appendChild(item);
@@ -877,12 +1120,12 @@ function renderWorks() {
 }
 
 async function selectWork(workId, writeLog = true) {
+  if (!await confirmLeaveDirtyChapter()) return;
   const seq = ++state.workLoadSeq;
   const data = await api(`/api/works/${workId}`);
   if (seq !== state.workLoadSeq) return;
   applyWorkState(data);
   if (writeLog) log(`已切换到《${state.work.title || "未命名文章"}》。`);
-  void refreshRecords({ silent: true });
 }
 
 function applyWorkState(data) {
@@ -943,7 +1186,7 @@ function clearWorkState() {
   state.selectedWorkId = null;
   state.currentChapter = null;
   state.currentChapterWordTarget = null;
-  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
+  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "", revision: 0 };
   state.chapterLoadSeq += 1;
   state.contextLoadSeq += 1;
   state.contextLoadedFor = null;
@@ -1156,6 +1399,7 @@ function styleLineLabel(line) {
 }
 
 async function createWork() {
+  if (!await confirmLeaveDirtyChapter()) return;
   try {
     const data = await api("/api/works", { method: "POST", body: {} });
     applyWorkState(data);
@@ -1735,11 +1979,11 @@ function chapterByNumber(number) {
 }
 
 function chapterDetail(chapter) {
-  return {
+  return localizeVisibleProtocolValue({
     ...parseJson(chapter.outline_json, {}),
     ...chapter,
     scene_cards: parseJson(chapter.scene_cards_json, parseJson(chapter.outline_json, {}).scene_cards || chapter.scene_cards || []),
-  };
+  });
 }
 
 function ensureChapterVolumeNumbers() {
@@ -1885,6 +2129,7 @@ function outlineText(chapter) {
 
 async function loadChapter(chapterNumber, targetTab) {
   if (!requireWork()) return;
+  if (!await confirmLeaveDirtyChapter()) return;
   const workId = state.selectedWorkId;
   const seq = ++state.chapterLoadSeq;
   saveCurrentChapterScroll();
@@ -1955,13 +2200,16 @@ function setEditorOwner(chapter) {
     chapterId: chapter?.id ?? null,
     chapterNumber: Number(chapter?.chapter_number || 0) || null,
     updatedAt: chapter?.updated_at || "",
+    revision: Number(chapter?.revision || 0),
   };
 }
 
 function clearEditor() {
   state.currentChapter = null;
   state.currentChapterWordTarget = null;
-  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "" };
+  state.editor = { workId: null, chapterId: null, chapterNumber: null, updatedAt: "", revision: 0 };
+  markEditorClean();
+  state.restoredLocalDraftKey = "";
   state.contextLoadSeq += 1;
   state.contextLoadedFor = null;
   if (state.contextLoadController) state.contextLoadController.abort();
@@ -1969,12 +2217,12 @@ function clearEditor() {
   if ($("writingChapterNumberInput")) $("writingChapterNumberInput").value = state.selectedChapter || 1;
   if ($("chapterTitleInput")) $("chapterTitleInput").value = "";
   if ($("chapterTextInput")) {
-    $("chapterTextInput").value = "";
+    setChapterTextValue("");
     $("chapterTextInput").scrollTop = 0;
   }
   if ($("chapterOutlinePreview")) $("chapterOutlinePreview").textContent = "未载入章节。";
   if ($("contextPreview")) $("contextPreview").textContent = "未载入章节。";
-  if ($("reviewPreview")) $("reviewPreview").textContent = "暂无审稿结果。";
+  setRevisionAdvice();
   if ($("memoryPreview")) $("memoryPreview").textContent = "暂无记忆卡。";
   if ($("draftPreview")) $("draftPreview").textContent = "暂无初稿。";
   updateChapterWordStatus();
@@ -2093,7 +2341,7 @@ function fillChapter(data) {
   $("writingChapterNumberInput").value = chapter.chapter_number || state.selectedChapter || 1;
   $("chapterTitleInput").value = chapter.title || "";
   const isProblemDraft = chapter.status === "problem_draft";
-  $("chapterTextInput").value = (isProblemDraft || chapter.status === "draft") && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "";
+  setChapterTextValue((isProblemDraft || chapter.status === "draft") && chapter.draft ? chapter.draft : chapter.final_text || chapter.draft || "");
   $("chapterOutlinePreview").textContent = formatChapterTask(chapter) || data.outline_readable || "暂无任务单。";
   $("contextPreview").textContent = data.context_error
     ? `上下文构建失败：${data.context_error}`
@@ -2101,12 +2349,15 @@ function fillChapter(data) {
       ? "上下文将在打开本面板时构建。"
       : formatPreviewObject(data.context, data.context_readable, "暂无上下文。");
   $("memoryPreview").textContent = formatPreviewObject(data.memory || parseJson(chapter.memory_json, null), data.memory_readable, "暂无记忆卡。");
-  $("reviewPreview").textContent = "暂无审稿结果。";
+  setRevisionAdviceFromReview(data.review, { chapterNumber: chapter.chapter_number }) || setRevisionAdvice();
   $("draftPreview").textContent = chapter.draft || "暂无初稿。";
   $("exportStartInput").value = chapter.chapter_number || 1;
   $("exportEndInput").value = chapter.chapter_number || 1;
+  markEditorClean();
   updateChapterWordStatus();
   restoreChapterScroll(state.selectedWorkId, chapter.chapter_number, chapter.updated_at || "");
+  restoreLocalChapterDraftIfNeeded();
+  restoreStoredChapterCandidates(chapter, data.candidate_versions || []);
 }
 
 function updateChapterWordStatus() {
@@ -2129,6 +2380,236 @@ function updateChapterWordStatus() {
   }
   const note = target.note || "优先保证章节完整。";
   node.textContent = `${prefix}当前正文：${count} 字；目标：${label}；${note}`;
+}
+
+function setRevisionAdvice(text = "") {
+  const node = $("revisionAdviceText");
+  if (!node) return;
+  node.textContent = text || "暂无修订建议。";
+}
+
+function chapterRevisionInstructionBase(chapterNumber = editorChapterNumber()) {
+  const title = $("chapterTitleInput")?.value.trim() || state.currentChapter?.title || "";
+  return [
+    `请修订第 ${chapterNumber || ""} 章${title ? `《${title}》` : ""}。`,
+    "保留原有主线事实、人物关系、证据链和章节任务，不要改成摘要。",
+    "不要解释修改理由，不要输出修改说明，只输出修订后的完整正文。",
+  ];
+}
+
+function issueInstruction(issue) {
+  const text = cleanQualityIssue(issue);
+  if (!text) return "";
+  if (/前\s*300\s*字|承接债|上下章断裂|承接/.test(text)) {
+    return "重写开头前 500 字，必须承接上一章末尾的具体风险、物件、人物动作或未解决问题；第一屏要出现明确推进，不要另起一段泛背景。";
+  }
+  if (/章首|开头|第一屏|门廊|出入|普通动作|环境|时间|时辰/.test(text)) {
+    return "调整开头切入方式，不要用门廊出入、泛环境、普通动作、时间/时辰作为开场；改为证据异常、命令、威胁、关系逼问、选择代价或现场异常。";
+  }
+  if (/模板|机器味|AI|不是.*而是|破折号|表达/.test(text)) {
+    return "清理全文模板句和机器味表达，减少“不是……而是……”和破折号；改成具体动作、对话、物件变化和人物判断。";
+  }
+  if (/章尾|结尾|收束|落点|证据|文书|账册|纸条/.test(text)) {
+    return "重写最后 400 字，章尾不要再落在证据、文书、账册、纸条上；改成外部行动、人物选择、关系裂缝、敌方动作或下一章必须处理的现场变化。";
+  }
+  if (/重复|连续|同款|同一类/.test(text)) {
+    return "检查并改写重复的句式、动作和收束方式，同类信息不要连续用同一种表达或同一种落点。";
+  }
+  if (/字数|偏短|偏长|压缩|扩写/.test(text)) {
+    return "在不改变主线事实的前提下调整篇幅：偏短就补足动作、对话、证据推进和人物反应；偏长就删掉解释、重复判断和空泛过渡。";
+  }
+  return `处理这个质量问题：${text}。请给出具体正文修改，不要只解释问题。`;
+}
+
+const REVIEW_ISSUE_LABELS = {
+  continuity: "上下章承接不足",
+  character: "人物行为与当前状态不够一致",
+  narrative: "场景推进或章节回报不足",
+  ending: "章尾落点需要调整",
+  opening: "章首切入方式需要调整",
+  foreshadow: "伏笔或主角预判不足",
+  history: "历史细节需要核对",
+  length: "篇幅需要调整",
+  repeat: "与近期章节存在重复",
+  style: "语言表达需要调整",
+  structure: "段落组织需要调整",
+  template: "模板化表达需要调整",
+  dash_usage: "破折号使用过多",
+  dash_overuse: "破折号使用过多",
+};
+
+function reviewText(value, limit = 0) {
+  const text = String(value || "")
+    .replace(/\\([\\'\"])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\"'`\s]+|[\"'`\s]+$/g, "");
+  if (!limit || text.length <= limit) return text;
+  return `${text.slice(0, Math.max(1, limit - 1)).trim()}…`;
+}
+
+function legacyReviewField(text, field) {
+  const pattern = new RegExp(
+    `(?:^|[,{]\\s*)['\"]${field}['\"]\\s*:\\s*['\"]([\\s\\S]*?)(?=\\s*,\\s*['\"][a-z_]+['\"]\\s*:|\\s*}\\s*$)`
+  );
+  const match = String(text || "").trim().match(pattern);
+  return reviewText(match?.[1] || "");
+}
+
+function normalizeReviewItem(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return {
+      type: reviewText(value.type),
+      evidence: reviewText(value.evidence),
+      whyItMatters: reviewText(value.why_it_matters),
+      target: reviewText(value.target),
+      action: reviewText(value.action),
+      keep: reviewText(value.keep),
+      avoid: reviewText(value.avoid),
+    };
+  }
+  const text = reviewText(value);
+  if (!text) return null;
+  if (!text.startsWith("{")) return { evidence: text };
+  const item = {
+    type: legacyReviewField(text, "type"),
+    evidence: legacyReviewField(text, "evidence"),
+    whyItMatters: legacyReviewField(text, "why_it_matters"),
+    target: legacyReviewField(text, "target"),
+    action: legacyReviewField(text, "action"),
+    keep: legacyReviewField(text, "keep"),
+    avoid: legacyReviewField(text, "avoid"),
+  };
+  return Object.values(item).some(Boolean) ? item : { evidence: text };
+}
+
+function normalizedReviewItems(value) {
+  return (Array.isArray(value) ? value : [])
+    .map(normalizeReviewItem)
+    .filter(Boolean);
+}
+
+function reviewIssueSummary(item) {
+  const source = [item?.type, item?.target, item?.evidence, item?.action].filter(Boolean).join(" ");
+  const dashCount = source.match(/(?:约|（)?(\d+)\s*处/);
+  if (/破折号|dash_usage|dash_overuse/i.test(source)) {
+    return dashCount ? `破折号使用过多（约 ${dashCount[1]} 处）` : "破折号使用过多";
+  }
+  if (/不是[\s\S]{0,20}而是|对照判断/.test(source)) return "对照判断句式使用不当";
+  if (/推门|开头|开篇|章首|第一屏/.test(source)) return "开头切入方式需要调整";
+  if (/章尾|结尾|收束|离去|推开.*门/.test(source)) return "章尾收束方式与近章重复";
+  if (/伏笔|预判|引信|警觉/.test(source)) return "关键风险前缺少人物预判";
+  if (/重复|同质|同一类/.test(source)) return "与近期章节存在重复";
+  return REVIEW_ISSUE_LABELS[String(item?.type || "").toLowerCase()]
+    || reviewText(item?.target || item?.evidence, 72)
+    || "本章相关段落需要调整";
+}
+
+function completeAdviceSentence(text) {
+  const value = reviewText(text);
+  if (!value) return "处理相关段落，使表达和剧情推进更自然。";
+  return /[。！？]$/.test(value) ? value : `${value}。`;
+}
+
+function reviewRevisionPlan(review) {
+  if (!review || typeof review !== "object") return [];
+  const explicitPlan = normalizedReviewItems(review.revision_plan).filter((item) => item.action);
+  if (explicitPlan.length) return explicitPlan;
+  const problems = normalizedReviewItems(review.problems);
+  const suggestions = normalizedReviewItems(review.suggestions);
+  const pairedSuggestions = suggestions
+    .filter((item) => item.action)
+    .map((item, index) => ({
+      ...item,
+      type: item.type || problems[index]?.type || "",
+      evidence: item.evidence || problems[index]?.evidence || "",
+    }));
+  if (pairedSuggestions.length) return pairedSuggestions;
+  return problems.map((item) => ({
+    ...item,
+    action: issueInstruction(reviewIssueSummary(item)),
+  }));
+}
+
+function buildRevisionAdviceFromReview(review, options = {}) {
+  const plan = reviewRevisionPlan(review).slice(0, 5);
+  if (!plan.length) return "";
+  const lines = chapterRevisionInstructionBase(options.chapterNumber || editorChapterNumber());
+  lines.push("", "请按以下要求修订：");
+  const shown = new Set();
+  for (const item of plan) {
+    const issue = reviewIssueSummary(item);
+    const action = completeAdviceSentence(item.action || issueInstruction(issue));
+    const key = `${issue}|${action}`;
+    if (shown.has(key)) continue;
+    shown.add(key);
+    lines.push(`${shown.size}. 问题：${completeAdviceSentence(issue)}`);
+    lines.push(`   修改：${action}`);
+  }
+  lines.push("", "只改上述相关句段，保留既有事实、人物关系和章节任务。不要输出说明，只输出修订后的完整正文。");
+  return lines.join("\n");
+}
+
+function setRevisionAdviceFromReview(review, options = {}) {
+  const advice = buildRevisionAdviceFromReview(review, options);
+  if (advice) {
+    setRevisionAdvice(advice);
+    return advice;
+  }
+  const legacyIssues = normalizedReviewItems([
+    ...(Array.isArray(review?.problems) ? review.problems : []),
+    ...(Array.isArray(review?.suggestions) ? review.suggestions : []),
+  ]).map(reviewIssueSummary);
+  return updateRevisionAdviceFromIssues(legacyIssues, options);
+}
+
+function buildRevisionAdvice(issues, options = {}) {
+  const cleaned = [...new Set((issues || []).map(cleanQualityIssue).filter(Boolean))];
+  if (!cleaned.length) return "";
+  const chapterNumber = options.chapterNumber || editorChapterNumber();
+  const lines = chapterRevisionInstructionBase(chapterNumber);
+  const shownIssues = cleaned.slice(0, 6);
+  lines.push("");
+  lines.push("发现的问题：");
+  shownIssues.forEach((issue, index) => {
+    lines.push(`${index + 1}. ${issue}`);
+  });
+  if (cleaned.length > shownIssues.length) {
+    lines.push(`${shownIssues.length + 1}. 还有 ${cleaned.length - shownIssues.length} 条同类问题，请一并处理。`);
+  }
+  lines.push("");
+  lines.push("请这样修改：");
+  const mapped = [...new Set(cleaned.map(issueInstruction).filter(Boolean))];
+  mapped.forEach((line, index) => {
+    lines.push(`${index + 1}. ${line}`);
+  });
+  lines.push("");
+  lines.push("硬性要求：");
+  lines.push("1. 保留本章已有关键事实和因果顺序，不新增无铺垫的大事件。");
+  lines.push("2. 修订后开头要能接住上一章，结尾要给下一章留下明确动作或风险。");
+  lines.push("3. 不要用解释性总结替代剧情推进。");
+  return lines.join("\n");
+}
+
+function updateRevisionAdviceFromIssues(issues, options = {}) {
+  const advice = buildRevisionAdvice(issues, options);
+  setRevisionAdvice(advice || "暂无修订建议。");
+  return advice;
+}
+
+async function copyRevisionAdvice() {
+  const text = $("revisionAdviceText")?.textContent?.trim() || "";
+  if (!text || text === "暂无修订建议。") {
+    notify("暂无可复制的修订话术。", "warning");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    notify("修订话术已复制。", "success");
+  } catch {
+    $("revisionInstructionInput").value = text;
+    notify("浏览器禁止直接复制，已填入修订意见框。", "warning");
+  }
 }
 
 function countTextWords(text) {
@@ -2184,27 +2665,46 @@ function loadedEditorTarget() {
     chapterNumber,
     chapterId,
     updatedAt: state.editor.updatedAt || "",
+    revision: Number(state.editor.revision || 0),
   };
 }
 
 function addPendingChapterResult(result) {
   if (!result?.text) return;
   const item = {
-    id: `pending-${Date.now()}-${++state.pendingResultSerial}`,
+    id: result.id || `pending-${Date.now()}-${++state.pendingResultSerial}`,
     workId: result.workId,
     chapterNumber: Number(result.chapterNumber),
     title: result.title || "",
     kind: result.kind || "revise",
+    versionId: Number(result.versionId || 0) || null,
     text: result.text,
-    createdAt: new Date(),
+    createdAt: result.createdAt ? new Date(result.createdAt) : new Date(),
   };
   state.pendingChapterResults = state.pendingChapterResults.filter(
+    (existing) => existing.id !== item.id
+  ).filter(
     (existing) => !(Number(existing.workId) === Number(item.workId)
       && Number(existing.chapterNumber) === Number(item.chapterNumber)
       && existing.kind === item.kind)
   );
   state.pendingChapterResults.unshift(item);
   renderPendingChapterResults();
+}
+
+function restoreStoredChapterCandidates(chapter, versions) {
+  for (const version of [...versions].reverse()) {
+    addPendingChapterResult({
+      id: `version-${version.id}`,
+      workId: state.selectedWorkId,
+      chapterNumber: chapter.chapter_number,
+      title: chapter.title || "",
+      kind: "revise",
+      text: version.content || "",
+      createdAt: version.created_at,
+      versionId: version.id,
+    });
+  }
 }
 
 function renderPendingChapterResults() {
@@ -2246,7 +2746,24 @@ async function handlePendingResultClick(event) {
   if (!item) return;
   const action = button.dataset.pendingAction;
   if (action === "discard") {
+    const restoreServerText = editorIsShowing(item.workId, item.chapterNumber)
+      && state.editorDirty
+      && ($("chapterTextInput")?.value || "") === item.text;
+    if (item.versionId) {
+      try {
+        await api(`/api/works/${item.workId}/chapters/${item.chapterNumber}/versions/${item.versionId}`, { method: "DELETE" });
+      } catch (error) {
+        showError(error);
+        return;
+      }
+    }
     removePendingResult(item.id);
+    if (restoreServerText) {
+      setChapterTextValue(chapterServerText());
+      markEditorDirty();
+      if (!state.editorDirty) clearLocalChapterDraft(item.workId, item.chapterNumber);
+      updateChapterWordStatus();
+    }
     notify(`已丢弃第 ${item.chapterNumber} 章暂存结果。`, "info");
     return;
   }
@@ -2267,12 +2784,14 @@ async function handlePendingResultClick(event) {
     return;
   }
   if (action === "apply") {
-    $("chapterTextInput").value = item.text;
+    setChapterTextValue(item.text);
     $("revisionInstructionInput").value = "";
     updateChapterWordStatus();
+    state.editorDirty = true;
+    saveLocalChapterDraft();
     resetChapterScroll(item.workId, item.chapterNumber, state.editor.updatedAt || "");
     removePendingResult(item.id);
-    notify(`已把修订结果载入第 ${item.chapterNumber} 章编辑区，确认后请保存最终稿。`, "success");
+    notify(`已把修订结果载入第 ${item.chapterNumber} 章编辑区，并已本地暂存；确认后请保存最终稿。`, "success");
   }
 }
 
@@ -2289,6 +2808,7 @@ async function generateChapter() {
   if (!requireWork()) return;
   const workId = state.selectedWorkId;
   const chapterNumber = Number($("writingChapterNumberInput").value || state.selectedChapter || 1);
+  if (!ensureEditorReadyForOperation("当前章节有未保存修改，请先保存正文，再重新生成，避免覆盖编辑内容。")) return;
   if (state.task) {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
@@ -2318,17 +2838,20 @@ async function generateChapter() {
       state.currentChapterWordTarget = data.context?.chapter_word_target || state.currentChapterWordTarget;
     }
     if (data.final_text || data.draft) {
-      $("chapterTextInput").value = data.final_text || data.draft;
+      setChapterTextValue(data.final_text || data.draft);
+      markEditorClean();
       resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
     }
     updateChapterWordStatus();
-    $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
+    setRevisionAdviceFromReview(data.review, { chapterNumber })
+      || updateRevisionAdviceFromIssues(problemDraftIssues(data.quality_gate), { chapterNumber });
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, "暂无记忆卡。");
     $("draftPreview").textContent = data.draft || "暂无初稿。";
     if (data.work_state) applyWorkState(data.work_state);
     if (isProblemDraft) {
       if (data.draft) {
-        $("chapterTextInput").value = data.draft;
+        setChapterTextValue(data.draft);
+        markEditorClean();
         resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
       }
       showProblemDraftNotice(data, chapterNumber);
@@ -2340,7 +2863,8 @@ async function generateChapter() {
       notify(`第 ${chapterNumber} 章生成完成，已保存到章节库。`, "success");
       return;
     }
-    $("reviewPreview").textContent = formatPreviewObject(data.review, data.review_readable, "暂无审稿结果。");
+    setRevisionAdviceFromReview(data.review, { chapterNumber })
+      || updateRevisionAdviceFromIssues(problemDraftIssues(data.quality_gate), { chapterNumber });
     $("memoryPreview").textContent = formatPreviewObject(data.memory, data.memory_readable, $("memoryPreview").textContent || "暂无记忆卡。");
     resetChapterScroll(workId, chapterNumber, state.editor.updatedAt || data.chapter?.updated_at || "");
     log(`第 ${chapterNumber} 章生成完成。`);
@@ -2376,6 +2900,7 @@ function formatQualityIssues(issues) {
 
 function showProblemDraftNotice(data, chapterNumber) {
   const issues = problemDraftIssues(data.quality_gate).map(cleanQualityIssue).filter(Boolean);
+  updateRevisionAdviceFromIssues(issues, { chapterNumber });
   const shownIssues = issues.slice(0, 3);
   const message = shownIssues.length
     ? formatQualityIssues(shownIssues)
@@ -2390,6 +2915,7 @@ function showProblemDraftNotice(data, chapterNumber) {
 function showManualQualityNotice(qualityGate) {
   const issues = manualQualityIssues(qualityGate).map(cleanQualityIssue).filter(Boolean);
   if (!issues.length) return false;
+  updateRevisionAdviceFromIssues(issues);
   const shownIssues = issues.slice(0, 3);
   const message = formatQualityIssues(shownIssues);
   const fullMessage = formatQualityIssues(issues);
@@ -2411,26 +2937,20 @@ async function saveChapterText() {
     notify("当前编辑区没有绑定到已载入章节，请先载入要保存的章节。", "warning");
     return;
   }
-  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const { workId, chapterNumber, chapterId, updatedAt, revision } = target;
   const textInput = $("chapterTextInput");
   const currentText = textInput.value;
   const currentScrollTop = textInput.scrollTop || 0;
   const previousText = state.currentChapter?.final_text || "";
   const hasMemory = Boolean(String(state.currentChapter?.memory_json || "").trim());
-  let invalidateMemory = false;
-  if (hasMemory && currentText !== previousText) {
-    invalidateMemory = await confirmAction(
-      "当前章节已经生成过记忆。正文发生变化后，旧记忆可能不准确。是否清空旧记忆，之后重新生成？",
-      "正文已修改",
-      "清空旧记忆"
-    );
-  }
+  const invalidateMemory = hasMemory && currentText !== previousText;
   try {
     const data = await api(`/api/works/${workId}/chapters/${chapterNumber}`, {
       method: "PUT",
       body: {
         chapter_id: chapterId,
         updated_at: updatedAt,
+        revision,
         title: $("chapterTitleInput").value.trim(),
         final_text: currentText,
         invalidate_memory: invalidateMemory,
@@ -2443,8 +2963,11 @@ async function saveChapterText() {
       rememberChapterScroll(workId, chapterNumber, savedUpdatedAt, currentScrollTop);
       restoreChapterScroll(workId, chapterNumber, savedUpdatedAt);
     }
+    clearLocalChapterDraft(workId, chapterNumber);
+    markEditorClean();
     if (!showManualQualityNotice(data.quality_gate)) {
-      notify(`第 ${chapterNumber} 章最终稿已保存。`, "success");
+      const memoryNotice = data.memory_invalidated ? "旧记忆已自动失效，请重新生成记忆。" : "";
+      notify(`第 ${chapterNumber} 章最终稿已保存。${memoryNotice}`, data.memory_invalidated ? "warning" : "success");
     }
     log(`第 ${chapterNumber} 章最终稿已保存。`);
   } catch (error) {
@@ -2459,7 +2982,7 @@ async function reviseWithInstruction() {
     notify("请先载入要修订的章节。", "warning");
     return;
   }
-  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const { workId, chapterNumber, chapterId, updatedAt, revision } = target;
   const instruction = $("revisionInstructionInput").value.trim();
   const sourceText = $("chapterTextInput").value;
   if (!instruction) {
@@ -2475,7 +2998,7 @@ async function reviseWithInstruction() {
     log("修订 AI 正在按意见修改正文...");
     const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/revise`, {
       method: "POST",
-      body: { instruction, current_text: sourceText, chapter_id: chapterId, updated_at: updatedAt, task_id: task.id },
+      body: { instruction, current_text: sourceText, chapter_id: chapterId, updated_at: updatedAt, revision, task_id: task.id },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
@@ -2489,16 +3012,27 @@ async function reviseWithInstruction() {
         title: state.currentChapter?.title || "",
         kind: "revise",
         text: data.revised_text || "",
+        versionId: data.candidate_version_id,
       });
+      if (editorIsShowing(workId, chapterNumber) && data.revised_text) {
+        setChapterTextValue(data.revised_text);
+        state.editorDirty = true;
+        saveLocalChapterDraft();
+        resetChapterScroll(workId, chapterNumber, state.editor.updatedAt || "");
+        updateChapterWordStatus();
+      }
       const reasons = (data.style_regression_warnings || []).join("；");
+      updateRevisionAdviceFromIssues(data.style_regression_warnings || [], { chapterNumber });
       log(`第 ${chapterNumber} 章修订稿风格退化，未覆盖最终稿。${reasons}`, "warning", { chapter: chapterNumber, task: task.title });
-      notify(`修订稿未覆盖最终稿，已放入候选稿。${reasons ? "请查看运行记录。" : ""}`, "warning");
+      notify(`修订稿未覆盖最终稿，已载入编辑区并本地暂存；确认后请保存最终稿。${reasons ? "请查看运行记录。" : ""}`, "warning");
       return;
     }
     const memoryNotice = data.memory_invalidated ? "旧记忆已清空，请重新生成记忆。" : "";
     if (editorIsShowing(workId, chapterNumber)) {
       fillChapter(data);
       resetChapterScroll(workId, chapterNumber, data.chapter?.updated_at || state.editor.updatedAt || "");
+      clearLocalChapterDraft(workId, chapterNumber);
+      markEditorClean();
       $("revisionInstructionInput").value = "";
       log(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success", { chapter: chapterNumber, task: task.title });
       notify(`第 ${chapterNumber} 章已修订并保存。${memoryNotice}`, "success");
@@ -2521,7 +3055,8 @@ async function generateMemory() {
     notify("请先载入要生成记忆的章节。", "warning");
     return;
   }
-  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const { workId, chapterNumber, chapterId, updatedAt, revision } = target;
+  if (!ensureEditorReadyForOperation()) return;
   if (state.task) {
     notify("请先等待当前任务结束，或点击停止生成。", "warning");
     return;
@@ -2530,7 +3065,7 @@ async function generateMemory() {
   try {
     const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/memory`, {
       method: "POST",
-      body: { task_id: task.id },
+      body: { task_id: task.id, chapter_id: chapterId, updated_at: updatedAt, revision: target.revision },
       signal: task.controller.signal,
     });
     if (taskWasStopped(task)) return;
@@ -2575,7 +3110,7 @@ async function clearCurrentChapterText() {
     notify("请先载入要清空的章节。", "warning");
     return;
   }
-  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const { workId, chapterNumber, chapterId, updatedAt, revision } = target;
   const ok = await confirmAction(
     `确定清空第 ${chapterNumber} 章正文吗？细纲和章节行会保留，审稿、版本和记忆入库副作用会清理。`,
     "清空正文",
@@ -2585,9 +3120,10 @@ async function clearCurrentChapterText() {
   try {
     const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/clear-text`, {
       method: "POST",
-      body: { chapter_id: chapterId, updated_at: updatedAt },
+      body: { chapter_id: chapterId, updated_at: updatedAt, revision },
     });
     if (Number(state.selectedWorkId) !== Number(workId)) return;
+    clearLocalChapterDraft(workId, chapterNumber);
     applyWorkState(data);
     if (editorIsShowing(workId, chapterNumber)) {
       await loadChapter(chapterNumber, "writing");
@@ -2606,9 +3142,13 @@ async function deleteChapterByNumber(chapterNumber) {
   const ok = await confirmAction(`确定删除第 ${targetChapterNumber} 章吗？相关正文、记忆和资料副作用也会清理。`, "删除章节", "删除");
   if (!ok) return;
   try {
-    const body = target ? { chapter_id: target.chapterId, updated_at: target.updatedAt } : undefined;
+    const body = target ? { chapter_id: target.chapterId, updated_at: target.updatedAt, revision: target.revision } : undefined;
     const data = await api(`/api/works/${workId}/chapters/${targetChapterNumber}`, { method: "DELETE", body });
     if (Number(state.selectedWorkId) !== Number(workId)) return;
+    clearLocalChapterDraft(workId, targetChapterNumber);
+    state.pendingChapterResults = state.pendingChapterResults.filter(
+      (item) => Number(item.workId) !== Number(workId) || Number(item.chapterNumber) !== Number(targetChapterNumber)
+    );
     state.outlineSelection = { type: "full" };
     applyWorkState(data);
     if (Number(state.editor.workId) === Number(workId) && Number(state.editor.chapterNumber) === Number(targetChapterNumber)) clearEditor();
@@ -2625,7 +3165,7 @@ async function deleteChaptersFromCurrent() {
     notify("请先载入要删除的起始章节。", "warning");
     return;
   }
-  const { workId, chapterNumber, chapterId, updatedAt } = target;
+  const { workId, chapterNumber, chapterId, updatedAt, revision } = target;
   const affected = (state.outline.chapters || [])
     .map((chapter) => Number(chapter.chapter_number || 0))
     .filter((number) => number >= chapterNumber)
@@ -2643,9 +3183,13 @@ async function deleteChaptersFromCurrent() {
   try {
     const data = await api(`/api/works/${workId}/chapters/${chapterNumber}/delete-from`, {
       method: "DELETE",
-      body: { chapter_id: chapterId, updated_at: updatedAt },
+      body: { chapter_id: chapterId, updated_at: updatedAt, revision },
     });
     if (Number(state.selectedWorkId) !== Number(workId)) return;
+    for (const number of affected) clearLocalChapterDraft(workId, number);
+    state.pendingChapterResults = state.pendingChapterResults.filter(
+      (item) => Number(item.workId) !== Number(workId) || Number(item.chapterNumber) < Number(chapterNumber)
+    );
     state.outlineSelection = { type: "full" };
     applyWorkState(data);
     if (Number(state.editor.workId) === Number(workId) && Number(state.editor.chapterNumber) >= Number(chapterNumber)) clearEditor();
@@ -3026,7 +3570,7 @@ async function testApi() {
     await loadHealth();
     const data = await api("/api/config/test", { method: "POST" });
     $("configResult").textContent = data.message || "连接成功。";
-    log("API 测试完成。");
+    log("接口连接测试完成。");
   } catch (error) {
     $("configResult").textContent = error.message || "测试失败。";
     showError(error);
@@ -3037,7 +3581,7 @@ function formatRecord(record) {
   if (!record) return "";
   return Object.entries(record)
     .filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "")
-    .map(([key, value]) => `${labelFor(key)}：${valueText(value)}`)
+    .map(([key, value]) => `${labelFor(key)}：${recordValueText(key, value)}`)
     .join("\n");
 }
 
@@ -3050,7 +3594,7 @@ function formatAny(value) {
     }).join("\n");
   }
   if (value && typeof value === "object") return formatRecord(value);
-  return String(value || "");
+  return localizeVisibleProtocolText(value);
 }
 
 function valueText(value) {
@@ -3058,7 +3602,23 @@ function valueText(value) {
   if (Array.isArray(value)) return value.map((item) => valueText(item)).filter(Boolean).join("\n");
   if (value && typeof value === "object") return formatRecord(value);
   const text = String(value || "");
-  return VALUE_LABELS[text.toLowerCase()] || text;
+  return localizeVisibleProtocolText(VALUE_LABELS[text.toLowerCase()] || text);
+}
+
+function recordValueText(key, value) {
+  const normalizedKey = String(key || "").toLowerCase();
+  if (normalizedKey === "agent_name") return agentNameText(value);
+  if (normalizedKey === "kind") return taskKindText(value);
+  if (normalizedKey === "stage") return taskStageText(value);
+  if (normalizedKey === "status") return statusText(value);
+  if (normalizedKey === "prompt_name") return promptNameText(value);
+  if (normalizedKey === "wire_api") {
+    return displayLabel(value, {
+      chat_completions: "对话补全（chat_completions）",
+      responses: "统一响应（responses）",
+    });
+  }
+  return valueText(value);
 }
 
 function parsePossibleJson(value) {
@@ -3086,6 +3646,10 @@ function labelFor(key) {
     affected_characters: "影响人物",
     after: "变化后",
     agent_name: "智能体",
+    kind: "任务类型",
+    stage: "执行阶段",
+    prompt_name: "提示词",
+    wire_api: "请求协议",
     arc_notes: "成长备注",
     arc_stage: "成长阶段",
     before: "变化前",

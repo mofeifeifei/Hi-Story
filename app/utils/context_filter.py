@@ -22,6 +22,10 @@ def context_for_reviewer(context: dict[str, Any]) -> dict[str, Any]:
     return _agent_context(context, task="reviewer")
 
 
+def context_for_writer(context: dict[str, Any]) -> dict[str, Any]:
+    return _agent_context(context, task="writer")
+
+
 def context_for_reviser(context: dict[str, Any]) -> dict[str, Any]:
     return _agent_context(context, task="reviser")
 
@@ -150,34 +154,6 @@ def _world_rule_matches_text(rule: dict[str, Any], text: str) -> bool:
 def _minimal_memory_pack(bundle: dict[str, Any], outline_detail: dict[str, Any]) -> dict[str, Any]:
     return {
         "selection_rule": "只保留如果不知道这个，本章就会写错的信息。",
-        "chapter_focus": {
-            "chapter_goal": str(outline_detail.get("chapter_goal") or ""),
-            "reader_expectation": str(outline_detail.get("reader_expectation") or ""),
-            "target_emotion": str(
-                outline_detail.get("emotional_turn")
-                or outline_detail.get("emotional_rhythm")
-                or ""
-            ),
-            "chapter_payoff": str(outline_detail.get("chapter_payoff") or ""),
-            "opening_hook": str(outline_detail.get("opening_hook") or ""),
-            "continuity_debt": str(outline_detail.get("continuity_debt") or ""),
-            "debt_type": str(outline_detail.get("debt_type") or ""),
-            "opening_mode": str(outline_detail.get("opening_mode") or ""),
-            "opening_subject": str(outline_detail.get("opening_subject") or ""),
-            "opening_trigger": str(outline_detail.get("opening_trigger") or ""),
-            "time_or_environment_function": str(outline_detail.get("time_or_environment_function") or ""),
-            "previous_anchor": str(outline_detail.get("previous_anchor") or ""),
-            "first_screen_conflict": str(outline_detail.get("first_screen_conflict") or ""),
-            "forbidden_opening": str(outline_detail.get("forbidden_opening") or ""),
-            "reader_question_in": str(outline_detail.get("reader_question_in") or ""),
-            "reader_answer_out": str(outline_detail.get("reader_answer_out") or ""),
-            "new_question_out": str(outline_detail.get("new_question_out") or ""),
-            "ending_external_anchor": str(outline_detail.get("ending_external_anchor") or ""),
-            "next_opening_action": str(outline_detail.get("next_opening_action") or ""),
-            "next_continuity_debt": str(outline_detail.get("next_continuity_debt") or ""),
-            "ending_hook": str(outline_detail.get("ending_hook") or ""),
-            "handoff": str(outline_detail.get("handoff") or ""),
-        },
         "character_states": [_character_memory_item(item) for item in bundle.get("characters", [])],
         "related_foreshadows": [_thread_memory_item(item) for item in bundle.get("open_plot_threads", [])],
         "world_constraints": [_rule_memory_item(item) for item in bundle.get("world_rules", [])],
@@ -238,6 +214,10 @@ def _latest_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
 
 def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
     chapter = context.get("chapter") if isinstance(context.get("chapter"), dict) else {}
+    memory_pack = context.get("minimal_memory_pack")
+    if not isinstance(memory_pack, dict):
+        memory_pack = {}
+    task_sheet = _compact_task_sheet(chapter.get("outline_detail"))
     result: dict[str, Any] = {
         "work": _pick(context.get("work"), _work_keys(task)),
         "chapter": _pick(
@@ -246,23 +226,22 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "id",
                 "chapter_number",
                 "title",
-                "outline",
-                "outline_detail",
-                "outline_task_sheet",
-                "ending_hook",
             ],
         ),
-        "book_bible": context.get("book_bible", {}),
+        "chapter_task_sheet": task_sheet,
+        "book_bible": _compact_book_bible(context.get("book_bible")),
         "genre_contract": compact_genre_contract(
             context.get("genre_contract") or context.get("book_contract", {})
         ),
         "chapter_word_target": context.get("chapter_word_target", {}),
-        "chapter_execution_card": context.get("chapter_execution_card", {}),
-        "minimal_memory_pack": context.get("minimal_memory_pack", {}),
+        "chapter_execution_card": _compact_execution_card(context.get("chapter_execution_card")),
+        "minimal_memory_pack": memory_pack,
         "previous_chapter": _previous_chapter(context.get("previous_chapter")),
-        "chapter_transition_contract": context.get("chapter_transition_contract", {}),
+        "chapter_transition_contract": _compact_transition_contract(context.get("chapter_transition_contract")),
         "chapter_notes": context.get("chapter_notes", []),
-        "history_specialist": _history_specialist_for_task(context.get("history_specialist"), task),
+        "history_specialist": _history_marker(context.get("history_specialist")),
+        "recent_style_signatures": _recent_style_signatures(context),
+        "recent_title_ledger": context.get("recent_title_ledger", []),
     }
     if task == "reviewer":
         result.update(
@@ -271,13 +250,10 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 8),
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 10),
                 "recent_three_chapter_summaries": context.get("recent_three_chapter_summaries", []),
-                "recent_chapter_openings": context.get("recent_chapter_openings", []),
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "recent_chapter_endings": context.get("recent_chapter_endings", []),
                 "ending_variation_policy": context.get("ending_variation_policy", {}),
                 "repeat_risk_warnings": context.get("repeat_risk_warnings", []),
-                "forbidden_template_phrases": context.get("forbidden_template_phrases", []),
-                "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
+                "local_quality_report": context.get("local_quality_report", {}),
             }
         )
     elif task == "reviser":
@@ -286,11 +262,8 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "characters": _compact_items(context.get("characters"), _character_keys(), 6),
                 "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 6),
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
-                "recent_chapter_openings": context.get("recent_chapter_openings", [])[-3:],
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "recent_chapter_endings": context.get("recent_chapter_endings", [])[-3:],
                 "ending_variation_policy": context.get("ending_variation_policy", {}),
-                "forbidden_template_guidance": context.get("forbidden_template_guidance", ""),
             }
         )
     else:
@@ -298,9 +271,7 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
             {
                 "characters": _compact_items(context.get("characters"), _character_memory_keys(), 6),
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
-                "recent_chapter_openings": context.get("recent_chapter_openings", [])[-5:],
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "recent_chapter_endings": context.get("recent_chapter_endings", [])[-3:],
                 "ending_variation_policy": context.get("ending_variation_policy", {}),
             }
         )
@@ -322,6 +293,136 @@ def _work_keys(task: str) -> list[str]:
     if task == "memory":
         return ["title", "genre", "summary"]
     return keys
+
+
+def _compact_book_bible(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        [
+            "core_reading_promise",
+            "primary_genre",
+            "secondary_genres",
+            "emotional_tone",
+            "narrative_driver",
+            "protagonist_end_goal",
+            "long_form_engine",
+            "must_keep_rules",
+            "forbidden_drift",
+        ],
+    )
+
+
+def _compact_task_sheet(value: Any) -> dict[str, Any]:
+    detail = value if isinstance(value, dict) else {}
+    task = _pick(
+        detail,
+        [
+            "outline",
+            "story_time",
+            "chapter_goal",
+            "conflict",
+            "main_scene",
+            "reader_expectation",
+            "chapter_payoff",
+            "continuity_debt",
+            "previous_anchor",
+            "opening_hook",
+            "opening_mode",
+            "opening_subject",
+            "opening_trigger",
+            "first_screen_conflict",
+            "forbidden_opening",
+            "reader_question_in",
+            "reader_answer_out",
+            "new_question_out",
+            "emotional_turn",
+            "emotional_rhythm",
+            "ending_external_anchor",
+            "next_opening_action",
+            "next_continuity_debt",
+            "ending_hook",
+            "handoff",
+            "forbidden",
+        ],
+    )
+    task["scene_cards"] = _compact_scene_cards(detail.get("scene_cards"))
+    return _drop_empty(task)
+
+
+def _compact_scene_cards(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    keys = ["scene_goal", "obstacle", "information_gain", "emotional_shift", "scene_exit"]
+    return [_pick(item, keys) for item in value if isinstance(item, dict) and _pick(item, keys)][:6]
+
+
+def _compact_execution_card(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        [
+            "priority",
+            "last_visible_beat",
+            "first_screen_task",
+            "must_include_anchors",
+            "forbidden_opening",
+            "chapter_goal",
+            "chapter_payoff",
+            "dash_budget",
+        ],
+    )
+
+
+def _compact_transition_contract(value: Any) -> dict[str, Any]:
+    return _pick(
+        value,
+        [
+            "previous_chapter_number",
+            "previous_title",
+            "previous_ending_hook",
+            "required_first_paragraph",
+            "last_visible_beat",
+            "required_next_beat",
+            "forbidden_opening",
+            "style_guard",
+            "scene_continuity_guard",
+            "allowed_shift",
+            "shift_reason",
+            "previous_rhetorical_flags",
+            "must_use_concrete_anchor",
+        ],
+    )
+
+
+def _history_marker(value: Any) -> dict[str, bool]:
+    return {"enabled": bool(isinstance(value, dict) and value.get("enabled"))}
+
+
+def _recent_style_signatures(context: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    opening_keys = [
+        "chapter_number",
+        "title",
+        "pattern",
+        "rhetorical_flags",
+        "opening_mode",
+        "opening_engine",
+        "primary_surface_anchor",
+        "subject_type",
+        "syntax_shape",
+    ]
+    ending_keys = [
+        "chapter_number",
+        "title",
+        "anchor_type",
+        "concrete_anchors",
+        "rhetorical_flags",
+        "dash_count",
+        "contrast_count",
+        "abstract_forecast",
+    ]
+    return {
+        "openings": _compact_items(context.get("recent_chapter_openings"), opening_keys, 5),
+        "endings": _compact_items(context.get("recent_chapter_endings"), ending_keys, 5),
+    }
 
 
 def _character_keys() -> list[str]:
@@ -368,8 +469,6 @@ def _previous_chapter(value: Any) -> dict[str, Any]:
             "title",
             "summary",
             "ending_hook",
-            "handoff",
-            "tail",
         ],
     )
 

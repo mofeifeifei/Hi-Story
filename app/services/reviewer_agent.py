@@ -24,12 +24,11 @@ class ReviewerAgent(BaseAgent):
         combined_hits = [*template_hits, *historical_hits]
         user_prompt = (
             "请审查以下章节，输出供程序解析的合法 JSON。\n"
-            "本地模板句检测结果也需要纳入 template_hits。\n\n"
-            "重点检查：第一段是否执行 chapter_transition_contract，章末是否留下下一章可直接承接的外部锚点。\n\n"
-            "必须读取 recent_chapter_endings 和 ending_variation_policy；如果本章章尾继续复用最近章节的同类落点、同类物件、破折号解释式或对照判断句式，要写入问题和修改建议。\n\n"
-            "必须检查 chapter.outline_detail 中的 continuity_debt、opening_mode、opening_trigger、reader_question_in、reader_answer_out、new_question_out、next_continuity_debt 是否在正文中兑现；如果章首只是换成普通人物动作，仍然视为开头质量问题。\n\n"
-            "同时检查：是否兑现章节目的词、目标情绪、读者期待、本章回报，是否使用 minimal_memory_pack 中的必要状态和约束。\n\n"
-            "还要根据 chapter_word_target 检查正文长度是否符合动态目标，不能把完整章节误写成短摘要或为凑字数注水。\n\n"
+            "本地质量报告已覆盖破折号、模板句、长度、开头和章尾的机械检测；只复核边界问题，不要重复罗列它。\n"
+            "重点判断 chapter_execution_card、chapter_transition_contract 和 chapter_task_sheet 是否被兑现："
+            "开头是否承接，场景是否有因果推进，人物选择是否符合状态，本章是否给回报，结尾是否留下具体下一拍。\n"
+            "请额外给出 4 到 6 个 title_candidates。标题应概括本章实际完成的核心变化或关键行动，不泄露最后反转；"
+            "候选必须覆盖不同角度，避免连续“X之Y”、抽象概念词和近章重复结构。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
             f"本地模板句与历史穿帮检测：\n{json_dumps(combined_hits)}\n\n"

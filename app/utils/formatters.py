@@ -8,6 +8,78 @@ from app.utils.json_parser import as_list, parse_json_object
 from app.utils.outline_utils import CHAPTER_OUTLINE_FIELDS, normalize_chapter_outline, scene_cards_to_text
 
 
+DISPLAY_FIELD_LABELS = {
+    "agent_name": "智能体",
+    "kind": "任务类型",
+    "stage": "执行阶段",
+    "status": "状态",
+    "prompt_name": "提示词",
+    "wire_api": "请求协议",
+    "model": "模型",
+    "input_chars": "输入字符数",
+    "output_chars": "输出字符数",
+    "estimated_input_tokens": "预计输入令牌",
+    "estimated_output_tokens": "预计输出令牌",
+    "estimated_total_tokens": "预计总令牌",
+    "elapsed_seconds": "耗时（秒）",
+    "chapter_number": "章节",
+    "chapter_id": "章节编号",
+    "revision": "版本号",
+    "created_at": "创建时间",
+    "updated_at": "更新时间",
+    "reason": "原因",
+    "message": "说明",
+    "error": "错误",
+}
+
+DISPLAY_VALUE_LABELS = {
+    "planner": "策划",
+    "writer": "正文写作",
+    "reviewer": "审稿",
+    "reviser": "修订",
+    "memory": "记忆",
+    "running": "生成中",
+    "cancelling": "停止中",
+    "cancelled": "已停止",
+    "interrupted": "异常中断",
+    "failed": "失败",
+    "done": "完成",
+    "ok": "完成",
+    "plan": "设定草稿",
+    "outline": "全书大纲",
+    "chapteroutlines": "章节细纲",
+    "chapter": "正文生成",
+    "revise": "正文修订",
+    "project": "作品设定",
+    "project_setup": "作品设定",
+    "book_contract": "题材契约卡",
+    "chapter_outline": "章节细纲",
+    "chapter_planning": "章节细纲",
+    "writing": "正文写作",
+    "chapter_execution": "正文写作",
+    "finalize": "保存最终稿",
+    "revision": "正文修订",
+    "completed": "当前规划已完成",
+    "planner_prompt.md": "策划提示词",
+    "writer_prompt.md": "正文写作提示词",
+    "reviewer_prompt.md": "审稿提示词",
+    "reviser_prompt.md": "修订提示词",
+    "memory_prompt.md": "记忆提示词",
+    "history_prompt.md": "历史资料提示词",
+    "chat_completions": "对话补全（chat_completions）",
+    "responses": "统一响应（responses）",
+}
+
+
+def _display_field_label(key: Any) -> str:
+    return DISPLAY_FIELD_LABELS.get(str(key).lower(), "附加信息")
+
+
+def _display_value(value: Any) -> str:
+    text = _text(value, "")
+    return DISPLAY_VALUE_LABELS.get(text.lower(), text)
+
+
 def _text(value: Any, default: str = "未填写") -> str:
     if value is None:
         return default
@@ -19,7 +91,11 @@ def _text(value: Any, default: str = "未填写") -> str:
         items = [_text(item, "") for item in value]
         return "、".join(item for item in items if item) or default
     if isinstance(value, dict):
-        parts = [f"{key}: {_text(val, '')}" for key, val in value.items() if _text(val, "")]
+        parts = [
+            f"{_display_field_label(key)}：{_display_value(val)}"
+            for key, val in value.items()
+            if _text(val, "")
+        ]
         return "；".join(parts) or default
     return str(value).strip() or default
 

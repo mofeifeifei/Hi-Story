@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ast import literal_eval
 from copy import deepcopy
 import re
 from typing import Any, Callable
@@ -138,6 +139,7 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("forbidden", "")
         for key in ["chapter_goal", "chapter_payoff", "opening_hook", "ending_hook"]:
             item[key] = _remove_visible_protocol_labels(item.get(key))
+        item = localize_visible_protocol_terms(item)
         _fill_missing_ending_hook(item)
         normalized_chapters.append(item)
     result["chapters"] = normalized_chapters
@@ -174,11 +176,110 @@ def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> di
         review.setdefault(key, 0)
     review.setdefault("length_problem", "")
     review.setdefault("repeat_risk", [])
-    review.setdefault("problems", [])
-    review.setdefault("suggestions", [])
+    review["problems"] = _normalize_review_problems(review.get("problems"))
+    review["suggestions"] = _normalize_review_suggestions(review.get("suggestions"))
+    review["revision_plan"] = _normalize_revision_plan(review.get("revision_plan"))
+    review.setdefault("revision_check", {})
+    if not isinstance(review["revision_check"], dict):
+        review["revision_check"] = {}
     review.setdefault("template_hits", template_hits or [])
     review.setdefault("risk_flags", [])
+    review.setdefault("title_candidates", [])
+    if not isinstance(review["title_candidates"], list):
+        review["title_candidates"] = []
     return review
+
+
+def _normalize_review_problems(value: Any) -> list[Any]:
+    normalized: list[Any] = []
+    for item in value if isinstance(value, list) else ([] if value in (None, "") else [value]):
+        item = _review_mapping(item) or item
+        if isinstance(item, dict):
+            evidence = str(item.get("evidence") or "").strip()
+            why_it_matters = str(item.get("why_it_matters") or "").strip()
+            problem_type = str(item.get("type") or "narrative").strip() or "narrative"
+            severity = str(item.get("severity") or "medium").strip().lower()
+        else:
+            normalized.append(item)
+            continue
+        if not evidence:
+            continue
+        if severity not in {"low", "medium", "high"}:
+            severity = "medium"
+        normalized.append(
+            {
+                "type": problem_type,
+                "severity": severity,
+                "evidence": evidence,
+                "why_it_matters": why_it_matters or "该问题会削弱章节的连贯性、推进感或阅读体验。",
+            }
+        )
+    return normalized
+
+
+def _normalize_review_suggestions(value: Any) -> list[Any]:
+    normalized: list[Any] = []
+    for item in value if isinstance(value, list) else ([] if value in (None, "") else [value]):
+        item = _review_mapping(item) or item
+        if isinstance(item, dict):
+            target = str(item.get("target") or "").strip()
+            action = str(item.get("action") or "").strip()
+            keep = str(item.get("keep") or "").strip()
+            avoid = str(item.get("avoid") or "").strip()
+        else:
+            normalized.append(item)
+            continue
+        if not action:
+            normalized.append(item)
+            continue
+        normalized.append(
+            {
+                "target": target,
+                "action": action,
+                "keep": keep,
+                "avoid": avoid,
+            }
+        )
+    return normalized
+
+
+def _normalize_revision_plan(value: Any) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    values = value if isinstance(value, list) else []
+    for item in values:
+        item = _review_mapping(item)
+        if not item:
+            continue
+        action = str(item.get("action") or "").strip()
+        if not action:
+            continue
+        normalized.append(
+            {
+                "type": str(item.get("type") or "structure").strip() or "structure",
+                "priority": str(item.get("priority") or "").strip(),
+                "target": str(item.get("target") or "").strip(),
+                "evidence": str(item.get("evidence") or "").strip(),
+                "action": action,
+                "keep": str(item.get("keep") or "").strip(),
+                "avoid": str(item.get("avoid") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def _review_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("{") or len(text) > 20_000:
+        return None
+    try:
+        parsed = literal_eval(text)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def normalize_memory_card(data: Any) -> dict[str, Any]:
@@ -192,6 +293,16 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     memory.setdefault("ability_changes", [])
     memory.setdefault("relationship_changes", [])
     memory.setdefault("historical_updates", [])
+    memory.setdefault("chapter_result_card", {})
+    result_card = memory.get("chapter_result_card")
+    if not isinstance(result_card, dict):
+        result_card = {}
+    for key in ["core_change", "reader_payoff", "key_action", "key_cost", "title_reason"]:
+        result_card.setdefault(key, "")
+    result_card.setdefault("title_candidates", [])
+    if not isinstance(result_card["title_candidates"], list):
+        result_card["title_candidates"] = []
+    memory["chapter_result_card"] = result_card
     if isinstance(memory["historical_updates"], list):
         normalized_history = []
         for item in memory["historical_updates"]:
@@ -293,6 +404,35 @@ def _object_or_empty(data: Any) -> dict[str, Any]:
 
 _VISIBLE_PROTOCOL_LABEL_RE = re.compile(r"^【(?P<label>目的词|回报类型|章首钩子|章尾钩子)：(?P<value>[^】]+)】")
 _VISIBLE_STRENGTH_LABEL_RE = re.compile(r"^【强度：[^】]+】")
+_INTERNAL_PROTOCOL_LABELS = {
+    "allowed_shift": "允许转视角或跨阶段",
+    "chapter_execution_card": "章节执行卡",
+    "chapter_task_sheet": "章节任务单",
+    "chapter_transition_contract": "章节交接规则",
+    "chapter_word_target": "单章字数要求",
+    "ending_variation_policy": "章尾避重规则",
+    "first_screen_task": "第一屏任务",
+    "genre_contract": "题材契约卡",
+    "last_visible_beat": "上一章最后画面",
+    "minimal_memory_pack": "最小记忆包",
+    "must_use_concrete_anchor": "必须承接的具体锚点",
+    "opening_variation_policy": "章首避重规则",
+    "recent_style_signatures": "近期章首章尾避重记录",
+}
+_INTERNAL_PROTOCOL_TOKEN_RE = re.compile(r"(?<![a-z0-9_])(?P<token>[a-z][a-z0-9_]*_[a-z0-9_]+)(?![a-z0-9_])")
+
+
+def localize_visible_protocol_terms(value: Any) -> Any:
+    if isinstance(value, str):
+        return _INTERNAL_PROTOCOL_TOKEN_RE.sub(
+            lambda match: _INTERNAL_PROTOCOL_LABELS.get(match.group("token"), "内部规则"),
+            value,
+        )
+    if isinstance(value, list):
+        return [localize_visible_protocol_terms(item) for item in value]
+    if isinstance(value, dict):
+        return {key: localize_visible_protocol_terms(item) for key, item in value.items()}
+    return value
 
 
 def _remove_visible_protocol_labels(value: Any) -> str:

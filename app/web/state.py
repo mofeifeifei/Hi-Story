@@ -13,7 +13,7 @@ from app.workflow import NovelWorkflow
 
 
 def now_text() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 class WebState:
@@ -24,15 +24,26 @@ class WebState:
         self.custom_export_dirs: dict[int, Path] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
         self._task_cleanups: dict[str, Any] = {}
+        self._chapter_owners: dict[tuple[int, int], str] = {}
         self._task_lock = threading.Lock()
+        self._recover_interrupted_tasks()
 
     def reload_config(self) -> None:
         self.workflow = NovelWorkflow(repo=self.repo, client=AIClient(load_config()))
 
-    def start_task(self, task_id: str, *, kind: str = "", title: str = "") -> None:
+    def start_task(
+        self,
+        task_id: str,
+        *,
+        kind: str = "",
+        title: str = "",
+        work_id: int | None = None,
+        chapter_id: int | None = None,
+    ) -> None:
         if not task_id:
             return
         with self._task_lock:
+            self._claim_chapter_locked(task_id, work_id, chapter_id)
             self._tasks[task_id] = {
                 "id": task_id,
                 "kind": kind,
@@ -41,7 +52,34 @@ class WebState:
                 "started_at": now_text(),
                 "finished_at": "",
                 "error": "",
+                "work_id": work_id,
+                "chapter_id": chapter_id,
             }
+
+    def claim_chapter(self, owner_id: str, work_id: int, chapter_id: int) -> None:
+        with self._task_lock:
+            self._claim_chapter_locked(owner_id, work_id, chapter_id)
+
+    def release_chapter(self, owner_id: str, work_id: int, chapter_id: int) -> None:
+        with self._task_lock:
+            key = (int(work_id), int(chapter_id))
+            if self._chapter_owners.get(key) == owner_id:
+                self._chapter_owners.pop(key, None)
+
+    def claim_chapters(self, owner_id: str, work_id: int, chapter_ids: list[int]) -> None:
+        keys = [(int(work_id), int(chapter_id)) for chapter_id in set(chapter_ids)]
+        with self._task_lock:
+            if any(self._chapter_owners.get(key) not in {None, owner_id} for key in keys):
+                raise ValueError("要删除的章节中仍有生成或保存操作，请等待完成后重试。")
+            for key in keys:
+                self._chapter_owners[key] = owner_id
+
+    def release_chapters(self, owner_id: str, work_id: int, chapter_ids: list[int]) -> None:
+        keys = [(int(work_id), int(chapter_id)) for chapter_id in set(chapter_ids)]
+        with self._task_lock:
+            for key in keys:
+                if self._chapter_owners.get(key) == owner_id:
+                    self._chapter_owners.pop(key, None)
 
     def register_task_cleanup(self, task_id: str, cleanup: Any) -> None:
         if not task_id or cleanup is None:
@@ -93,12 +131,38 @@ class WebState:
             task["finished_at"] = now_text()
             task["error"] = error
             self._task_cleanups.pop(task_id, None)
+            self._release_task_chapter_locked(task_id, task)
 
     def task_status(self, task_id: str) -> dict[str, Any]:
         if not task_id:
             return {}
         with self._task_lock:
             return dict(self._tasks.get(task_id, {}))
+
+    def _claim_chapter_locked(self, owner_id: str, work_id: int | None, chapter_id: int | None) -> None:
+        if work_id is None or chapter_id is None:
+            return
+        key = (int(work_id), int(chapter_id))
+        current = self._chapter_owners.get(key)
+        if current and current != owner_id:
+            raise ValueError("该章节正在执行其他生成或保存操作，请等待完成后重试。")
+        self._chapter_owners[key] = owner_id
+
+    def _release_task_chapter_locked(self, task_id: str, task: dict[str, Any]) -> None:
+        work_id = task.get("work_id")
+        chapter_id = task.get("chapter_id")
+        if work_id is None or chapter_id is None:
+            return
+        key = (int(work_id), int(chapter_id))
+        if self._chapter_owners.get(key) == task_id:
+            self._chapter_owners.pop(key, None)
+
+    def _recover_interrupted_tasks(self) -> None:
+        try:
+            for work in self.repo.list_works():
+                self.repo.interrupt_unfinished_task_runs(int(work["id"]))
+        except Exception:  # noqa: BLE001
+            return
 
 
 STATE = WebState()

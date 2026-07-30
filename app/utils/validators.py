@@ -171,6 +171,20 @@ def validate_review(data: Any) -> list[str]:
     for key in ["repeat_risk", "problems", "suggestions", "template_hits", "risk_flags"]:
         if not isinstance(data.get(key), list):
             issues.append(f"{key} 必须是数组")
+    for index, item in enumerate(data.get("problems") or [], 1):
+        if not isinstance(item, dict):
+            issues.append(f"problems 第 {index} 项必须是对象")
+            continue
+        for key in ["type", "severity", "evidence", "why_it_matters"]:
+            if not str(item.get(key) or "").strip():
+                issues.append(f"problems 第 {index} 项缺少 {key}")
+    for index, item in enumerate(data.get("suggestions") or [], 1):
+        if not isinstance(item, dict):
+            issues.append(f"suggestions 第 {index} 项必须是对象")
+            continue
+        for key in ["target", "action", "keep", "avoid"]:
+            if not str(item.get(key) or "").strip():
+                issues.append(f"suggestions 第 {index} 项缺少 {key}")
     return issues
 
 

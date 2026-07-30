@@ -22,6 +22,12 @@ def _prompt_value(value: Any) -> str:
     return str(value)
 
 
+def _planner_context(bundle: dict[str, Any]) -> dict[str, Any]:
+    context = dict(bundle)
+    context.pop("history_specialist", None)
+    return context
+
+
 class PlannerAgent(BaseAgent):
     agent_name = "planner"
     prompt_file = "planner_prompt.md"
@@ -72,7 +78,7 @@ class PlannerAgent(BaseAgent):
             "entry_condition 和 exit_condition 必须是可判断的剧情状态；required_milestones 至少 3 条，用来判断本卷是否可以收束。\n"
             "每卷 turning_points 至少 4 条，必须具体到事件，不要写“矛盾升级”“真相浮出水面”这类空话。\n\n"
             f"{history_section}\n"
-            f"作品资料：\n{json_dumps(work_bundle)}"
+            f"作品资料：\n{json_dumps(_planner_context(work_bundle))}"
         )
         parsed = self.complete_json(
             user_prompt,
@@ -124,10 +130,14 @@ class PlannerAgent(BaseAgent):
             "character_change, foreshadowing, emotional_turn, emotional_rhythm, "
             "ending_external_anchor, next_opening_action, next_continuity_debt, ending_hook, handoff, forbidden。\n"
             "scene_cards 每章 3 到 6 个，必须写清 scene_goal, obstacle, information_gain, emotional_shift, scene_exit。\n"
+            "title 是细纲阶段的暂定工作标题，必须点出本章核心行动、变化或关键物件，不能只写抽象主题；"
+            "参考 recent_title_ledger，近五章已多次使用的标题骨架（尤其“X之Y”）不得继续沿用。最终标题会在正文完成后重新确定。\n"
             "story_time 必须写清本章在故事内部的时间锚点，例如“案发次日清晨”“行动当晚”“上一章后半日”，不能留空或只写“当前”；它只是时间线参考，不是正文第一句。\n"
             "outline 可以保留必要时间信息，但必须写事件链，不能连续章节都写成“时间/地点 + 人物普通动作 + 出发/抵达/整备”；即使同一时段推进，也要用新证据、新威胁、新选择或新关系压力体现变化。\n"
             "chapter_goal 必须写清目的词和具体叙事任务；emotional_rhythm 必须写目标情绪和情绪路线；"
             "opening_hook 和 ending_hook 必须写明钩子类型和具体事件，但不要使用“【目的词】”“【章首钩子】”“【章尾钩子】”“【强度】”等可见标签。\n"
+            "chapters 内所有字段的值都会直接展示给编辑和用于后续写作，必须使用自然中文；不得把任何内部字段名、英文 snake_case、JSON 键名或策略名写进字段值。"
+            "提到避重、交接或字数规则时，使用“章首避重规则”“章尾避重规则”“章节交接规则”“单章字数要求”等自然中文。\n"
             "reader_expectation 要写清读者进入本章最想看到、知道或感受到什么；"
             "chapter_payoff 要写清本章实际给出的阅读回报，不能只写推进剧情。\n"
             "opening_hook 要写成本章前 300 字的第一屏方案，必须包含开头类型、第一屏问题、切入方式和读者钩子，不能只写“制造悬念”。\n"
@@ -155,7 +165,7 @@ class PlannerAgent(BaseAgent):
             "同一批章节之间不得复用同一段 outline，不得只替换章节号或标题。\n"
             "如果已有章节、伏笔、时间线，必须承接，不得重启案件或重复第一章场景。\n\n"
             f"{history_section}\n"
-            f"作品资料：\n{json_dumps(work_bundle)}"
+            f"作品资料：\n{json_dumps(_planner_context(work_bundle))}"
         )
         parsed = self.complete_json(
             user_prompt,

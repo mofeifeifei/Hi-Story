@@ -1,36 +1,50 @@
 # Hi Story
 
-Hi Story 是一个本地运行的长篇小说写作工作台。它把作品设定、全书大纲、分卷规划、章节细纲、正文生成、审稿修订、资料库记忆和文稿导出放在同一个 Web 界面里。
+Hi Story 是一个本地运行的长篇小说写作工作台。它将作品设定、分卷大纲、章节细纲、正文生成、审稿修订、记忆入库和文稿导出放在同一个界面中，适合需要长期维护剧情上下文的连载创作。
 
-项目默认使用 SQLite 保存数据。作品、章节、运行记录和导出文件都留在本机，不依赖云端数据库。你可以先用 `mock_mode` 跑通流程，也可以接入兼容 OpenAI API 格式的模型服务进行真实生成。
+作品数据库、导出文件和运行记录默认保存于本机。关闭 `mock_mode` 后，当前任务所需的设定、细纲、正文和修订指令会发送给你在 `config.json` 中配置的模型服务。
 
 ## 功能
 
-- **作品设定**：维护书名、题材、平台、目标字数、创意、风格和基础设定。
-- **题材契约卡**：每本书保存一张短契约卡，用来约束题材核心、读者期待、冲突来源、章节回报、开头偏好和避雷点。
-- **设定锁定**：设定确认后可以锁定，避免后续误改基础信息和整本契约。
-- **大纲与分卷**：生成全书大纲、分卷大纲和章节任务单，支持人工编辑。
-- **自动换卷**：生成章节细纲时，系统会根据当前卷章数、退出条件、里程碑和未回收伏笔判断是否进入下一卷，并进行程序校验。
-- **正文生成**：支持正式生成和快速试稿。正式生成会走写作、审稿、修订和质量检查。
-- **质量闸门**：检查章节标题泄漏、短摘要、字数偏差、空泛章尾、模板句、破折号滥用和开篇承接问题。
-- **问题稿**：未通过质量闸门的正文会保存为问题稿，仍可在前端查看、修改，并可由作者保存为最终稿。
-- **资料库记忆**：将通过质量检查的章节沉淀到人物、世界观、伏笔、时间线和历史资料中。
-- **运行记录**：记录本次操作、Agent 调用、生成任务状态和 token 估算。
-- **文稿导出**：支持 TXT 和 DOCX，可导出整本、单章或章节范围。Web 导出前会检查缺章、空章和问题稿。
+- **作品设定**：维护书名、题材、平台、创意、目标字数、风格、读者定位和锁定事实。
+- **题材契约卡**：每本书保存简短契约，用来约束读者期待、冲突来源、章节回报、开头偏好和避雷项。
+- **大纲与分卷**：生成全书大纲、分卷规划和可编辑的章节任务单；细纲包含场景目标、阻力、信息增量、情绪变化与场景出口。
+- **自动换卷**：生成细纲时，模型先判断是否换卷；程序再根据章节数量、退出条件、里程碑、伏笔和下一卷状态进行校验。
+- **章节生成**：正式生成会结合章节交接、题材契约、细纲、人物状态、伏笔和近期章首章尾避重记录；也支持快速试稿。
+- **承接与避重**：上下章通过动作、物件、对白、证据和未解决问题交接，检查近期章首、章尾、标题和常见句式的重复风险。
+- **审稿与修订**：审稿结果会整理为可复制的中文修订话术；修订稿出现风格退化时保留为候选稿，不直接覆盖最终稿。
+- **问题稿与版本**：未通过自动质量检查的文本仍会保存并显示，可继续编辑、修订或由作者确认保存为最终稿；手动保存前会保留旧版本。
+- **记忆入库**：从最终稿提取人物、关系、伏笔、时间线和章节接力棒，供后续章节使用。
+- **标题与导出**：根据正文实际发生的行动、发现、选择或代价生成标题候选，支持 TXT、DOCX、整本、单章和范围导出。
+- **运行记录**：记录任务状态、智能体调用、耗时和令牌估算，页面将内部技术字段转换为中文显示。
 
-## 环境要求
+## 使用流程
 
-- Python 3.10+
+1. 新建作品，填写基础信息和一句话创意。
+2. 生成设定草稿，确认后采用入库；必要时锁定作品设定。
+3. 检查题材契约卡，补足读者期待、冲突发动机和避雷项。
+4. 生成全书大纲和分卷规划。
+5. 生成章节细纲。系统会在此评估是否需要进入下一卷。
+6. 在“写作”页载入章节，生成正文或编辑已有正文。
+7. 查看右侧“修订”面板，复制修改话术到修订输入框，生成修订稿。
+8. 确认文本后保存最终稿，再生成记忆入库。
+9. 在“导出”页检查范围和格式后导出文稿。
+
+写作页会保存每章阅读位置和未保存的本地临时稿；切换章节时会提示，避免误丢编辑内容。
+
+## 环境与启动
+
+### 环境要求
+
+- Python 3.10 或更高版本
 - Windows、macOS 或 Linux
-- 可选：兼容 OpenAI API 格式的模型服务
+- 可选：兼容 OpenAI 请求格式的模型服务
 
 安装依赖：
 
 ```bash
 python -m pip install -r requirements.txt
 ```
-
-## 快速开始
 
 初始化数据库：
 
@@ -44,261 +58,178 @@ python main.py init-db
 python main_web.py
 ```
 
-Windows 用户也可以双击：
+Windows 用户可以直接双击 `Hi Story.bat`。脚本会尝试关闭旧服务、启动新服务，并自动打开浏览器。
 
-```text
-Hi Story.bat
-```
+服务默认监听 `127.0.0.1`，优先使用 `8765` 端口；端口被占用时会选择后续可用端口。实际地址写入 `data/logs/server.url`。
 
-默认配置可以使用 `mock_mode`。在 mock 模式下，不需要 API Key，也可以检查页面、流程和数据写入是否正常。
+## 模型配置
 
-## 本地服务令牌
+首次启动时，程序会在项目根目录创建 `config.json`。可以在 Web 的“设置”页填写，也可以使用命令行。
 
-Web 服务启动时会生成一个随机令牌，并注入到前端页面。除 `/api/health` 外，所有本地 API 请求都需要携带 `X-HiStory-Token`。
-
-这个令牌用于防止其他网页误打或恶意调用本机接口。正常使用时不需要手动填写。如果页面提示“本地页面令牌无效”，通常是浏览器还连着旧后台：
-
-1. 关闭旧的 Hi Story 后台进程。
-2. 重新启动 `Hi Story.bat` 或 `python main_web.py`。
-3. 刷新浏览器页面。
-
-## 配置
-
-首次运行时，程序会在项目根目录生成 `config.json`。该文件保存模型服务地址、API Key、模型名称和运行参数。
-
-示例：
+最小示例：
 
 ```json
 {
   "model_provider": "OpenAI",
   "base_url": "https://api.openai.com/v1",
   "wire_api": "chat_completions",
-  "requires_openai_auth": true,
-  "api_key": "",
+  "api_key": "YOUR_API_KEY",
   "default_model": "gpt-4o-mini",
-  "review_model": "gpt-4o-mini",
-  "agent_models": {
-    "planner": "gpt-4o-mini",
-    "writer": "gpt-4o-mini",
-    "reviewer": "gpt-4o-mini",
-    "reviser": "gpt-4o-mini",
-    "memory": "gpt-4o-mini"
-  },
-  "model_reasoning_effort": "medium",
-  "disable_response_storage": true,
-  "model_context_window": 1000000,
-  "model_auto_compact_token_limit": 900000,
-  "temperature": 0.8,
-  "timeout": 300,
-  "max_retries": 2,
-  "max_output_tokens": 12000,
-  "use_system_proxy": false,
-  "proxy_url": "",
-  "mock_mode": true
+  "mock_mode": false
 }
 ```
 
-常用字段：
+| 字段 | 说明 |
+| --- | --- |
+| `base_url` | 模型服务地址。 |
+| `api_key` | 模型服务密钥。 |
+| `wire_api` | 请求协议：`chat_completions` 或 `responses`。 |
+| `default_model` | 默认模型。 |
+| `agent_models` | 分别指定策划、写作、审稿、修订、记忆使用的模型。 |
+| `review_model` | 审稿模型；为空时按默认模型或审稿智能体模型处理。 |
+| `model_reasoning_effort` | 部分模型支持的推理强度。 |
+| `timeout` | 单次请求超时时间，单位为秒。 |
+| `max_retries` | 请求失败后的重试次数。 |
+| `max_output_tokens` | 单次最大输出令牌数。 |
+| `mock_mode` | 开启后不调用外部模型，用于检查流程和页面。 |
 
-- `base_url`：模型服务地址。
-- `api_key`：模型服务密钥。
-- `wire_api`：请求协议，可选 `chat_completions` 或 `responses`。
-- `default_model`：默认模型。
-- `review_model`：审稿模型。为空时使用默认模型或 `agent_models.reviewer`。
-- `agent_models`：为 planner、writer、reviewer、reviser、memory 分别指定模型。
-- `model_reasoning_effort`：部分模型支持的推理强度。
-- `disable_response_storage`：是否要求服务端不保存响应。
-- `model_context_window`：模型上下文窗口估算值。
-- `model_auto_compact_token_limit`：上下文自动压缩阈值。
-- `temperature`：生成温度。
-- `timeout`：单次请求超时时间，单位为秒。
-- `max_output_tokens`：最大输出 token。
-- `mock_mode`：是否使用模拟输出。
-
-也可以用命令行修改配置：
+命令行示例：
 
 ```bash
 python main.py set-config --base-url "https://api.openai.com/v1" --api-key "YOUR_API_KEY" --default-model "gpt-4o-mini" --mock-mode false
 ```
 
-`config.json` 包含 API Key，已经被 `.gitignore` 忽略。不要把它提交到 GitHub。
+## 正文、质量检查与候选稿
 
-## Web 使用流程
+正式生成的主要流程：
 
-推荐从 Web 界面完成完整写作流程：
+```text
+细纲校验
+→ 写作
+→ 本地质量检查
+→ 审稿
+→ 自动修订
+→ 风格回归检查
+→ 最终稿或问题稿
+```
 
-1. 新建文章，填写基础信息、创意和风格。
-2. 生成设定草稿，确认无误后采用入库。
-3. 检查题材契约卡，必要时手动补充读者期待、冲突来源和避雷点。
-4. 生成全书大纲和分卷大纲。
-5. 生成章节细纲。系统会在这一步判断是否需要自动换卷。
-6. 进入写作页，载入章节。
-7. 使用正式生成或快速试稿生成正文。
-8. 如果生成结果变成问题稿，可以修改后保存为最终稿，也可以直接保存为最终稿。
-9. 最终稿通过质量闸门后，再生成记忆入库。
-10. 导出 TXT 或 DOCX。
+质量检查会关注：
+
+- 开头是否接住上一章的具体承接债。
+- 正文是否像摘要、细纲或结构化协议。
+- 近期章节是否重复相似的开头、结尾、标题或动作框架。
+- “不是……而是……”等对照判断句、破折号和模板化表达是否过密。
+- 章尾是否重复落在物件、文书或抽象感慨上。
+- 篇幅、段落结构和移动端阅读风险。
+
+质量检查用于发现风险，不替代作者判断。自动生成未通过时，正文会保存为“问题稿”，不会丢失；作者仍可直接保存为最终稿。手动保存仅会拒绝空正文、JSON、Markdown 代码块等明显不应作为小说正文的内容，其余问题以提醒形式保留。
+
+修订稿如果引入更多模板句、破折号或其他风格退化，会被保存为候选稿，供你查看、载入或丢弃，不会自动覆盖当前最终稿。
 
 ## 自动换卷
 
-生成章节细纲时，系统会先判断当前卷是否应该继续。判断依据包括：
+生成细纲前，系统会汇总当前卷的章数、里程碑、退出条件、未回收伏笔和下一卷信息。模型给出换卷建议后，程序执行硬校验：
 
-- 当前卷已有章数。
-- 是否达到 `min_chapters`。
-- 是否接近 `target_chapters`。
-- 是否超过 `soft_max_chapters`。
-- 是否达到 `hard_max_chapters`。
-- 当前卷 `exit_condition` 是否完成。
-- `required_milestones` 完成情况。
-- 当前卷仍未回收的伏笔和人物线。
+- 当前卷未达到 `min_chapters` 时，不允许提前切换。
+- 达到 `hard_max_chapters` 时，系统会要求切入下一卷或收束当前卷。
+- 不允许跳过中间卷。
+- 下一卷不存在时，不会写入无效的分卷编号。
 
-程序会做硬校验：
+切换成功后，新细纲会归入下一卷，章节编号不会重置；运行记录会保留切换原因和需要带入下一卷的线索。
 
-- 未达到 `min_chapters` 时不能换卷。
-- 达到 `hard_max_chapters` 时会强制进入下一卷或要求收束。
-- 不能跳卷。
-- 下一卷必须存在。
+## 本地数据与安全
 
-如果发生换卷，前端会显示切换提示。章节编号仍按全书连续编号，不会在新卷重新从第 1 章开始。
+以下内容已被 `.gitignore` 忽略，不应上传到 GitHub：
 
-## 问题稿和质量闸门
+- `config.json`、`.env`：可能包含 API Key。
+- `data/`：作品数据库、正文、运行记录、导出文件和本地服务地址。
+- `*.db`、`*.log`：数据库与日志文件。
 
-问题稿是“已生成但未通过质量闸门”的正文。它不会被丢弃，仍会显示在前端，方便修改和对照。
+本地 Web 服务每次启动都会生成随机令牌。除 `/api/health` 外，所有 API 请求必须携带 `X-HiStory-Token`；正常使用时令牌会自动注入页面，无需手工填写。
 
-问题稿默认不会直接用于：
+请注意：本地保存不等于不出网。关闭 `mock_mode` 后，章节上下文、待生成内容和修订指令会发送到你指定的模型服务。请自行确认服务商的数据政策，避免在作品资料中填写不应外发的敏感信息。
 
-- 下一章上下文承接。
-- 正式导出。
+取消任务会停止本地后续流程并关闭当前客户端；已经送达模型服务的请求能否立刻终止，取决于服务商的接口能力。
 
-这样做是为了避免坏稿自动污染后续章节。如果你认可问题稿，可以直接在写作页保存为最终稿。生成记忆时，如果当前章节仍是问题稿且没有最终稿，系统会先把当前问题稿保存为最终稿，再生成记忆。
+## 命令行
 
-手动保存时，质量闸门只做提醒，不再因为开头承接、破折号、模板句、字数偏差等问题阻止保存。只有正文为空、明显混入 JSON、Markdown 代码块或结构化协议内容时，才会拒绝保存。
-
-质量闸门重点检查：
-
-- 开头是否承接上一章结尾。
-- 是否复制细纲句子当正文。
-- 是否频繁使用“不是……而是……”等模板句。
-- 是否滥用破折号。
-- 是否出现空泛总结式结尾。
-- 是否过短、像摘要或任务说明。
-- 是否泄漏章节标题或 JSON 痕迹。
-
-## 导出
-
-Web 导出支持：
-
-- 整本导出。
-- 单章导出。
-- 章节范围导出。
-- TXT。
-- DOCX。
-
-导出前会检查章节完整性。缺章、空章和没有最终稿的问题稿会阻止导出，并返回具体章节号。勾选草稿兜底时，普通草稿可以作为兜底内容，但问题稿不会被当作正式可导出内容。
-
-CLI 导出命令更适合快速导出和脚本调用。需要严格检查缺章和问题稿时，优先使用 Web 导出。
-
-## CLI 用法
-
-列出作品：
+查看全部命令：
 
 ```bash
-python main.py list-works
+python main.py --help
 ```
 
-查看作品资料包：
+常用命令：
 
 ```bash
-python main.py show-work --work-id 1
-```
-
-创建作品：
-
-```bash
+# 创建作品并生成基础设定
 python main.py create-work --title "示例小说" --idea "一句话创意" --genre "历史穿越" --platform "起点" --target-words 500000
-```
 
-生成全书大纲：
+# 查看作品与章节
+python main.py list-works
+python main.py show-work --work-id 1
+python main.py list-chapters --work-id 1
+python main.py show-chapter --work-id 1 --chapter 1
 
-```bash
+# 生成大纲、细纲和正文
 python main.py generate-outline --work-id 1
-```
-
-生成章节细纲：
-
-```bash
 python main.py generate-chapter-outlines --work-id 1 --start 1 --count 3
-```
-
-生成单章正文：
-
-```bash
 python main.py generate-chapter --work-id 1 --chapter 1
-```
 
-连续生成多章正文：
+# 连续生成，并在每章完成后生成记忆
+python main.py generate-chapters --work-id 1 --start 1 --count 3 --apply-memory
 
-```bash
-python main.py generate-chapters --work-id 1 --start 1 --count 3
-```
-
-生成后自动写入记忆：
-
-```bash
-python main.py generate-chapter --work-id 1 --chapter 1 --apply-memory
-```
-
-跳过审稿或修订：
-
-```bash
+# 需要时跳过审稿或自动修订
 python main.py generate-chapter --work-id 1 --chapter 1 --skip-review
 python main.py generate-chapter --work-id 1 --chapter 1 --skip-revise
-```
 
-导出文稿：
-
-```bash
+# 导出
 python main.py export-txt --work-id 1
 python main.py export-docx --work-id 1
 python main.py export-chapter-txt --work-id 1 --chapter 1
 python main.py export-chapter-docx --work-id 1 --chapter 1
 ```
 
-## 项目结构
+CLI 导出适合脚本调用；Web 导出会额外校验整本或指定范围内是否存在缺章、空章和不可导出的正文。
+
+## 目录结构
 
 ```text
 Hi Story/
 ├── app/
-│   ├── core/             # JSON 契约与结构规范
-│   ├── database/         # SQLite schema、迁移和仓库层
+│   ├── core/             # 数据契约与输出标准化
+│   ├── database/         # SQLite、迁移和仓储层
 │   ├── exporters/        # TXT / DOCX 导出
-│   ├── prompts/          # 各 Agent 使用的提示词
-│   ├── services/         # AI 客户端和 Agent 实现
-│   ├── utils/            # 配置、格式化、校验和上下文工具
-│   └── web/              # 本地 Web API
-├── web/                  # 前端页面、样式和交互脚本
-├── data/                 # 本地作品数据
+│   ├── prompts/          # 策划、写作、审稿、修订、记忆提示词
+│   ├── services/         # 模型客户端和智能体
+│   ├── utils/            # 上下文、格式化、质量检查和标题工具
+│   └── web/              # 本地 Web API 与任务状态
+├── web/                  # 页面、样式和浏览器交互
+├── data/                 # 本地作品数据，默认不提交
 ├── main.py               # CLI 入口
-├── main_web.py           # Web 启动入口
+├── main_web.py           # Web 服务入口
 ├── Hi Story.bat          # Windows 启动脚本
-├── Hi Story.png          # Logo
 └── requirements.txt
 ```
 
-## 数据存储
+## 备份与发布前检查
 
-Hi Story 默认将数据保存在项目本地：
+重要作品位于 `data/works/<作品目录>/work.db`，导出文件位于对应作品的 `exports/` 目录。升级或清理项目之前，请先复制整个 `data/` 目录进行备份。
 
-- `config.json`：模型服务配置，包含 API Key。
-- `data/`：作品索引、每本作品的 SQLite 数据库、运行记录和导出目录。
-- `data/works/<作品>/work.db`：单本作品的主要数据库。
-- `data/works/<作品>/exports/`：该作品的导出文件。
-- `data/logs/server.url`：当前本地服务地址和启动令牌。
+发布到 GitHub 前，建议执行：
 
-这些文件是本地运行数据，不是源码。请按自己的方式备份重要作品。
+```bash
+git status
+git check-ignore -v config.json data/index.db
+python -B main.py --help
+node --check web/app.js
+```
 
+确认 `config.json`、`.env`、`data/`、数据库和日志均未出现在待提交文件中，再提交源码与文档。
 
-## 注意事项
+## 已知边界
 
-- 取消生成时，系统会尽量关闭本地请求，并阻止迟到结果入库；已经发出的模型请求不一定能在服务商侧立刻停止。
-- 多个长任务会使用独立的 workflow 和 AI client，减少并发串状态的风险。
-- 质量闸门不能替代人工审稿。它负责拦截明显坏稿，最终文本仍需要作者判断。
+- 质量检查只能降低明显的重复、承接和模板化风险，不能替代作者审稿。
+- 模型输出质量依赖模型能力、题材资料、细纲质量和当前上下文；同一提示词在不同模型上的表现可能不同。
+- 历史资料卡只提供约束与参考，正式历史考据仍应由作者核验来源。
+- 项目当前未附带开源许可证文件；在复用、分发或接受外部贡献前，请先补充合适的许可证。
