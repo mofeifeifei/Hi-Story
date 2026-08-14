@@ -228,51 +228,38 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "title",
             ],
         ),
-        "chapter_task_sheet": task_sheet,
+        "story_plan": task_sheet,
         "book_bible": _compact_book_bible(context.get("book_bible")),
         "genre_contract": compact_genre_contract(
             context.get("genre_contract") or context.get("book_contract", {})
         ),
         "chapter_word_target": context.get("chapter_word_target", {}),
-        "chapter_execution_card": _compact_execution_card(context.get("chapter_execution_card")),
         "minimal_memory_pack": memory_pack,
-        "previous_chapter": _previous_chapter(context.get("previous_chapter")),
-        "chapter_transition_contract": _compact_transition_contract(context.get("chapter_transition_contract")),
-        "chapter_notes": context.get("chapter_notes", []),
+        "scene_handoff": _compact_scene_handoff(context),
+        "chapter_notes": _compact_notes(context.get("chapter_notes")),
         "history_specialist": _history_marker(context.get("history_specialist")),
-        "recent_style_signatures": _recent_style_signatures(context),
+        "style_guard": _compact_style_guard(context),
         "recent_title_ledger": context.get("recent_title_ledger", []),
     }
     if task == "reviewer":
+        result["minimal_memory_pack"] = {
+            "selection_rule": "只保留如果不知道这个，本章就会写错的信息。",
+            "historical_constraints": memory_pack.get("historical_constraints", []),
+        }
         result.update(
             {
+                "previous_chapter": _previous_chapter(context.get("previous_chapter")),
                 "characters": _compact_items(context.get("characters"), _character_keys(), 8),
                 "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 8),
                 "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 10),
-                "recent_three_chapter_summaries": context.get("recent_three_chapter_summaries", []),
+                "recent_three_chapter_summaries": _compact_recent_summaries(
+                    context.get("recent_three_chapter_summaries")
+                ),
                 "opening_variation_policy": context.get("opening_variation_policy", {}),
                 "ending_variation_policy": context.get("ending_variation_policy", {}),
                 "repeat_risk_warnings": context.get("repeat_risk_warnings", []),
                 "local_quality_report": context.get("local_quality_report", {}),
-            }
-        )
-    elif task == "reviser":
-        result.update(
-            {
-                "characters": _compact_items(context.get("characters"), _character_keys(), 6),
-                "world_rules": _compact_items(context.get("world_rules"), _world_rule_keys(), 6),
-                "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
-                "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "ending_variation_policy": context.get("ending_variation_policy", {}),
-            }
-        )
-    else:
-        result.update(
-            {
-                "characters": _compact_items(context.get("characters"), _character_memory_keys(), 6),
-                "open_plot_threads": _compact_items(context.get("open_plot_threads"), _thread_keys(), 8),
-                "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "ending_variation_policy": context.get("ending_variation_policy", {}),
+                "recent_style_signatures": _recent_style_signatures(context),
             }
         )
     return _drop_empty(result)
@@ -281,12 +268,10 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
 def _work_keys(task: str) -> list[str]:
     keys = [
         "title",
-        "idea",
         "genre",
         "platform",
         "target_words",
         "style",
-        "summary",
         "reader_profile",
         "locked_facts",
     ]
@@ -318,30 +303,19 @@ def _compact_task_sheet(value: Any) -> dict[str, Any]:
         detail,
         [
             "outline",
-            "story_time",
+            "sequence_id",
+            "sequence_goal",
+            "sequence_position",
             "chapter_goal",
             "conflict",
             "main_scene",
-            "reader_expectation",
             "chapter_payoff",
-            "continuity_debt",
-            "previous_anchor",
-            "opening_hook",
-            "opening_mode",
-            "opening_subject",
-            "opening_trigger",
             "first_screen_conflict",
-            "forbidden_opening",
             "reader_question_in",
             "reader_answer_out",
             "new_question_out",
             "emotional_turn",
-            "emotional_rhythm",
-            "ending_external_anchor",
-            "next_opening_action",
-            "next_continuity_debt",
-            "ending_hook",
-            "handoff",
+            "cut_reason",
             "forbidden",
         ],
     )
@@ -356,40 +330,82 @@ def _compact_scene_cards(value: Any) -> list[dict[str, Any]]:
     return [_pick(item, keys) for item in value if isinstance(item, dict) and _pick(item, keys)][:6]
 
 
-def _compact_execution_card(value: Any) -> dict[str, Any]:
+def _compact_bridge_pack(value: Any) -> dict[str, Any]:
     return _pick(
         value,
         [
-            "priority",
+            "source_chapter",
+            "source_title",
+            "previous_tail_excerpt",
             "last_visible_beat",
-            "first_screen_task",
-            "must_include_anchors",
-            "forbidden_opening",
-            "chapter_goal",
-            "chapter_payoff",
-            "dash_budget",
+            "unresolved_pressure",
+            "required_next_beat",
+            "allowed_shift",
+            "shift_reason",
+            "bridge_rule",
         ],
     )
 
 
-def _compact_transition_contract(value: Any) -> dict[str, Any]:
-    return _pick(
-        value,
-        [
-            "previous_chapter_number",
-            "previous_title",
-            "previous_ending_hook",
-            "required_first_paragraph",
-            "last_visible_beat",
-            "required_next_beat",
-            "forbidden_opening",
-            "style_guard",
-            "scene_continuity_guard",
-            "allowed_shift",
-            "shift_reason",
-            "previous_rhetorical_flags",
-            "must_use_concrete_anchor",
-        ],
+def _compact_scene_handoff(context: dict[str, Any]) -> dict[str, Any]:
+    bridge = context.get("chapter_bridge_pack")
+    if not isinstance(bridge, dict):
+        bridge = {}
+    execution = context.get("chapter_execution_card")
+    if not isinstance(execution, dict):
+        execution = {}
+    detail = context.get("chapter")
+    detail = detail.get("outline_detail") if isinstance(detail, dict) else {}
+    if not isinstance(detail, dict):
+        detail = {}
+    allowed_shift = bool(bridge.get("allowed_shift") or detail.get("allowed_shift"))
+    mode = str(detail.get("continuity_mode") or ("shift" if allowed_shift else "direct")).strip()
+    return _drop_empty(
+        {
+            "source_chapter": bridge.get("source_chapter"),
+            "scene_id": detail.get("scene_id") or detail.get("sequence_id"),
+            "mode": mode,
+            "previous_text": bridge.get("previous_tail_excerpt"),
+            "last_event": bridge.get("last_visible_beat") or execution.get("last_visible_beat"),
+            "unfinished_action": bridge.get("unresolved_pressure"),
+            "first_event": bridge.get("required_next_beat") or execution.get("first_screen_task"),
+            "active_people": detail.get("characters_present"),
+            "location": detail.get("main_scene"),
+            "shift_reason": bridge.get("shift_reason") or detail.get("shift_reason"),
+        }
+    )
+
+
+def _compact_notes(value: Any) -> list[dict[str, Any]]:
+    return _compact_items(value, ["note_type", "content", "created_at"], 6)
+
+
+def _compact_style_guard(context: dict[str, Any]) -> dict[str, Any]:
+    opening = context.get("opening_variation_policy")
+    ending = context.get("ending_variation_policy")
+    return _drop_empty(
+        {
+            "opening": _pick(
+                opening,
+                [
+                    "instruction",
+                    "repeated_opening_mode",
+                    "repeated_surface_anchors",
+                    "repeated_opening_engine",
+                    "repeated_syntax_shapes",
+                ],
+            ),
+            "ending": _pick(
+                ending,
+                [
+                    "instruction",
+                    "repeated_anchor_type",
+                    "repeated_concrete_anchors",
+                    "repeated_dash_ending",
+                    "repeated_contrast_ending",
+                ],
+            ),
+        }
     )
 
 
@@ -468,9 +484,29 @@ def _previous_chapter(value: Any) -> dict[str, Any]:
             "chapter_number",
             "title",
             "summary",
-            "ending_hook",
         ],
     )
+
+
+def _compact_recent_summaries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[-2:]:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            _drop_empty(
+                {
+                    "chapter_number": item.get("chapter_number"),
+                    "title": item.get("title"),
+                    "summary": str(item.get("summary") or "")[:600],
+                    "ending_hook": str(item.get("ending_hook") or "")[:240],
+                    "handoff": str(item.get("handoff") or "")[:240],
+                }
+            )
+        )
+    return result
 
 
 def _history_specialist_for_task(value: Any, task: str) -> dict[str, Any]:

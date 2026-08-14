@@ -7,6 +7,13 @@ __pycache__/
 .venv/
 venv/
 env/
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo
 
 # Local configuration and secrets
 config.json
@@ -25,6 +32,14 @@ exports/
 *.log
 *.tmp
 *.bak
+.chrome-hi-story-*/
+.chrome-hi-story-desktop/
+.pycache-check/
+hi-story-*.png
+playwright-report/
+test-results/
+coverage/
+screenshots/
 
 # Editor and OS files
 .vscode/

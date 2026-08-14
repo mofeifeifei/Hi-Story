@@ -25,8 +25,8 @@ class ReviewerAgent(BaseAgent):
         user_prompt = (
             "请审查以下章节，输出供程序解析的合法 JSON。\n"
             "本地质量报告已覆盖破折号、模板句、长度、开头和章尾的机械检测；只复核边界问题，不要重复罗列它。\n"
-            "重点判断 chapter_execution_card、chapter_transition_contract 和 chapter_task_sheet 是否被兑现："
-            "开头是否承接，场景是否有因果推进，人物选择是否符合状态，本章是否给回报，结尾是否留下具体下一拍。\n"
+            "重点对照 scene_handoff 和 story_plan：检查开头是否承接，场景是否有因果推进，人物选择是否符合状态，本章是否产生实际变化。"
+            "结尾可以自然收场，不要把缺少强行悬念当成问题。\n"
             "请额外给出 4 到 6 个 title_candidates。标题应概括本章实际完成的核心变化或关键行动，不泄露最后反转；"
             "候选必须覆盖不同角度，避免连续“X之Y”、抽象概念词和近章重复结构。\n\n"
             f"{history_section}\n"

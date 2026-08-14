@@ -105,12 +105,19 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item = dict(chapter)
         item.setdefault("volume_number", "")
         item.setdefault("scene_cards", [])
+        item.setdefault("sequence_id", "")
+        item.setdefault("sequence_goal", "")
+        item.setdefault("sequence_position", "")
+        item.setdefault("scene_id", "")
+        item.setdefault("continuity_mode", "direct")
         item.setdefault("story_time", "")
         item.setdefault("opening_hook", "")
         item.setdefault("continuity_debt", "")
         item.setdefault("debt_type", "")
         item.setdefault("opening_mode", "")
         item.setdefault("opening_subject", "")
+        item.setdefault("allowed_shift", False)
+        item.setdefault("shift_reason", "")
         item.setdefault("opening_trigger", "")
         item.setdefault("time_or_environment_function", "")
         item.setdefault("previous_anchor", "")
@@ -135,6 +142,7 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         item.setdefault("next_opening_action", "")
         item.setdefault("next_continuity_debt", "")
         item.setdefault("ending_hook", "")
+        item.setdefault("cut_reason", "")
         item.setdefault("handoff", "")
         item.setdefault("forbidden", "")
         for key in ["chapter_goal", "chapter_payoff", "opening_hook", "ending_hook"]:
@@ -406,6 +414,7 @@ _VISIBLE_PROTOCOL_LABEL_RE = re.compile(r"^【(?P<label>目的词|回报类型|�
 _VISIBLE_STRENGTH_LABEL_RE = re.compile(r"^【强度：[^】]+】")
 _INTERNAL_PROTOCOL_LABELS = {
     "allowed_shift": "允许转视角或跨阶段",
+    "chapter_bridge_pack": "上一章承接包",
     "chapter_execution_card": "章节执行卡",
     "chapter_task_sheet": "章节任务单",
     "chapter_transition_contract": "章节交接规则",
@@ -418,6 +427,11 @@ _INTERNAL_PROTOCOL_LABELS = {
     "must_use_concrete_anchor": "必须承接的具体锚点",
     "opening_variation_policy": "章首避重规则",
     "recent_style_signatures": "近期章首章尾避重记录",
+    "required_next_beat": "下一拍任务",
+    "previous_tail_excerpt": "上一章末段原文",
+    "shift_reason": "转场原因",
+    "style_guard": "避重规则",
+    "unresolved_pressure": "未解决压力",
 }
 _INTERNAL_PROTOCOL_TOKEN_RE = re.compile(r"(?<![a-z0-9_])(?P<token>[a-z][a-z0-9_]*_[a-z0-9_]+)(?![a-z0-9_])")
 

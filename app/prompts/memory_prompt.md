@@ -16,15 +16,15 @@ output_contract: 结构化数据
 - 新伏笔必须在最终稿中出现；已解决伏笔必须已经明确解决。历史更新只记录后续必须遵守的真实历史事实。
 - 使用当前正式人物名；不能改写人物档案、世界规则和锁定设定。
 
-## 交接口
+## 章末现场
 
-`handoff` 是下一章的写作接口，不是氛围总结。
+`handoff` 记录正文结束时仍然成立的剧情事实，不是氛围总结。
 
-- `last_visible_anchor`、`last_external_action` 和 `active_object` 只能写正文末尾附近真实可见的人、物、对白、证据、威胁、命令、伤势或现场变化。
-- `next_first_paragraph_task`、`next_opening_action`、`next_continuity_debt` 必须让下一章第一段能直接落笔处理，不可写“继续调查”“处理余波”“推进主线”。
+- `last_visible_anchor`、`last_external_action` 和 `active_object` 只能写正文末尾附近真实可见的人、物、对白、证据、威胁、命令、伤势或现场变化。字段值中不要出现“锚点”一词。
+- `next_first_paragraph_task`、`next_opening_action`、`next_continuity_debt` 写下一章最先需要发生的具体事件，不可写“继续调查”“处理余波”“推进主线”，字段值中不要出现“承接债”一词。
 - `forbidden_jump` 和 `forbidden_next_opening` 要阻止下一章跳过本章后果或重用最近章首模板。
 - 如果本章确实需要换视角或进入新阶段，可以在建议开头方式中给出选择，但仍要让新开头回应本章未解决的具体问题。
-- 结尾类型优先记录动作中断、证据出现、关系逼问、威胁抵达、代价落地、选择逼近、命令抵达或现场异变；不用“意味悠长”。
+- 如当前场景已经自然完成，就如实记录结果；不要为了下一章另造威胁、物件变化或“意味悠长”的结尾。
 
 ## 章节结果与标题
 

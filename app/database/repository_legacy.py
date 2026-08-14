@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import gc
+import hashlib
 import re
 import shutil
 import sqlite3
@@ -25,6 +26,8 @@ from app.utils.json_parser import as_list, json_dumps
 from app.utils.name_normalizer import (
     aliases_to_official_map,
     character_identity_key,
+    is_valid_character_name,
+    is_valid_discovered_character_name,
     normalize_character_name,
     normalize_names,
 )
@@ -39,6 +42,21 @@ def _estimate_tokens_from_chars(chars: int) -> int:
     if chars <= 0:
         return 0
     return max(1, round(chars / 1.8))
+
+
+def _memory_text(value: Any) -> str:
+    """Convert AI memory-card values into SQLite-safe, readable text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return "、".join(item_text for item in value if (item_text := _memory_text(item)))
+    if isinstance(value, dict):
+        return json_dumps(value)
+    return str(value).strip()
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -733,9 +751,91 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_library_page(
+        self,
+        work_id: int,
+        kind: str,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        search: str = "",
+        scope: str = "valid",
+    ) -> dict[str, Any]:
+        """Return one library page without loading the whole work into memory."""
+        sources = {
+            "characters": ("characters", "name COLLATE NOCASE, id", "name || ' ' || COALESCE(role, '') || ' ' || COALESCE(aliases, '')"),
+            "world_rules": ("world_rules", "rule_name COLLATE NOCASE, id", "rule_name || ' ' || COALESCE(rule_content, '')"),
+            "plot_threads": ("plot_threads", "content COLLATE NOCASE, id", "content || ' ' || COALESCE(status, '')"),
+            "timeline": ("timeline", "id DESC", "event || ' ' || COALESCE(story_time, '') || ' ' || COALESCE(characters_involved, '')"),
+            "chapter_notes": ("chapter_notes", "COALESCE(chapter_number, 0) DESC, id DESC", "content || ' ' || COALESCE(note_type, '')"),
+            "historical_facts": ("historical_facts", "COALESCE(chapter_number, 0) DESC, id DESC", "COALESCE(name, '') || ' ' || COALESCE(content, '') || ' ' || COALESCE(category, '')"),
+        }
+        if kind not in sources:
+            raise ValueError("该资料类型不支持分页读取。")
+        table, order_expr, search_expr = sources[kind]
+        page = max(1, int(page))
+        page_size = min(100, max(1, int(page_size)))
+        where = "work_id = ?"
+        params: list[Any] = [work_id]
+        if kind == "characters":
+            if scope == "invalid":
+                where += " AND TRIM(COALESCE(name, '')) = ''"
+            elif scope == "auto":
+                where += " AND TRIM(COALESCE(name, '')) <> '' AND role = '待补充'"
+            else:
+                where += " AND TRIM(COALESCE(name, '')) <> ''"
+        if search.strip():
+            where += f" AND (({search_expr}) LIKE ? OR CAST(id AS TEXT) LIKE ?)"
+            term = f"%{search.strip()}%"
+            params.extend([term, term])
+        with connect(self._db_path_for_work(work_id)) as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0])
+            rows = conn.execute(
+                f"SELECT * FROM {table} WHERE {where} ORDER BY {order_expr} LIMIT ? OFFSET ?",
+                [*params, page_size, (page - 1) * page_size],
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+    def get_library_item(self, work_id: int, kind: str, item_id: int) -> dict[str, Any] | None:
+        tables = {
+            "characters": "characters", "world_rules": "world_rules", "plot_threads": "plot_threads",
+            "timeline": "timeline", "chapter_notes": "chapter_notes", "historical_facts": "historical_facts",
+        }
+        table = tables.get(kind)
+        if not table:
+            raise ValueError("该资料类型不支持详情读取。")
+        with connect(self._db_path_for_work(work_id)) as conn:
+            row = conn.execute(f"SELECT * FROM {table} WHERE work_id = ? AND id = ?", (work_id, item_id)).fetchone()
+        return dict(row) if row else None
+
+    def library_counts(self, work_id: int) -> dict[str, int]:
+        tables = {
+            "characters": "characters", "world_rules": "world_rules", "plot_threads": "plot_threads",
+            "timeline": "timeline", "chapter_notes": "chapter_notes", "historical_facts": "historical_facts",
+        }
+        with connect(self._db_path_for_work(work_id)) as conn:
+            counts = {
+                kind: int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE work_id = ?", (work_id,)).fetchone()[0])
+                for kind, table in tables.items()
+            }
+            counts["historical_profile"] = int(
+                conn.execute("SELECT COUNT(*) FROM historical_profiles WHERE work_id = ?", (work_id,)).fetchone()[0]
+            )
+            counts["characters_invalid"] = int(
+                conn.execute("SELECT COUNT(*) FROM characters WHERE work_id = ? AND TRIM(COALESCE(name, '')) = ''", (work_id,)).fetchone()[0]
+            )
+            counts["characters_auto"] = int(
+                conn.execute("SELECT COUNT(*) FROM characters WHERE work_id = ? AND TRIM(COALESCE(name, '')) <> '' AND role = '待补充'", (work_id,)).fetchone()[0]
+            )
+            counts["characters"] -= counts["characters_invalid"]
+        return counts
+
     def upsert_character(self, work_id: int, data: dict[str, Any]) -> int:
         timestamp = now_text()
         data = self._normalize_character_data(data)
+        if not str(data.get("name") or "").strip():
+            raise ValueError("人物姓名为空或不是有效姓名，无法保存。")
         character_id = int(data.get("id") or 0)
         with connect(self._db_path_for_work(work_id)) as conn:
             if character_id:
@@ -1226,6 +1326,19 @@ class Repository:
     def save_problem_draft(self, work_id: int, chapter_id: int, draft: str) -> None:
         draft = self.normalize_official_names(work_id, draft)
         self._update_chapter_text(work_id, chapter_id, draft=draft, status="problem_draft")
+        reviewed_text_hash = hashlib.sha256(str(draft or "").strip().encode("utf-8")).hexdigest()
+        with connect(self._db_path_for_work(work_id)) as conn:
+            conn.execute(
+                """
+                UPDATE reviews
+                SET reviewed_text_hash = ?
+                WHERE id = (
+                  SELECT id FROM reviews WHERE chapter_id = ? ORDER BY id DESC LIMIT 1
+                )
+                """,
+                (reviewed_text_hash, chapter_id),
+            )
+            conn.commit()
         self.add_version(work_id, chapter_id, f"problem_draft_ai_{now_text()}", draft)
 
     def save_final(
@@ -1291,8 +1404,9 @@ class Repository:
                 raise ValueError("该章节已被其他操作更新，请重新载入章节后再保存。")
             content_changed = str(row["final_text"] or "") != str(final_text or "")
             had_memory = bool(str(row["memory_json"] or "").strip())
-            clear_memory = bool(invalidate_memory or (content_changed and had_memory))
-            if clear_memory:
+            clear_derived_data = bool(content_changed or invalidate_memory)
+            clear_memory = bool(clear_derived_data and had_memory)
+            if clear_derived_data:
                 self._clear_chapter_memory_side_effects(conn, work_id, int(row["chapter_number"]), timestamp)
                 ending_hook = ""
                 handoff = ""
@@ -1359,14 +1473,25 @@ class Repository:
         review = normalize_review(self.normalize_official_names(work_id, review))
         timestamp = now_text()
         with connect(self._db_path_for_work(work_id)) as conn:
+            chapter = conn.execute(
+                "SELECT draft, final_text, status FROM chapters WHERE id = ? AND work_id = ?",
+                (chapter_id, work_id),
+            ).fetchone()
+            current_text = ""
+            if chapter is not None:
+                if str(chapter["status"] or "") in {"draft", "problem_draft"}:
+                    current_text = str(chapter["draft"] or "").strip()
+                else:
+                    current_text = str(chapter["final_text"] or "").strip() or str(chapter["draft"] or "").strip()
+            reviewed_text_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest() if current_text else ""
             cur = conn.execute(
                 """
                 INSERT INTO reviews (
                   chapter_id, continuity_score, character_score, emotion_score,
                   rhythm_score, foreshadow_score, payoff_score, hook_score,
                   historical_score, repeat_risk, problems, suggestions, template_hits,
-                  risk_flags, revision_plan, revision_check, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  risk_flags, revision_plan, revision_check, reviewed_text_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chapter_id,
@@ -1385,6 +1510,7 @@ class Repository:
                     json_dumps(review.get("risk_flags", [])),
                     json_dumps(review.get("revision_plan", [])),
                     json_dumps(review.get("revision_check", {})),
+                    reviewed_text_hash,
                     timestamp,
                 ),
             )
@@ -1420,6 +1546,47 @@ class Repository:
                 parsed = fallback
             review[key] = parsed if isinstance(parsed, type(fallback)) else fallback
         return normalize_review(review)
+
+    def get_review_for_current_text(self, work_id: int, chapter_id: int) -> dict[str, Any] | None:
+        review = self.get_latest_review(work_id, chapter_id)
+        if not review:
+            return None
+        with connect(self._db_path_for_work(work_id)) as conn:
+            chapter = conn.execute(
+                "SELECT draft, final_text, status, updated_at FROM chapters WHERE id = ? AND work_id = ?",
+                (chapter_id, work_id),
+            ).fetchone()
+        if chapter is None:
+            return None
+        if str(chapter["status"] or "") in {"draft", "problem_draft"}:
+            current_text = str(chapter["draft"] or "").strip()
+        else:
+            current_text = str(chapter["final_text"] or "").strip() or str(chapter["draft"] or "").strip()
+        if not current_text:
+            return None
+        current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+        reviewed_hash = str(review.get("reviewed_text_hash") or "").strip()
+        if not reviewed_hash:
+            # Older reviews predate version hashes; only trust one newer than the current chapter save.
+            if str(review.get("created_at") or "") < str(chapter["updated_at"] or ""):
+                return None
+            review["reviewed_text_hash"] = current_hash
+        elif current_hash != reviewed_hash:
+            # Older generation runs saved the review immediately before promoting the revised
+            # text to a problem draft. Repair only that narrow, same-run timestamp window.
+            try:
+                review_time = datetime.fromisoformat(str(review.get("created_at") or ""))
+                chapter_time = datetime.fromisoformat(str(chapter["updated_at"] or ""))
+                same_problem_run = (
+                    str(chapter["status"] or "") == "problem_draft"
+                    and 0 <= (chapter_time - review_time).total_seconds() <= 10
+                )
+            except ValueError:
+                same_problem_run = False
+            if not same_problem_run:
+                return None
+            review["reviewed_text_hash"] = current_hash
+        return review
 
     def add_version(self, work_id: int, chapter_id: int, version_name: str, content: str) -> int:
         with connect(self._db_path_for_work(work_id)) as conn:
@@ -1494,6 +1661,8 @@ class Repository:
     ) -> None:
         memory = self.normalize_official_names(work_id, memory)
         title = self.normalize_official_names(work_id, title)
+        if not isinstance(memory, dict):
+            raise ValueError("记忆卡格式错误：必须是 JSON 对象")
         timestamp = now_text()
         handoff = memory.get("handoff", {})
         handoff_text = json_dumps(handoff)
@@ -1507,9 +1676,9 @@ class Repository:
                 WHERE id = ?
                 """,
                 (
-                    title,
-                    memory.get("summary", ""),
-                    memory.get("ending_hook", ""),
+                    _memory_text(title),
+                    _memory_text(memory.get("summary")),
+                    _memory_text(memory.get("ending_hook")),
                     handoff_text,
                     json_dumps(memory),
                     timestamp,
@@ -1541,13 +1710,13 @@ class Repository:
                     ]
                 }
                 new_values = {
-                    "current_goal": item.get("current_goal") or current.get("current_goal", ""),
-                    "current_fear": item.get("current_fear") or current.get("current_fear", ""),
-                    "current_state": item.get("current_state") or current.get("current_state", ""),
-                    "relationship_stage": item.get("relationship_stage") or current.get("relationship_stage", ""),
-                    "secret_exposure": item.get("secret_exposure") or current.get("secret_exposure", ""),
-                    "arc_stage": item.get("arc_stage") or current.get("arc_stage", ""),
-                    "arc_notes": item.get("arc_notes") or current.get("arc_notes", ""),
+                    "current_goal": _memory_text(item.get("current_goal")) or current.get("current_goal", ""),
+                    "current_fear": _memory_text(item.get("current_fear")) or current.get("current_fear", ""),
+                    "current_state": _memory_text(item.get("current_state")) or current.get("current_state", ""),
+                    "relationship_stage": _memory_text(item.get("relationship_stage")) or current.get("relationship_stage", ""),
+                    "secret_exposure": _memory_text(item.get("secret_exposure")) or current.get("secret_exposure", ""),
+                    "arc_stage": _memory_text(item.get("arc_stage")) or current.get("arc_stage", ""),
+                    "arc_notes": _memory_text(item.get("arc_notes")) or current.get("arc_notes", ""),
                     "last_changed_chapter": chapter_number,
                 }
                 conn.execute(
@@ -1587,7 +1756,17 @@ class Repository:
                 )
 
             for item in as_list(memory.get("new_foreshadows")):
-                if not isinstance(item, dict) or not item.get("content"):
+                if not isinstance(item, dict):
+                    continue
+                content = _memory_text(item.get("content"))
+                if not content:
+                    continue
+                normalized_content = self._compact_text(content)
+                existing = conn.execute(
+                    "SELECT content FROM plot_threads WHERE work_id = ?",
+                    (work_id,),
+                ).fetchall()
+                if any(self._compact_text(row["content"]) == normalized_content for row in existing):
                     continue
                 cur = conn.execute(
                     """
@@ -1599,8 +1778,8 @@ class Repository:
                     (
                         work_id,
                         chapter_number,
-                        item.get("content", ""),
-                        item.get("planned_resolve_chapter"),
+                        content,
+                        self._optional_int(item.get("planned_resolve_chapter")),
                         timestamp,
                         timestamp,
                     ),
@@ -1613,27 +1792,40 @@ class Repository:
                     source="memory_card",
                     target_type="plot_thread",
                     target_id=int(cur.lastrowid),
-                    target_name=str(item.get("content", ""))[:80],
+                    target_name=content[:80],
                     action="create_foreshadow",
                     details=item,
                     timestamp=timestamp,
                 )
 
             for item in as_list(memory.get("resolved_foreshadows")):
-                if not isinstance(item, dict) or not item.get("content"):
+                if not isinstance(item, dict):
+                    continue
+                content = _memory_text(item.get("content"))
+                if not content:
                     continue
                 self._resolve_plot_thread(
                     conn,
                     work_id=work_id,
                     chapter_id=chapter_id,
                     chapter_number=chapter_number,
-                    content=str(item.get("content", "")),
-                    actual_chapter=item.get("actual_resolve_chapter") or chapter_number,
+                    content=content,
+                    actual_chapter=self._optional_int(item.get("actual_resolve_chapter")) or chapter_number,
                     timestamp=timestamp,
                 )
 
             for event in as_list(memory.get("timeline_events")):
-                if not isinstance(event, dict) or not event.get("event"):
+                if not isinstance(event, dict):
+                    continue
+                event_text = _memory_text(event.get("event"))
+                if not event_text:
+                    continue
+                normalized_event = self._compact_text(event_text)
+                existing = conn.execute(
+                    "SELECT event FROM timeline WHERE work_id = ? AND chapter_number = ?",
+                    (work_id, chapter_number),
+                ).fetchall()
+                if any(self._compact_text(row["event"]) == normalized_event for row in existing):
                     continue
                 cur = conn.execute(
                     """
@@ -1645,9 +1837,9 @@ class Repository:
                     (
                         work_id,
                         chapter_number,
-                        event.get("story_time", ""),
-                        event.get("event", ""),
-                        event.get("characters_involved", ""),
+                        _memory_text(event.get("story_time")),
+                        event_text,
+                        _memory_text(event.get("characters_involved")),
                         timestamp,
                     ),
                 )
@@ -1659,7 +1851,7 @@ class Repository:
                     source="memory_card",
                     target_type="timeline",
                     target_id=int(cur.lastrowid),
-                    target_name=str(event.get("event", ""))[:80],
+                    target_name=event_text[:80],
                     action="create_timeline_event",
                     details=event,
                     timestamp=timestamp,
@@ -1668,8 +1860,15 @@ class Repository:
             for item in as_list(memory.get("historical_updates")):
                 if not isinstance(item, dict):
                     continue
-                content = str(item.get("content", "") or "").strip()
+                content = _memory_text(item.get("content"))
                 if not content:
+                    continue
+                normalized_content = self._compact_text(content)
+                existing = conn.execute(
+                    "SELECT content FROM historical_facts WHERE work_id = ?",
+                    (work_id,),
+                ).fetchall()
+                if any(self._compact_text(row["content"]) == normalized_content for row in existing):
                     continue
                 cur = conn.execute(
                     """
@@ -1682,14 +1881,14 @@ class Repository:
                     (
                         work_id,
                         chapter_number,
-                        item.get("category", ""),
-                        item.get("name", ""),
+                        _memory_text(item.get("category")),
+                        _memory_text(item.get("name")),
                         content,
-                        item.get("source_type", "memory_card") or "memory_card",
-                        item.get("certainty", ""),
+                        _memory_text(item.get("source_type")) or "memory_card",
+                        _memory_text(item.get("certainty")),
                         1 if item.get("fictionalized") in (True, 1, "1", "true", "True", "是") else 0,
-                        item.get("chapter_impact", ""),
-                        item.get("future_constraint", ""),
+                        _memory_text(item.get("chapter_impact")),
+                        _memory_text(item.get("future_constraint")),
                         timestamp,
                         timestamp,
                     ),
@@ -1890,6 +2089,68 @@ class Repository:
             item["duration_seconds"] = _duration_seconds(item.get("created_at"), end_time, now=now)
             result.append(item)
         return result
+
+    def list_run_records(
+        self,
+        work_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 40,
+        kind: str = "all",
+        chapter_number: int | None = None,
+    ) -> dict[str, Any]:
+        page = max(1, int(page))
+        page_size = min(100, max(1, int(page_size)))
+        union_sql = """
+            SELECT 'task' AS record_type, CAST(task_runs.id AS TEXT) AS id,
+                   task_runs.chapter_id, chapters.chapter_number, task_runs.kind,
+                   task_runs.title, task_runs.status, task_runs.stage,
+                   '' AS agent_name, '' AS model, '' AS prompt_name,
+                   task_runs.output_preview, task_runs.error, task_runs.created_at,
+                   task_runs.updated_at, task_runs.finished_at,
+                   0 AS estimated_input_tokens, 0 AS estimated_output_tokens,
+                   0 AS estimated_total_tokens, 0 AS elapsed_seconds
+            FROM task_runs
+            LEFT JOIN chapters ON chapters.id = task_runs.chapter_id
+            WHERE task_runs.work_id = ?
+            UNION ALL
+            SELECT 'agent' AS record_type, CAST(agent_runs.id AS TEXT) AS id,
+                   agent_runs.chapter_id, chapters.chapter_number, agent_runs.agent_name AS kind,
+                   agent_runs.agent_name AS title, agent_runs.status, '' AS stage,
+                   agent_runs.agent_name, agent_runs.model, agent_runs.prompt_name,
+                   '' AS output_preview, agent_runs.error, agent_runs.created_at,
+                   agent_runs.created_at AS updated_at, '' AS finished_at,
+                   agent_runs.estimated_input_tokens, agent_runs.estimated_output_tokens,
+                   agent_runs.estimated_total_tokens, agent_runs.elapsed_seconds
+            FROM agent_runs
+            LEFT JOIN chapters ON chapters.id = agent_runs.chapter_id
+            WHERE agent_runs.work_id = ?
+        """
+        where = []
+        params: list[Any] = [work_id, work_id]
+        if kind == "failed":
+            where.append("status IN ('failed', 'error', 'interrupted')")
+        elif kind not in {"", "all"}:
+            where.append("kind = ?")
+            params.append(kind)
+        if chapter_number is not None:
+            where.append("chapter_number = ?")
+            params.append(int(chapter_number))
+        filtered = f"SELECT * FROM ({union_sql})"
+        if where:
+            filtered += " WHERE " + " AND ".join(where)
+        with connect(self._db_path_for_work(work_id)) as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM ({filtered})", params).fetchone()[0])
+            rows = conn.execute(
+                filtered + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                [*params, page_size, (page - 1) * page_size],
+            ).fetchall()
+        return {
+            "items": [dict(row) for row in rows],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+        }
 
     def interrupt_unfinished_task_runs(self, work_id: int) -> int:
         timestamp = now_text()
@@ -2574,6 +2835,7 @@ class Repository:
             "chapter_payoff",
             "opening_preference",
             "avoid",
+            "language_texture",
         ]
         normalized = {field: str(contract.get(field) or "").strip() for field in fields}
         legacy_fallbacks = {
@@ -2983,6 +3245,8 @@ class Repository:
         result = dict(data)
         raw_name = str(result.get("name", "") or "").strip()
         normalized_name = normalize_character_name(raw_name)
+        if not is_valid_character_name(normalized_name):
+            return {**result, "name": "", "aliases": []}
         result["name"] = normalized_name
         aliases = Repository._aliases_with_old_name(result.get("aliases"), raw_name, normalized_name)
         normalized_aliases: list[str] = []
@@ -3156,7 +3420,7 @@ class Repository:
     def _upsert_plan_character(conn: sqlite3.Connection, work_id: int, data: dict[str, Any], timestamp: str) -> None:
         data = Repository._normalize_character_data(data)
         name = str(data.get("name", "") or "").strip()
-        if not name:
+        if not name or not is_valid_character_name(name):
             return
         row = Repository._find_plan_character_row(conn, work_id, data)
         if row is None:
@@ -3235,7 +3499,7 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             for name in names:
                 name = normalize_character_name(name)
-                if not name:
+                if not name or not is_valid_discovered_character_name(name):
                     continue
                 row = self._find_character_row_by_identity(conn, work_id, {"name": name})
                 if row is not None:
@@ -3299,7 +3563,7 @@ class Repository:
                 continue
             if any(token in name for token in ["相关", "未知", "人物", "角色", "众人", "证人"]):
                 continue
-            if len(name) > 12:
+            if len(name) > 12 or not is_valid_discovered_character_name(name):
                 continue
             if name not in names:
                 names.append(name)

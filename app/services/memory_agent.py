@@ -17,9 +17,9 @@ class MemoryAgent(BaseAgent):
         history_section = history_prompt_section(context, task="memory")
         user_prompt = (
             "请根据最终稿生成章节记忆卡，输出供程序解析的合法 JSON。\n\n"
-            "重点：handoff 必须生成可让下一章第一段直接承接的章节交接口，不能只写抽象悬念或氛围总结。\n\n"
-            "handoff 必须包含 next_continuity_debt、suggested_opening_modes、forbidden_next_opening：下一章承接债要具体，建议开头方式要给出 2 到 4 种可选功能，禁用开头要结合本章结尾和最近开头避免重复。\n\n"
-            "同时：人物状态、伏笔、世界约束和接力棒要能服务下一章的 minimal_memory_pack，只保留不知道就会写错的信息。\n\n"
+            "handoff 只记录正文末尾的剧情事实：当时的人物、地点、最后动作、尚未完成的事情，以及下一章最先需要发生的事件。"
+            "字段内容使用小说事实描述，不写编辑术语、策略说明或抽象氛围。\n\n"
+            "人物状态、伏笔和世界约束只保留不知道就会写错的信息。\n\n"
             "额外生成 chapter_result_card：只根据最终稿记录核心变化、读者回报、关键行动、关键代价，并给出 4 到 6 个标题候选。"
             "标题要概括本章实际发生的变化，不要使用泛化概念、重复近章结构或泄露最后反转。\n\n"
             f"{history_section}\n"

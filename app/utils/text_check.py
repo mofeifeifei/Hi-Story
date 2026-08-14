@@ -76,6 +76,29 @@ DEFAULT_TEMPLATE_PATTERNS: list[tuple[str, str]] = [
     ("嘴角弧度模板", r"嘴角[^。！？\n]{0,8}(勾起|扬起)[^。！？\n]{0,12}(一抹|一丝)"),
 ]
 
+NARRATIVE_NATURALNESS_PATTERNS: list[tuple[str, str]] = [
+    (
+        "解释性路标",
+        r"(?:这意味着|这说明|换句话说|归根结底|说到底|毫无疑问|显而易见|不难看出)",
+    ),
+    (
+        "本质判断",
+        r"(?:真正[^。！？\n]{0,24}(?:是|在于)|关键[^。！？\n]{0,20}(?:是|在于)|重要的不是[^。！？\n]{0,30})",
+    ),
+    (
+        "意识总结",
+        r"(?:他|她|[\u4e00-\u9fff]{2,4})[^。！？\n]{0,12}(?:意识到|终于明白|这才明白|这才意识到)",
+    ),
+    (
+        "阶段路标",
+        r"(?:首先|其次|最后|第一步|第二步|接下来要做的|问题很简单|答案很简单)[：:，,]",
+    ),
+    (
+        "泛化权威",
+        r"(?:众所周知|有人说|人们常说|世人皆知|所有人都知道|不知多少人都)",
+    ),
+]
+
 DENSITY_SENSITIVE_LABELS = {
     "不易察觉": "含糊感知词",
     "眼中闪过": "眼神闪动模板",
@@ -276,6 +299,41 @@ OPENING_ENDING_REPAIR_MARKERS = [
     "语言专项修订",
     "破折号",
 ]
+
+INTERNAL_CONTROL_TERMS = [
+    "chapter_bridge_pack",
+    "chapter_execution_card",
+    "chapter_task_sheet",
+    "chapter_transition_contract",
+    "chapter_word_target",
+    "continuity_debt",
+    "ending_external_anchor",
+    "first_screen_task",
+    "minimal_memory_pack",
+    "next_continuity_debt",
+    "next_opening_action",
+    "previous_tail_excerpt",
+    "reader_answer_out",
+    "reader_question_in",
+    "required_next_beat",
+    "scene_handoff",
+    "story_plan",
+    "style_guard",
+    "承接债",
+    "第一屏任务",
+    "章节任务单",
+    "章节执行卡",
+    "章节交接规则",
+    "下一章承接",
+    "外部锚点",
+    "回报点",
+]
+
+CONTEXTUAL_CONTROL_TERM_RE = re.compile(
+    r"(?:下一章|承接|第一屏|章首|章尾|编辑|任务).{0,12}锚点"
+    r"|锚点.{0,12}(?:下一章|承接|第一屏|章首|章尾|编辑|任务)",
+    re.DOTALL,
+)
 
 FORBIDDEN_OPENING_KEYWORDS = [
     "晨光",
@@ -716,12 +774,15 @@ def style_risk_profile(text: str) -> dict[str, Any]:
     ]
     dash_total = _dash_count(content)
     dash_opening = _dash_count(_strip_dialogue_text(opening))
+    naturalness = narrative_naturalness_report(content)
     return {
         "visible_chars": _visible_length(content),
         "dash_total": dash_total,
         "dash_opening": dash_opening,
         "bushi_contrast_total": sum(int(hit.get("count") or 0) for hit in bushi_hits),
         "template_hit_total": sum(int(hit.get("count") or 0) for hit in template_hits),
+        "naturalness_cluster_total": int(naturalness.get("cluster_total") or 0),
+        "naturalness_pattern_total": int(naturalness.get("pattern_total") or 0),
         "opening_flags": rhetorical_pattern_flags(content, opening=True),
         "rhetorical_flags": rhetorical_pattern_flags(content, opening=False),
     }
@@ -743,6 +804,8 @@ def style_regression_warnings(before: str, after: str) -> list[str]:
         warnings.append(
             f"修订稿对照判断句式从 {old['bushi_contrast_total']} 处增加到 {new['bushi_contrast_total']} 处。"
         )
+    if int(new["naturalness_cluster_total"]) > int(old["naturalness_cluster_total"]):
+        warnings.append("修订稿新增叙事自然度模式集群，解释、总结或造势表达比初稿更集中。")
     old_opening = set(old.get("opening_flags") or [])
     new_opening = set(new.get("opening_flags") or [])
     added_opening = sorted(new_opening - old_opening)
@@ -764,7 +827,130 @@ def style_guard_warnings(text: str) -> list[str]:
         warnings.append(f"语言专项修订：正文对照判断句式偏多（约 {contrast_total} 处）。")
     elif "对照判断句式" in set(profile.get("opening_flags") or []):
         warnings.append("语言专项修订：章首使用对照判断句式。")
+    naturalness = narrative_naturalness_report(text)
+    warnings.extend(str(item) for item in naturalness.get("warnings") or [])
     return _dedupe(warnings)
+
+
+def narrative_naturalness_report(text: str) -> dict[str, Any]:
+    """Detect clusters of expository AI patterns without treating one word as proof."""
+    content = str(text or "")
+    narration = _strip_dialogue_text(content)
+    visible = max(1, _visible_length(narration))
+    hits: list[dict[str, Any]] = []
+    for label, pattern in NARRATIVE_NATURALNESS_PATTERNS:
+        matches = [match.group(0) for match in re.finditer(pattern, narration)]
+        if matches:
+            hits.append(
+                {
+                    "label": label,
+                    "count": len(matches),
+                    "examples": _dedupe(matches)[:3],
+                }
+            )
+
+    contrast_count = len(BUSHI_CONTRAST_RE.findall(narration))
+    if contrast_count:
+        hits.append(
+            {
+                "label": "二元对照",
+                "count": contrast_count,
+                "examples": ["不是……而是/却……"],
+            }
+        )
+
+    short_runs = _dramatic_short_sentence_runs(narration)
+    if short_runs:
+        hits.append(
+            {
+                "label": "连续短句造势",
+                "count": len(short_runs),
+                "examples": short_runs[:3],
+            }
+        )
+
+    dense_labels = {
+        str(item["label"])
+        for item in hits
+        if int(item.get("count") or 0) >= 3
+    }
+    present_labels = {str(item["label"]) for item in hits}
+    cluster_labels = set(dense_labels)
+    if dense_labels:
+        cluster_labels.update(
+            str(item["label"])
+            for item in hits
+            if int(item.get("count") or 0) >= 2
+        )
+    if len(present_labels) >= 3:
+        cluster_labels.update(present_labels)
+
+    warnings: list[str] = []
+    if cluster_labels:
+        warnings.append(
+            "叙事自然度风险成组出现："
+            + "、".join(sorted(cluster_labels))
+            + "。只改命中句段：删去解释和格言式总结，让信息落回动作、对白、感官与后果；保留人物口吻和有效停顿。"
+        )
+    return {
+        "hits": hits,
+        "pattern_total": sum(int(item.get("count") or 0) for item in hits),
+        "cluster_total": len(cluster_labels),
+        "cluster_labels": sorted(cluster_labels),
+        "warnings": warnings,
+    }
+
+
+def _dramatic_short_sentence_runs(text: str) -> list[str]:
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[。！？!?])\s*|\n+", str(text or ""))
+        if item.strip()
+    ]
+    result: list[str] = []
+    run: list[str] = []
+    for sentence in sentences:
+        length = _visible_length(sentence)
+        if 2 <= length <= 12 and not sentence.startswith(("“", '"')):
+            run.append(sentence)
+            continue
+        if len(run) >= 3 and _short_run_is_abstract(run):
+            result.append("".join(run[:4]))
+        run = []
+    if len(run) >= 3 and _short_run_is_abstract(run):
+        result.append("".join(run[:4]))
+    return result
+
+
+def _short_run_is_abstract(sentences: list[str]) -> bool:
+    abstract_markers = (
+        "真正",
+        "重要",
+        "关键",
+        "命运",
+        "真相",
+        "危险",
+        "希望",
+        "意义",
+        "选择",
+        "代价",
+        "开始",
+        "结束",
+        "赢",
+        "输",
+        "对",
+        "错",
+        "必须",
+        "永远",
+        "从来",
+    )
+    abstract_count = sum(
+        1
+        for sentence in sentences
+        if any(marker in sentence for marker in abstract_markers)
+    )
+    copula_count = sum(1 for sentence in sentences if "是" in sentence or "意味着" in sentence)
+    return abstract_count >= 2 or copula_count >= 2
 
 
 def ending_signature(text: str) -> dict[str, Any]:
@@ -797,7 +983,7 @@ def chapter_ending_warning(text: str, context: dict[str, Any]) -> str:
     anchor_type = str(signature.get("anchor_type") or "")
     anchors = [str(item) for item in signature.get("concrete_anchors") or [] if str(item).strip()]
     if signature.get("abstract_forecast") or (anchor_type == "抽象/氛围" and not anchors):
-        return "章尾落在抽象预告或氛围判断上，缺少下一章第一段可直接承接的外部锚点。"
+        return "章尾落在抽象预告或氛围判断上，没有用本章真实动作、决定或结果形成自然切点。"
 
     recent = context.get("recent_chapter_endings")
     if not isinstance(recent, list):
@@ -808,7 +994,7 @@ def chapter_ending_warning(text: str, context: dict[str, Any]) -> str:
 
     recent_types = [str(item.get("anchor_type") or "") for item in recent if item.get("anchor_type")]
     if anchor_type and anchor_type != "其他" and recent_types.count(anchor_type) >= 2:
-        return f"章尾落点连续重复为“{anchor_type}”，容易形成同款收束；请换成不同外部锚点或下一章动作。"
+        return f"章尾落点连续重复为“{anchor_type}”，容易形成同款收束；请从本章真实事件中另选自然切点。"
 
     if int(signature.get("contrast_count") or 0) and any(int(item.get("contrast_count") or 0) for item in recent):
         return "章尾连续使用对照判断句式，容易形成AI味；请改成动作、对白、物件状态或证据变化收束。"
@@ -956,13 +1142,14 @@ def _dash_density_warning(text: str) -> str:
 
 def _dash_density_blocker(text: str) -> str:
     count = _dash_count(text)
-    limit = _dash_density_limit(text)
     first = first_screen(text, max_chars=320)
     first_without_dialogue = _strip_dialogue_text(first)
-    if _dash_count(first_without_dialogue) >= 1:
+    opening_count = _dash_count(first_without_dialogue)
+    if count > 2:
+        opening_detail = "，且章首前 300 字也有解释式破折号" if opening_count else ""
+        return f"正文破折号过多（约 {count} 处）{opening_detail}；必须先做语言专项修订，压到 1 到 2 处附近。"
+    if opening_count:
         return "章首前 300 字使用破折号，容易形成解释式开头；除对白被打断或突发打断外，必须改成动作、对白、物件状态或证据差异承接。"
-    if count > max(limit, 3):
-        return f"正文破折号过多（约 {count} 处），超过正式稿阈值；必须先做语言专项修订，压到 1 到 2 处附近。"
     return ""
 
 
@@ -1139,13 +1326,18 @@ def detect_template_phrases(
             )
     for label, pattern in DEFAULT_TEMPLATE_PATTERNS:
         count = len(re.findall(pattern, text))
-        if count:
+        minimum = 2 if label.startswith("对照判断句式") else 1
+        if count >= minimum:
             hits.append(
                 {
                     "phrase": label,
                     "count": count,
-                    "severity": "medium",
-                    "reason": "结构性模板句，少量也容易显得机器味。",
+                    "severity": "medium" if count >= 3 or not label.startswith("对照判断句式") else "low",
+                    "reason": (
+                        "二元对照在同章重复出现，建议结合上下文降低密度，而非机械禁用。"
+                        if label.startswith("对照判断句式")
+                        else "结构性模板句出现，建议检查是否承担真实叙事功能。"
+                    ),
                 }
             )
     for phrase in DENSITY_SENSITIVE_PHRASES:
@@ -1206,6 +1398,9 @@ def manuscript_quality_report(
         blockers.append("正文第一行仍然包含章节号、章节名或标题行。")
     if _looks_like_structured_leak(cleaned):
         blockers.append("正文疑似混入 JSON、Markdown 代码块或结构化协议内容。")
+    control_terms = internal_control_term_hits(cleaned)
+    if control_terms:
+        blockers.append("正文混入内部编辑或控制术语：" + "、".join(control_terms[:6]) + "。")
     if _looks_like_summary(cleaned, visible_chars):
         blockers.append("正文像章节摘要或提纲，不像完整章节。")
 
@@ -1218,7 +1413,7 @@ def manuscript_quality_report(
 
     ending_problem = _ending_problem(cleaned)
     if ending_problem:
-        blockers.append(ending_problem)
+        warnings.append(ending_problem)
 
     template_hits = detect_template_phrases(cleaned)
     if template_hits:
@@ -1228,6 +1423,11 @@ def manuscript_quality_report(
         else:
             warnings.append("正文命中模板句或机器味表达。")
         risk_flags.extend(_hit_labels(template_hits))
+    naturalness_report = narrative_naturalness_report(cleaned)
+    risk_flags.extend(
+        f"叙事自然度：{label}"
+        for label in naturalness_report.get("cluster_labels") or []
+    )
     dash_warning = _dash_density_warning(cleaned)
     if dash_warning:
         warnings.append(dash_warning)
@@ -1284,14 +1484,24 @@ def manuscript_quality_report(
         "blockers": _dedupe(blockers),
         "warnings": _dedupe(warnings),
         "template_hits": template_hits,
+        "naturalness_report": naturalness_report,
         "historical_hits": historical_hits,
         "risk_flags": _dedupe(risk_flags),
+        "control_term_hits": control_terms,
         "length_problem": "" if length_problem and length_problem.startswith("严重") else length_problem,
         "visible_chars": visible_chars,
         "opening_mode": detect_opening_mode(cleaned),
         "opening_signature": opening_signature(cleaned),
         "ending_signature": ending_signature(cleaned),
     }
+
+
+def internal_control_term_hits(text: str) -> list[str]:
+    content = str(text or "")
+    hits = [term for term in INTERNAL_CONTROL_TERMS if term in content]
+    if CONTEXTUAL_CONTROL_TERM_RE.search(content):
+        hits.append("锚点")
+    return _dedupe(hits)
 
 
 def opening_ending_repair_issues(report: dict[str, Any] | None) -> list[str]:
@@ -1434,7 +1644,7 @@ def _ending_problem(text: str) -> str:
             return f"章末使用空泛收束：{phrase}。"
     compact_tail = re.sub(r"\s+", "", tail)
     if any(word in compact_tail for word in ABSTRACT_ENDING_WORDS) and not _has_concrete_ending_anchor(compact_tail):
-        return "章末落在抽象氛围或心理判断上，缺少下一章可承接的外部锚点。"
+        return "章末落在抽象氛围或心理判断上，没有形成来自本章事件的自然切点。"
     return ""
 
 
@@ -1473,6 +1683,16 @@ def _ending_concrete_anchors(tail: str) -> list[str]:
 
 
 def _transition_warning(text: str, context: dict[str, Any]) -> str:
+    bridge = context.get("chapter_bridge_pack")
+    if isinstance(bridge, dict) and bridge:
+        if bool(bridge.get("allowed_shift")):
+            return ""
+        pressure = str(bridge.get("unresolved_pressure") or "").strip()
+        next_beat = str(bridge.get("required_next_beat") or "").strip()
+        first = first_screen(text, max_chars=520)
+        if first and not _text_mentions_anchor(first, " ".join(item for item in [pressure, next_beat] if item)):
+            return "开篇没有处理上一章留下的具体压力或下一拍任务，疑似只借用了表面名词重新开场。"
+        return ""
     contract = context.get("chapter_transition_contract")
     if not isinstance(contract, dict) or not contract:
         return ""
@@ -1486,6 +1706,21 @@ def _transition_warning(text: str, context: dict[str, Any]) -> str:
 
 
 def _scene_continuity_problem(text: str, context: dict[str, Any]) -> str:
+    bridge = context.get("chapter_bridge_pack")
+    if isinstance(bridge, dict) and bridge:
+        if bool(bridge.get("allowed_shift")):
+            return ""
+        screen = first_screen(text, max_chars=560)
+        tail = str(bridge.get("previous_tail_excerpt") or "").strip()
+        pressure = str(bridge.get("unresolved_pressure") or "").strip()
+        if (
+            screen
+            and tail
+            and not _text_mentions_anchor(screen, f"{tail} {pressure}")
+            and _looks_like_protagonist_reset(screen, context)
+        ):
+            return "章首没有延续上一章末段的行动后果或未解决压力，疑似重新开场。"
+        return ""
     contract = context.get("chapter_transition_contract")
     if not isinstance(contract, dict) or not contract:
         return ""
@@ -1525,7 +1760,7 @@ def _opening_contract_problem(text: str, context: dict[str, Any]) -> str:
         return violation
 
     debt = str(detail.get("continuity_debt") or detail.get("previous_anchor") or "").strip()
-    if debt and not _text_mentions_anchor(screen, debt):
+    if debt and not _text_mentions_anchor(screen, debt) and _looks_like_protagonist_reset(screen, context):
         return "前 300 字没有处理章节任务单中的承接债，容易让上下章断裂。"
 
     trigger = str(detail.get("opening_trigger") or "").strip()

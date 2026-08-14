@@ -1,0 +1,29 @@
+:root {
+  color-scheme: light;
+  --canvas: #f2f0ea;
+  --surface: #fbfaf6;
+  --paper: #fffdf8;
+  --paper-muted: #f7f5ef;
+  --ink: #202824;
+  --ink-soft: #46524c;
+  --muted: #68736d;
+  --faint: #8c9690;
+  --line: #d9d9d0;
+  --line-soft: #e8e6df;
+  --green: #477a68;
+  --green-deep: #365f51;
+  --green-soft: #e6efe9;
+  --gold: #a98248;
+  --gold-soft: #f2eadb;
+  --red: #b85c4d;
+  --red-soft: #f7e9e6;
+  --shadow-sm: 0 1px 2px rgb(27 38 32 / 5%);
+  --shadow-md: 0 12px 30px rgb(27 38 32 / 8%);
+  --radius-sm: 6px;
+  --radius: 8px;
+  --sidebar: 248px;
+  --inspector: 328px;
+  --topbar: 64px;
+  --font-ui: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-copy: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
+}

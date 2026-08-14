@@ -3,23 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.database.repository import Repository
+from app.exporters.validation import chapter_text, validate_export_chapters
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
-
-
-def _chapter_text(chapter: dict, *, include_draft: bool) -> str:
-    text = chapter.get("final_text") or ""
-    if include_draft and not text.strip():
-        text = chapter.get("draft") or ""
-    return text
-
-
-def _chapters_with_text(chapters: list[dict], *, include_draft: bool) -> list[tuple[dict, str]]:
-    ready = []
-    for chapter in chapters:
-        text = _chapter_text(chapter, include_draft=include_draft)
-        if text.strip():
-            ready.append((chapter, text.strip()))
-    return ready
 
 
 def export_txt(
@@ -31,9 +16,7 @@ def export_txt(
 ) -> Path:
     work = repo.get_work(work_id)
     chapters = repo.chapters_for_export(work_id)
-    ready_chapters = _chapters_with_text(chapters, include_draft=include_draft)
-    if not ready_chapters:
-        raise ValueError("没有可导出的章节正文。请先生成或保存最终稿，或勾选草稿兜底。")
+    ready_chapters = validate_export_chapters(chapters, include_draft=include_draft)
     output_path = output_path or book_export_path(work, "txt")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -62,7 +45,7 @@ def export_chapter_txt(
     output_path = output_path or chapter_export_path(work, chapter, "txt")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    text = _chapter_text(chapter, include_draft=include_draft)
+    text = chapter_text(chapter, include_draft=include_draft)
     if not text.strip():
         raise ValueError("当前章节没有最终稿，不能导出正式稿。")
     title = chapter.get("title") or f"第{chapter_number}章"
@@ -86,9 +69,12 @@ def export_range_txt(
         for chapter in repo.chapters_for_export(work_id)
         if start_chapter <= int(chapter.get("chapter_number") or 0) <= end_chapter
     ]
-    ready_chapters = _chapters_with_text(chapters, include_draft=include_draft)
-    if not ready_chapters:
-        raise ValueError("指定范围内没有可导出的章节正文。请先生成或保存最终稿，或勾选草稿兜底。")
+    ready_chapters = validate_export_chapters(
+        chapters,
+        include_draft=include_draft,
+        start=start_chapter,
+        end=end_chapter,
+    )
     output_path = output_path or chapter_range_export_path(work, start_chapter, end_chapter, "txt")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

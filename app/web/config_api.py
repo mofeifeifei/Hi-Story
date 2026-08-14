@@ -30,6 +30,17 @@ ALLOWED_CONFIG_KEYS = {
 
 AGENT_MODEL_KEYS = {"planner", "writer", "reviewer", "reviser", "memory"}
 API_KEY_MASK = "********"
+MODEL_DISCOVERY_KEYS = {
+    "provider",
+    "model_provider",
+    "base_url",
+    "requires_openai_auth",
+    "api_key",
+    "timeout",
+    "max_retries",
+    "use_system_proxy",
+    "proxy_url",
+}
 
 
 def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
@@ -103,6 +114,17 @@ def public_config(config: dict[str, Any]) -> dict[str, Any]:
         "use_system_proxy": bool(config.get("use_system_proxy", False)),
         "proxy_url": config.get("proxy_url", ""),
     }
+
+
+def model_discovery_config(current: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    unknown = sorted(set(body) - MODEL_DISCOVERY_KEYS)
+    if unknown:
+        raise ValueError("模型查询包含不支持的字段：" + "、".join(unknown))
+    patch = {key: body[key] for key in MODEL_DISCOVERY_KEYS if key in body}
+    supplied_key = _text(patch.get("api_key"))
+    if not supplied_key or supplied_key == API_KEY_MASK:
+        patch.pop("api_key", None)
+    return sanitize_config_update(current, patch)
 
 
 def _text(value: Any, default: str = "") -> str:

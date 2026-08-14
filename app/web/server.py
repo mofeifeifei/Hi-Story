@@ -13,14 +13,14 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from app.core.contracts import normalize_work_plan
 from app.database.repository import Repository
 from app.exporters.export_docx import export_chapter_docx, export_docx, export_range_docx
 from app.exporters.export_txt import export_chapter_txt, export_range_txt, export_txt
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
-from app.services.ai_client import AIClient
+from app.services.ai_client import AIClient, AIClientError
 from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, save_config
 from app.utils.formatters import (
     format_context_readable,
@@ -35,7 +35,7 @@ from app.utils.outline_utils import normalize_chapter_outline
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.text_check import manuscript_quality_report, quality_summary, style_guard_warnings, style_regression_warnings
 from app.utils.word_target import chapter_word_target_from_style
-from app.web.config_api import public_config, sanitize_config_update
+from app.web.config_api import model_discovery_config, public_config, sanitize_config_update
 from app.web.state import STATE
 from app.workflow import NovelWorkflow
 
@@ -45,13 +45,17 @@ BRAND_LOGO_PATH = ROOT_DIR / "Hi Story.png"
 TASK_CANCELLED_PREFIX = "任务已停止"
 
 
+class ApiTokenError(ValueError):
+    pass
+
+
 class HiStoryWebHandler(BaseHTTPRequestHandler):
     server_version = "HiStoryWeb/1.0"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
-            self._handle_api("GET", parsed.path)
+            self._handle_api("GET", parsed.path, parsed.query)
             return
         self._serve_static(parsed.path)
 
@@ -67,11 +71,16 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         return
 
-    def _handle_api(self, method: str, path: str) -> None:
+    def _handle_api(self, method: str, path: str, query_string: str = "") -> None:
         try:
             self._check_api_token(method, self._parts(path))
-            result = self._route_api(method, self._parts(path), self._read_json())
+            query = {key: values[-1] for key, values in parse_qs(query_string).items() if values}
+            result = self._route_api(method, self._parts(path), self._read_json(), query)
             self._send_json({"ok": True, "data": result})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        except ApiTokenError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=403)
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
@@ -83,9 +92,16 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
             return
         token = self.headers.get("X-HiStory-Token", "")
         if not token or token != STATE.api_token:
-            raise ValueError("本地页面令牌无效，请刷新页面或重启服务。")
+            raise ApiTokenError("本地页面令牌无效，请刷新页面或重启服务。")
 
-    def _route_api(self, method: str, parts: list[str], body: dict[str, Any]) -> Any:
+    def _route_api(
+        self,
+        method: str,
+        parts: list[str],
+        body: dict[str, Any],
+        query: dict[str, str] | None = None,
+    ) -> Any:
+        query = query or {}
         if parts == ["api", "health"]:
             config = load_config()
             return {
@@ -103,6 +119,16 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 return public_config(config)
         if parts == ["api", "config", "test"] and method == "POST":
             return _task_workflow().client.test_connection()
+        if parts == ["api", "config", "models"] and method == "POST":
+            config = model_discovery_config(load_config(), body)
+            client = AIClient(config)
+            try:
+                models = client.list_models()
+            except AIClientError as exc:
+                raise ValueError(str(exc)) from exc
+            finally:
+                client.close()
+            return {"models": models, "count": len(models)}
         if parts == ["api", "shutdown"] and method == "POST":
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"message": "服务正在关闭"}
@@ -253,8 +279,51 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     "task_runs": STATE.repo.list_task_runs(work_id, limit=120),
                 }
 
+            if len(parts) == 4 and parts[3] == "records-page" and method == "GET":
+                chapter_number = _optional_query_int(query.get("chapter_number"), "章节号")
+                return STATE.repo.list_run_records(
+                    work_id,
+                    page=_query_int(query, "page", 1),
+                    page_size=_query_int(query, "page_size", 40),
+                    kind=str(query.get("kind") or "all"),
+                    chapter_number=chapter_number,
+                )
+
+            if len(parts) == 6 and parts[3] == "library" and parts[5] == "items":
+                kind = parts[4]
+                if method == "GET":
+                    if kind == "historical_profile":
+                        profile = STATE.repo.get_historical_profile(work_id)
+                        return {"items": [profile] if profile else [], "page": 1, "page_size": 1, "total": 1 if profile else 0}
+                    return STATE.repo.list_library_page(
+                        work_id,
+                        kind,
+                        page=_query_int(query, "page", 1),
+                        page_size=_query_int(query, "page_size", 50),
+                        search=str(query.get("q") or ""),
+                        scope=str(query.get("scope") or "valid"),
+                    )
+            if len(parts) == 6 and parts[3] == "library" and parts[5] == "item" and method in {"POST", "PUT"}:
+                item_id = _save_library_item_id(work_id, parts[4], body)
+                item = body if parts[4] == "historical_profile" else STATE.repo.get_library_item(work_id, parts[4], item_id)
+                return {"id": item_id, "item": item, "counts": STATE.repo.library_counts(work_id)}
+            if len(parts) == 7 and parts[3] == "library" and parts[5] == "items":
+                kind = parts[4]
+                item_id = _to_int(parts[6], "资料 ID")
+                if method == "GET":
+                    item = STATE.repo.get_library_item(work_id, kind, item_id)
+                    if item is None:
+                        raise ValueError("资料不存在或已被删除。")
+                    return item
+                if method == "DELETE":
+                    _delete_library_item_only(work_id, kind, item_id)
+                    return {"deleted": True, "counts": STATE.repo.library_counts(work_id)}
+
             if len(parts) == 5 and parts[3] == "library" and method in {"POST", "PUT"}:
                 return _save_library_item(work_id, parts[4], body)
+
+            if len(parts) == 5 and parts[3] == "library" and parts[4] == "counts" and method == "GET":
+                return STATE.repo.library_counts(work_id)
 
             if len(parts) == 6 and parts[3] == "library" and method == "DELETE":
                 return _delete_library_item(work_id, parts[4], _to_int(parts[5], "资料 ID"))
@@ -339,6 +408,13 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                             do_revise=formal_mode,
                             do_memory=bool(body.get("do_memory", False)),
                             should_stop=lambda: STATE.task_cancelled(task_id),
+                            on_stage=lambda stage, detail: _update_task_stage(
+                                task_id,
+                                work_id,
+                                chapter_id,
+                                stage,
+                                detail,
+                            ),
                         )
                         output_preview = _chapter_task_preview(result)
                         return _chapter_result(work_id, chapter_number, result)
@@ -376,6 +452,10 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         if not STATE.task_status(task_id).get("finished_at"):
                             _finish_task(task_id, work_id, chapter_id=chapter_id)
                 if len(parts) == 6 and parts[5] in {"revise", "revision"} and method == "POST":
+                    if not str(body.get("instruction") or "").strip():
+                        raise ValueError("请先填写修改意见。")
+                    if not str(body.get("current_text") or "").strip():
+                        raise ValueError("当前正文为空，无法按意见修订。")
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
                     _start_task(
@@ -432,6 +512,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
             data = _inject_api_token(data)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -453,13 +534,14 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
             self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
 
     @staticmethod
@@ -598,6 +680,24 @@ def _finish_task(
     )
 
 
+def _update_task_stage(
+    task_id: str,
+    work_id: int,
+    chapter_id: int | None,
+    stage: str,
+    detail: str,
+) -> None:
+    STATE.update_task_stage(task_id, stage, detail)
+    STATE.repo.log_task_run(
+        task_id=task_id,
+        work_id=work_id,
+        chapter_id=chapter_id,
+        status="running",
+        stage=stage,
+        output_preview=detail,
+    )
+
+
 def _finish_task_error(task_id: str, exc: Exception, *, work_id: int | None = None, chapter_id: int | None = None) -> None:
     message = str(exc)
     status = "cancelled" if message.startswith(TASK_CANCELLED_PREFIX) or message == "AI 请求已取消。" else "failed"
@@ -617,8 +717,21 @@ def _chapter_id_or_none(work_id: int, chapter_number: int) -> int | None:
 
 def _work_state(work_id: int) -> dict[str, Any]:
     work = STATE.repo.get_work(work_id)
-    bundle = STATE.repo.get_work_bundle(work_id)
     chapters = STATE.repo.list_chapters(work_id)
+    project_bundle = {
+        "work": work,
+        "book_contract": STATE.repo.get_book_contract(work_id),
+        "characters": [],
+        "characters_deferred": True,
+        "world_rules": STATE.repo.list_world_rules(work_id),
+        "historical_profile": STATE.repo.get_historical_profile(work_id),
+        "historical_facts": [],
+        "historical_facts_deferred": True,
+        "chapter_notes": [],
+        "chapter_notes_deferred": True,
+        "open_plot_threads": [],
+        "open_plot_threads_deferred": True,
+    }
     outline = _outline_data(work_id)
     return {
         "work": work,
@@ -626,16 +739,8 @@ def _work_state(work_id: int) -> dict[str, Any]:
         "chapters": chapters,
         "book_contract": STATE.repo.get_book_contract(work_id),
         "workflow_state": STATE.repo.workflow_state(work_id),
-        "project_readable": format_project_readable(bundle),
+        "project_readable": format_project_readable(project_bundle),
         "outline": outline,
-        "characters": STATE.repo.list_characters(work_id),
-        "world_rules": STATE.repo.list_world_rules(work_id),
-        "plot_threads": STATE.repo.list_plot_threads(work_id),
-        "timeline": STATE.repo.list_timeline(work_id, limit=50),
-        "historical_profile": STATE.repo.get_historical_profile(work_id),
-        "historical_facts": STATE.repo.list_historical_facts(work_id, limit=80),
-        "chapter_notes": STATE.repo.list_chapter_notes(work_id, limit=100),
-        "sync_events": STATE.repo.list_sync_events(work_id, limit=100),
         "export_dir": str(_current_export_dir(work_id)),
         "default_export_dir": str(STATE.repo.export_dir(work_id)),
         "custom_export_dir": work_id in STATE.custom_export_dirs,
@@ -646,7 +751,7 @@ def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     memory = parse_json_object(chapter.get("memory_json") or "{}", default={}) or {}
     chapter_word_target = _chapter_word_target(work_id)
-    review = STATE.repo.get_latest_review(work_id, int(chapter["id"]))
+    review = STATE.repo.get_review_for_current_text(work_id, int(chapter["id"]))
     return {
         "chapter": chapter,
         "review": review,
@@ -687,17 +792,19 @@ def _chapter_word_target(work_id: int) -> dict[str, Any]:
 
 
 def _chapter_result(work_id: int, chapter_number: int, result: dict[str, Any]) -> dict[str, Any]:
+    result_text = str(result.get("final_text") or result.get("draft") or "").strip()
+    review = result.get("review") if result_text else None
     return {
         **_chapter_state(work_id, chapter_number),
         "draft": result.get("draft", ""),
         "final_text": result.get("final_text", ""),
-        "review": result.get("review"),
-        "review_readable": format_review_readable(result.get("review")),
+        "review": review,
+        "review_readable": format_review_readable(review),
         "memory": result.get("memory"),
         "memory_readable": format_memory_readable(result.get("memory")),
         "quality_gate": result.get("quality_gate", {}),
         "problem_draft": bool(result.get("problem_draft")),
-        "work_state": _work_state(work_id),
+        "partial_stage": str(result.get("partial_stage") or ""),
     }
 
 
@@ -723,6 +830,9 @@ def _chapter_task_preview(result: dict[str, Any]) -> str:
     quality = result.get("quality_gate")
     if not isinstance(quality, dict):
         return ""
+    summary = str(quality.get("summary") or "").strip()
+    if result.get("partial_stage") and summary:
+        return summary[:500]
     if quality.get("problem_draft"):
         draft = quality.get("draft") if isinstance(quality.get("draft"), dict) else {}
         blockers = quality.get("blockers") or draft.get("blockers") or []
@@ -733,7 +843,7 @@ def _chapter_task_preview(result: dict[str, Any]) -> str:
         return f"问题草稿已保存：初稿约 {chars} 字符，阻断 {len(blockers)} 项，警告 {len(warnings)} 项。{detail}"
     final = quality.get("final")
     if not isinstance(final, dict):
-        return str(quality.get("summary") or "")[:300]
+        return summary[:300]
     blockers = final.get("blockers") or []
     warnings = final.get("warnings") or []
     chars = final.get("visible_chars") or 0
@@ -790,13 +900,14 @@ def _save_chapter_text_claimed(
         raise ValueError("正文不能保存：" + "；".join(hard_blockers))
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
+    content_changed = text != str(chapter.get("final_text") or "")
     memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
         text,
         title=title,
-        ending_hook=chapter.get("ending_hook") or "",
-        handoff=chapter.get("handoff") or "",
+        ending_hook="" if content_changed else chapter.get("ending_hook") or "",
+        handoff="" if content_changed else chapter.get("handoff") or "",
         memory_json=chapter.get("memory_json") or "",
         invalidate_memory=bool(body.get("invalidate_memory", False)),
         expected_revision=int(chapter.get("revision") or 0),
@@ -957,7 +1068,6 @@ def _generate_memory(
         "memory": memory,
         "memory_readable": format_memory_readable(memory),
         "promoted_problem_draft": promoted_problem_draft,
-        "work_state": _work_state(work_id),
     }
 
 
@@ -1029,24 +1139,10 @@ def _revise_chapter_with_instruction(
                 "candidate_only": True,
                 "candidate_version_id": candidate_version_id,
                 "style_regression_warnings": cleaned_warnings,
+                "quality_blockers": cleaned_warnings,
                 "message": "修订稿风格退化，已作为候选稿保留，未覆盖最终稿。",
-                "work_state": _work_state(work_id),
             }
         revised = cleaned
-    memory_invalidated = bool(str(latest_chapter.get("memory_json") or "").strip())
-    STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
-    memory_invalidated = STATE.repo.save_final_after_manual_edit(
-        work_id,
-        chapter["id"],
-        revised,
-        title=latest_chapter.get("title") or f"第{chapter_number}章",
-        ending_hook=latest_chapter.get("ending_hook") or "",
-        handoff=latest_chapter.get("handoff") or "",
-        memory_json=latest_chapter.get("memory_json") or "",
-        invalidate_memory=memory_invalidated,
-        expected_revision=int(latest_chapter.get("revision") or 0),
-    )
-    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
     after_quality = manuscript_quality_report(
         revised,
         before_context,
@@ -1054,6 +1150,51 @@ def _revise_chapter_with_instruction(
         chapter_title=latest_chapter.get("title") or "",
         stage="修订后",
     )
+    acceptance_blockers = workflow._automated_acceptance_blockers(after_quality)
+    if acceptance_blockers:
+        candidate_version_id = STATE.repo.add_version(
+            work_id,
+            chapter["id"],
+            "web_user_instruction_candidate_style",
+            revised,
+        )
+        STATE.repo.log_agent_run(
+            work_id=work_id,
+            chapter_id=chapter["id"],
+            agent_name="reviser",
+            model=workflow.client.model_for("reviser"),
+            prompt_name="reviser_prompt.md",
+            input_preview=json_dumps({"context": reviser_context, "instruction": instruction, "current_text": current_text[:3000]}),
+            output=revised,
+            status="candidate",
+            error="；".join(acceptance_blockers),
+            **workflow.client.last_usage("reviser"),
+        )
+        return {
+            **_chapter_state(work_id, chapter_number),
+            "revised_text": revised,
+            "saved": False,
+            "candidate_only": True,
+            "candidate_version_id": candidate_version_id,
+            "quality_blockers": acceptance_blockers,
+            "quality_gate": {"final": after_quality, "blockers": acceptance_blockers},
+            "message": "修订稿未通过自动验收，已作为候选稿保留，未覆盖最终稿。",
+        }
+    content_changed = revised != str(latest_chapter.get("final_text") or "")
+    memory_invalidated = content_changed and bool(str(latest_chapter.get("memory_json") or "").strip())
+    STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
+    memory_invalidated = STATE.repo.save_final_after_manual_edit(
+        work_id,
+        chapter["id"],
+        revised,
+        title=latest_chapter.get("title") or f"第{chapter_number}章",
+        ending_hook="" if content_changed else latest_chapter.get("ending_hook") or "",
+        handoff="" if content_changed else latest_chapter.get("handoff") or "",
+        memory_json=latest_chapter.get("memory_json") or "",
+        invalidate_memory=memory_invalidated,
+        expected_revision=int(latest_chapter.get("revision") or 0),
+    )
+    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
     latest_review = STATE.repo.get_latest_review(work_id, int(chapter["id"])) or {}
     revision_plan = latest_review.get("revision_plan") if isinstance(latest_review, dict) else []
     if revision_plan:
@@ -1074,7 +1215,7 @@ def _revise_chapter_with_instruction(
         "revised_text": revised,
         "saved": True,
         "memory_invalidated": memory_invalidated,
-        "work_state": _work_state(work_id),
+        "quality_gate": {"final": after_quality, "blockers": []},
     }
 
 
@@ -1258,6 +1399,11 @@ def _library_state(work_id: int) -> dict[str, Any]:
 
 
 def _save_library_item(work_id: int, kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    item_id = _save_library_item_id(work_id, kind, body)
+    return {"id": item_id, **_library_state(work_id)}
+
+
+def _save_library_item_id(work_id: int, kind: str, body: dict[str, Any]) -> int:
     if kind == "characters":
         item_id = STATE.repo.upsert_character(work_id, body)
     elif kind == "world_rules":
@@ -1275,10 +1421,15 @@ def _save_library_item(work_id: int, kind: str, body: dict[str, Any]) -> dict[st
         item_id = STATE.repo.upsert_historical_fact(work_id, body)
     else:
         raise ValueError("该资料类型暂不支持保存。")
-    return {"id": item_id, **_library_state(work_id)}
+    return int(item_id)
 
 
 def _delete_library_item(work_id: int, kind: str, item_id: int) -> dict[str, Any]:
+    _delete_library_item_only(work_id, kind, item_id)
+    return _library_state(work_id)
+
+
+def _delete_library_item_only(work_id: int, kind: str, item_id: int) -> None:
     if kind == "characters":
         STATE.repo.delete_character(work_id, item_id)
     elif kind == "world_rules":
@@ -1293,7 +1444,25 @@ def _delete_library_item(work_id: int, kind: str, item_id: int) -> dict[str, Any
         STATE.repo.delete_historical_fact(work_id, item_id)
     else:
         raise ValueError("该资料类型暂不支持删除。")
-    return _library_state(work_id)
+
+
+def _query_int(query: dict[str, str], key: str, default: int) -> int:
+    raw = str(query.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"查询参数 {key} 必须是整数。") from exc
+
+
+def _optional_query_int(raw: str | None, label: str) -> int | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label}必须是整数。") from exc
 
 
 def _clean_inputs(data: dict[str, Any]) -> dict[str, Any]:

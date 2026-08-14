@@ -118,6 +118,16 @@ class WebState:
         with self._task_lock:
             return self._tasks.get(task_id, {}).get("status") in {"cancelling", "cancelled"}
 
+    def update_task_stage(self, task_id: str, stage: str, detail: str = "") -> None:
+        if not task_id:
+            return
+        with self._task_lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.get("status") not in {"running", "cancelling"}:
+                return
+            task["stage"] = str(stage or "")
+            task["detail"] = str(detail or "")
+
     def finish_task(self, task_id: str, *, status: str = "done", error: str = "") -> None:
         if not task_id:
             return

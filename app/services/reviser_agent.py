@@ -14,18 +14,21 @@ class ReviserAgent(BaseAgent):
     def revise_chapter(self, context: dict[str, Any], draft: str, review: dict[str, Any]) -> str:
         history_section = history_prompt_section(context, task="reviser")
         revision_plan = review.get("revision_plan") if isinstance(review, dict) else []
+        if not isinstance(revision_plan, list):
+            revision_plan = []
+        revision_tasks = [item for item in revision_plan if isinstance(item, dict)][:3]
         user_prompt = (
-            "请根据修订计划修订章节正文，只输出修订后的正文。\n\n"
-            "优先修复高优先级的承接、因果、人物和回报问题；保留 chapter_task_sheet、chapter_execution_card、"
-            "minimal_memory_pack 和锁定事实中的有效内容。开头必须继续执行交接口，结尾必须保留下一章可接的外部锚点。\n"
-            "依据 recent_style_signatures 和避重策略处理重复章首、章尾、破折号或对照句，但不要把语言改成新模板。"
-            "字数按 chapter_word_target 调整，扩写只增加有效场景，压缩只删重复表达。\n\n"
+            "按修订任务局部编辑正文，只输出修订后的完整正文。\n"
+            "最多执行三项；未列出的内容保持原样。scene_handoff、story_plan、既有事实和人物选择不可被改坏。\n"
+            "连续性优先，其次是因果和人物，再处理结尾与语言。结尾可以自然收场，不要强造悬念。\n"
+            "语言清理只改命中句段：保留人物声音，删去替读者解释、格言式总结和整齐造势，不做同义词轮换。\n"
+            "不要在正文中复述任何上下文字段名。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
-            f"修订计划：\n{json_dumps(revision_plan)}\n\n"
+            f"修订任务单：\n{json_dumps(revision_tasks)}\n\n"
             f"初稿：\n{draft}"
         )
-        return self.complete(user_prompt, mock_hint={"draft": draft, "revision_plan": revision_plan}).strip()
+        return self.complete(user_prompt, mock_hint={"draft": draft, "revision_plan": revision_tasks}).strip()
 
     def revise_with_instruction(self, context: dict[str, Any], draft: str, instruction: str) -> str:
         history_section = history_prompt_section(context, task="reviser")
@@ -33,8 +36,8 @@ class ReviserAgent(BaseAgent):
             "请根据用户修改意见修订章节正文，只输出修订后的正文。\n"
             "用户意见优先级最高；在不违背锁定设定、细纲和上下文的前提下，尽量保留当前正文中可用的段落、对白和事件，"
             "不要从零重写成另一章。\n\n"
-            "必要事实以 minimal_memory_pack、chapter_task_sheet 和章节交接口为准；不要新增无关设定或让下一章承接债失效。"
-            "开头、结尾和语言的改动同时遵守 recent_style_signatures、避重策略和 chapter_word_target。\n\n"
+            "必要事实以 minimal_memory_pack、story_plan 和 scene_handoff 为准；不要新增无关设定或破坏下一章所需事实。"
+            "开头、结尾和语言的改动同时遵守 style_guard 和 chapter_word_target。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
             f"用户修改意见：\n{instruction.strip()}\n\n"
@@ -47,7 +50,7 @@ class ReviserAgent(BaseAgent):
         user_prompt = (
             "请对当前章节做首尾专项修订，只输出修订后的完整正文。\n"
             "重点只处理前 300 到 500 字和最后 200 到 300 字；中段剧情、事实、对白、人物关系和事件顺序尽量保持不变。\n"
-            "开头接住 chapter_transition_contract 的具体锚点和第一屏冲突；结尾落到新的外部锚点并给下一章第一段留下可执行动作。\n"
+            "开头执行 scene_handoff 中尚未完成的动作或后果；结尾在本章事件形成的自然切点停下。\n"
             "如果问题涉及语言或章尾重复，只做必要的定向改写，保留剧情事实、场景顺序、对白含义和章末交接口；"
             "不要把时间环境开头简单替换成人物普通动作模板。\n"
             "不要把正文改成另一章，不要新增无关设定，不要输出修改说明。\n\n"

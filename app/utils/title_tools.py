@@ -6,7 +6,25 @@ from typing import Any
 
 
 _TITLE_NOISE_RE = re.compile(r"[\s\-—_·：:，,。！？!?\[\]【】()（）]+")
-_GENERIC_TITLES = {"风波", "迷雾", "转机", "暗流", "余波", "变局", "前夜", "开端", "终局"}
+_GENERIC_TITLES = {
+    "风波",
+    "迷雾",
+    "转机",
+    "暗流",
+    "余波",
+    "变局",
+    "前夜",
+    "开端",
+    "终局",
+    "风起",
+    "落子",
+    "棋局",
+    "暗线",
+    "疑云",
+    "夜宴",
+    "抉择",
+    "真相",
+}
 
 
 def title_ledger(chapters: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, str | int]]:
@@ -50,12 +68,18 @@ def title_warnings(title: Any, recent_titles: list[dict[str, Any]]) -> list[str]
     recent = [item for item in recent if item]
     if cleaned in recent:
         warnings.append("章节标题与近章重复。")
+    for recent_title in recent[-20:]:
+        if cleaned == recent_title:
+            continue
+        if SequenceMatcher(None, _signature(cleaned), _signature(recent_title)).ratio() >= 0.72:
+            warnings.append(f"章节标题与近章《{recent_title}》过于相似，应改用本章独有行动、发现或代价。")
+            break
     structure = title_structure(cleaned)
     recent_structures = [title_structure(item) for item in recent[-5:]]
     if structure == "X之Y" and recent_structures.count(structure) >= 2:
         warnings.append("近五章已多次使用“X之Y”标题结构，本章应换成具体事件或人物选择。")
-    if len(cleaned) <= 2 and cleaned in _GENERIC_TITLES:
-        warnings.append("章节标题过于抽象，未概括本章核心变化。")
+    if cleaned in _GENERIC_TITLES:
+        warnings.append("章节标题过于抽象，未概括本章独有行动、发现、选择或代价。")
     return warnings
 
 

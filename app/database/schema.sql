@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   suggestions TEXT,
   revision_plan TEXT,
   revision_check TEXT,
+  reviewed_text_hash TEXT,
   template_hits TEXT,
   risk_flags TEXT,
   created_at TEXT,

@@ -59,6 +59,7 @@ def init_db(db_path: Path) -> None:
             ("repeat_risk", "TEXT"),
             ("revision_plan", "TEXT"),
             ("revision_check", "TEXT"),
+            ("reviewed_text_hash", "TEXT"),
         ]:
             _ensure_column(conn, "reviews", column, definition)
         conn.execute(

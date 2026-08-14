@@ -8,6 +8,7 @@ import re
 import time
 from math import ceil
 from typing import Any
+from urllib.parse import urlparse
 
 from app.utils.config import load_config
 from app.utils.history import default_historical_profile, is_historical_inputs
@@ -61,6 +62,8 @@ class AIClient:
         if self.config.get("mock_mode", True):
             output = self._mock_response(agent_name, user_prompt, json_mode=json_mode, hint=mock_hint or {})
             self._record_usage(agent_name, input_chars, output, input_tokens, started)
+            if not str(output or "").strip():
+                raise AIClientError(f"{agent_name} 模型返回空内容，请重试。")
             return output
         if self.config.get("requires_openai_auth", True) and not api_key:
             raise AIClientError("缺少 API Key。请在工作台的“设置”页填写，或重新开启 mock 模式。")
@@ -92,6 +95,8 @@ class AIClient:
                     json_mode=json_mode,
                 )
             self._record_usage(agent_name, input_chars, output, input_tokens, started)
+            if not str(output or "").strip():
+                raise AIClientError(f"{agent_name} 模型返回空内容，请重试。")
             return output
         finally:
             logger.info(
@@ -151,6 +156,71 @@ class AIClient:
             "wire_api": self.config.get("wire_api", ""),
             "model": self.model_for("planner"),
         }
+
+    def list_models(self) -> list[dict[str, str]]:
+        """Return models exposed by an OpenAI-compatible /models endpoint."""
+        try:
+            import requests
+        except ImportError as exc:
+            raise AIClientError("缺少 requests，请先运行 pip install -r requirements.txt") from exc
+
+        base_url = str(self.config.get("base_url", "") or "").strip().rstrip("/")
+        parsed_url = urlparse(base_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise AIClientError("接口地址无效，请填写完整的 http:// 或 https:// 地址。")
+
+        api_key = str(
+            self.config.get("api_key")
+            or os.getenv("NOVEL_AI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        )
+        if self.config.get("requires_openai_auth", True) and not api_key:
+            raise AIClientError("尚未配置 API 密钥，请先填写密钥再获取模型。")
+
+        url = f"{base_url}/models"
+        timeout = min(60, int(self.config.get("timeout", 300) or 300))
+        session = self._requests_session(requests)
+        session.trust_env = bool(self.config.get("use_system_proxy", False))
+        try:
+            response = session.get(
+                url,
+                headers=self._headers(api_key),
+                timeout=timeout,
+                proxies=self._request_proxies(),
+            )
+        except requests.exceptions.RequestException as exc:
+            raise AIClientError(self._friendly_request_error(exc, "模型列表接口", url, timeout)) from exc
+
+        if response.status_code == 401:
+            raise AIClientError("API 密钥无效，模型列表接口拒绝了认证。")
+        if response.status_code == 403:
+            raise AIClientError("当前 API 密钥无权读取模型列表。")
+        if response.status_code == 404:
+            raise AIClientError("该接口地址未提供 /models 模型列表，请核对接口地址，或继续手动填写模型名称。")
+        self._raise_for_status(response, "模型列表接口")
+
+        data = self._response_json(response, "模型列表接口")
+        raw_models = data.get("data")
+        if raw_models is None:
+            raw_models = data.get("models")
+        if not isinstance(raw_models, list):
+            raise AIClientError("模型列表接口返回格式无法识别，请继续手动填写模型名称。")
+
+        by_id: dict[str, dict[str, str]] = {}
+        for item in raw_models[:5000]:
+            if isinstance(item, str):
+                model_id = item.strip()
+                owner = ""
+            elif isinstance(item, dict):
+                model_id = str(item.get("id") or item.get("name") or "").strip()
+                owner = str(item.get("owned_by") or item.get("owner") or "").strip()
+            else:
+                continue
+            if not model_id or len(model_id) > 300:
+                continue
+            by_id.setdefault(model_id, {"id": model_id, "owned_by": owner[:120]})
+        return sorted(by_id.values(), key=lambda item: item["id"].casefold())
 
     def _call_chat_completions(
         self,

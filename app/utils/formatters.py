@@ -527,6 +527,8 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
         for index, character in enumerate(characters, 1):
             lines.append(f"{index}. {_text(character.get('name'))}（{_text(character.get('role'))}）")
             lines.extend(f"   {line}" for line in _format_character(character)[2:])
+    elif bundle.get("characters_deferred"):
+        lines.append("完整人物资料请在资料库查看。")
     else:
         lines.append("暂无人物资料。")
 
@@ -555,6 +557,9 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
                 f"【{_text(item.get('category'), '未分类')}{name}{certainty}{fictionalized}】：{_text(item.get('content'))}"
                 f"；后续约束：{_text(item.get('future_constraint'))}"
             )
+    elif bundle.get("historical_facts_deferred"):
+        _section(lines, "已落地历史事实")
+        lines.append("完整历史事实请在资料库查看。")
 
     notes = [item for item in as_list(bundle.get("chapter_notes")) if isinstance(item, dict)]
     _section(lines, "章节批注")
@@ -563,6 +568,8 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
             lines.append(
                 f"- 第{_text(item.get('chapter_number'), '?')}章[{_text(item.get('note_type'))}]：{_text(item.get('content'))}"
             )
+    elif bundle.get("chapter_notes_deferred"):
+        lines.append("完整章节批注请在资料库查看。")
     else:
         lines.append("暂无章节批注。")
 
@@ -574,6 +581,8 @@ def format_work_bundle_readable(bundle: dict[str, Any]) -> str:
                 f"第{_text(item.get('first_chapter'), '?')}章：{_text(item.get('content'))}"
                 f"（计划回收：{_text(item.get('planned_resolve_chapter'))}）"
             )
+    elif bundle.get("open_plot_threads_deferred"):
+        lines.append("完整伏笔记录请在资料库查看。")
     else:
         lines.append("暂无未回收伏笔。")
     return "\n".join(lines).strip()
