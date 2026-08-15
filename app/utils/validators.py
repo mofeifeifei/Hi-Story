@@ -168,9 +168,17 @@ def validate_review(data: Any) -> list[str]:
             continue
         if score < 0 or score > 100:
             issues.append(f"{key} 超出 0-100")
-    for key in ["repeat_risk", "problems", "suggestions", "template_hits", "risk_flags"]:
+    for key in ["repeat_risk", "scene_coverage", "problems", "suggestions", "template_hits", "risk_flags"]:
         if not isinstance(data.get(key), list):
             issues.append(f"{key} 必须是数组")
+    for index, item in enumerate(data.get("scene_coverage") or [], 1):
+        if not isinstance(item, dict):
+            issues.append(f"scene_coverage 第 {index} 项必须是对象")
+            continue
+        if str(item.get("status") or "").strip().lower() not in {"complete", "partial", "missing"}:
+            issues.append(f"scene_coverage 第 {index} 项 status 无效")
+        if not str(item.get("evidence") or item.get("missing") or "").strip():
+            issues.append(f"scene_coverage 第 {index} 项缺少 evidence 或 missing")
     for index, item in enumerate(data.get("problems") or [], 1):
         if not isinstance(item, dict):
             issues.append(f"problems 第 {index} 项必须是对象")
@@ -182,7 +190,7 @@ def validate_review(data: Any) -> list[str]:
         if not isinstance(item, dict):
             issues.append(f"suggestions 第 {index} 项必须是对象")
             continue
-        for key in ["target", "action", "keep", "avoid"]:
+        for key in ["target", "action"]:
             if not str(item.get(key) or "").strip():
                 issues.append(f"suggestions 第 {index} 项缺少 {key}")
     return issues

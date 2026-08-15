@@ -55,7 +55,8 @@ class PlannerAgent(BaseAgent):
             f"{history_section}"
             "JSON 字段：book_bible, book_contract, title_candidates, summary, core_selling_points, target_readers, "
             "protagonist, supporting_characters, villains, world_rules, main_goal, first_volume_direction, historical_profile。"
-            "book_contract 是轻量题材契约卡，只写短句，字段包含 genre_core, reader_promise, conflict_engine, chapter_payoff, opening_preference, avoid。"
+            "book_contract 是轻量题材契约卡，只写短句，字段包含 genre_core, reader_promise, conflict_engine, chapter_payoff, "
+            "opening_preference, avoid, language_texture, platform_rhythm, scene_variety, title_direction。"
         )
         parsed = self.complete_json(
             user_prompt,

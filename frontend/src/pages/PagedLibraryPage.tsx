@@ -32,33 +32,48 @@ export function LibraryPage() {
   const deferredSearch = useDeferredValue(search.trim());
   const [page, setPage] = useState(1);
   const [characterScope, setCharacterScope] = useState("valid");
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const pageSize = 50;
   const def = categories[kind];
   const countsQuery = useQuery({ queryKey: ["library-counts", workId], queryFn: () => api<Record<string, number>>(`/api/works/${workId}/library/counts`), enabled: Boolean(workId) });
-  const pageQuery = useQuery({ queryKey: ["library-page", workId, kind, page, deferredSearch, characterScope], queryFn: () => api<PageData>(`/api/works/${workId}/library/${kind}/items?page=${page}&page_size=${pageSize}&q=${encodeURIComponent(deferredSearch)}&scope=${kind === "characters" ? characterScope : "valid"}`), enabled: Boolean(workId), placeholderData: (previous) => previous });
+  const pageQuery = useQuery({ queryKey: ["library-page", workId, kind, page, deferredSearch, characterScope], queryFn: () => api<PageData>(`/api/works/${workId}/library/${kind}/items?page=${page}&page_size=${pageSize}&q=${encodeURIComponent(deferredSearch)}&scope=${kind === "characters" ? characterScope : "valid"}`), enabled: Boolean(workId) });
   const detailQuery = useQuery({ queryKey: ["library-item", workId, kind, selectedId], queryFn: () => api<Item>(`/api/works/${workId}/library/${kind}/items/${selectedId}`), enabled: Boolean(workId && typeof selectedId === "number" && !def.single) });
 
-  useEffect(() => { setPage(1); setSelectedId(null); setDraft({}); }, [kind, deferredSearch, characterScope, workId]);
-  useEffect(() => { if (def.single && pageQuery.data) setDraft(pageQuery.data.items[0] || {}); }, [def.single, pageQuery.data]);
-  useEffect(() => { if (detailQuery.data) setDraft(detailQuery.data); }, [detailQuery.data]);
+  useEffect(() => { setPage(1); setSelectedId(null); setDraft({}); setDirty(false); }, [kind, characterScope, workId]);
+  useEffect(() => { setPage(1); }, [deferredSearch]);
+  useEffect(() => { store.setNavigationGuard(dirty ? () => window.confirm("当前资料有未保存修改。确定离开当前页面吗？") : null); return () => store.setNavigationGuard(null); }, [dirty]);
+  useEffect(() => { if (def.single && pageQuery.data && !dirty) setDraft(pageQuery.data.items[0] || {}); }, [def.single, pageQuery.data, dirty]);
+  useEffect(() => { if (detailQuery.data && Number(detailQuery.data.id || 0) === Number(selectedId) && !dirty) setDraft(detailQuery.data); }, [detailQuery.data, selectedId, dirty]);
+
+  function confirmDiscard() { return !dirty || window.confirm("当前资料尚未保存。确定放弃修改并切换吗？"); }
+  function chooseKind(next: string) { if (next === kind || !confirmDiscard()) return; setDirty(false); setKind(next); }
+  function chooseScope(next: string) { if (next === characterScope || !confirmDiscard()) return; setDirty(false); setCharacterScope(next); }
+  function chooseItem(id: number, item: Item) { if (!confirmDiscard()) return; setDirty(false); if (def.single) setDraft(item); else { setDraft({}); setSelectedId(id); } }
+  function createItem() { if (!confirmDiscard()) return; setDirty(false); setSelectedId("new"); setDraft({}); }
 
   async function refreshCategory() {
     await Promise.all([queryClient.invalidateQueries({ queryKey: ["library-page", workId, kind] }), queryClient.invalidateQueries({ queryKey: ["library-counts", workId] })]);
   }
   async function save() {
-    if (!workId) return;
+    if (!workId || saving || store.task) return;
+    setSaving(true);
     try {
       const data = await api<{ id: number; item?: Item }>(`/api/works/${workId}/library/${kind}/item`, { method: "POST", body: draft });
-      setSelectedId(def.single ? null : data.id); setDraft(data.item || { ...draft, id: data.id });
+      setSelectedId(def.single ? null : data.id); setDraft(data.item || { ...draft, id: data.id }); setDirty(false);
       await refreshCategory(); store.notify("资料已保存。", "success");
     } catch (error) { store.notify((error as Error).message, "danger"); }
+    finally { setSaving(false); }
   }
   async function remove() {
-    if (!workId || !draft.id || def.single || !window.confirm("确定删除当前资料吗？")) return;
+    if (!workId || !draft.id || def.single || deleting || store.task || !window.confirm("确定删除当前资料吗？")) return;
+    setDeleting(true);
     try {
       await api(`/api/works/${workId}/library/${kind}/items/${draft.id}`, { method: "DELETE" });
-      setSelectedId(null); setDraft({}); await refreshCategory(); store.notify("资料已删除。", "success");
+      setSelectedId(null); setDraft({}); setDirty(false); await refreshCategory(); store.notify("资料已删除。", "success");
     } catch (error) { store.notify((error as Error).message, "danger"); }
+    finally { setDeleting(false); }
   }
 
   if (!workId) return <div className="page"><PageHeader title="资料库" /><EmptyState title="先选择一个作品" /></div>;
@@ -66,14 +81,15 @@ export function LibraryPage() {
   const total = pageQuery.data?.total || 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const showEditor = def.single || selectedId === "new" || Boolean(selectedId);
-  return <div className="page"><PageHeader title="资料库" description="分类按需加载，每页最多显示 50 条。" actions={<><button className="btn" disabled={def.single} onClick={() => { setSelectedId("new"); setDraft({}); }}><Plus size={16} />新增{def.label}</button><button className="btn primary" disabled={!showEditor} onClick={save}><Save size={16} />保存当前资料</button></>} />
-    <div className="library-layout"><aside className="library-categories">{Object.entries(categories).map(([key, item]) => <button className={kind === key ? "active" : ""} key={key} onClick={() => setKind(key)}><span>{item.label}</span><strong>{countsQuery.data?.[key] ?? "-"}</strong></button>)}</aside>
-      <aside className="library-list"><div className="rail-search"><div className="search-box"><Search size={16} /><input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`搜索${def.label}`} disabled={def.single} /></div>{kind === "characters" && <select className="input library-scope" value={characterScope} onChange={(event) => setCharacterScope(event.target.value)} aria-label="人物范围"><option value="valid">全部有效人物</option><option value="auto">自动发现人物</option><option value="invalid">异常空记录（{countsQuery.data?.characters_invalid || 0}）</option></select>}</div><div className="library-items">{pageQuery.isLoading ? <p className="list-empty">正在加载...</p> : items.map((item) => { const id = Number(item.id || 0); return <button className={selectedId === id ? "active" : ""} key={id || kind} onClick={() => def.single ? setDraft(item) : setSelectedId(id)}><strong>{def.title(item)}</strong><small>{item.updated_at ? `最近修改：${String(item.updated_at)}` : def.label}</small></button>; })}{!pageQuery.isLoading && !items.length && <p className="list-empty">暂无资料</p>}</div>{totalPages > 1 && <div className="pager"><button className="btn small" disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</button><span>{page} / {totalPages} · 共 {total} 条</span><button className="btn small" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>下一页</button></div>}</aside>
-      <main className="library-editor">{showEditor ? detailQuery.isLoading ? <div className="loading-block">正在读取详情...</div> : <><div className="library-editor-head"><div><h3>{def.label}详情</h3><p>修改后点击保存，变更会立即写入作品数据库。</p></div>{!def.single && Boolean(draft.id) && <button className="btn danger" onClick={remove}><Trash2 size={15} />删除</button>}</div><div className="form-grid">{def.fields.map(([key, label, type]) => <LibraryField key={key} label={label} type={type} value={draft[key]} onChange={(value) => setDraft({ ...draft, [key]: value })} />)}</div></> : <EmptyState title={`选择一条${def.label}资料`} description="左侧列表用于定位，右侧只加载当前资料的完整字段。" />}</main></div>
+  const pending = saving || deleting;
+  return <div className="page"><PageHeader title="资料库" description="分类按需加载，每页最多显示 50 条。" actions={<><button className="btn" disabled={def.single || Boolean(store.task) || saving || deleting} onClick={createItem}><Plus size={16} />新增{def.label}</button><button className="btn primary" disabled={!showEditor || detailQuery.isLoading || Boolean(store.task) || saving || deleting} onClick={save}><Save size={16} />{saving ? "正在保存" : "保存当前资料"}</button></>} />
+    <div className="library-layout"><aside className="library-categories">{Object.entries(categories).map(([key, item]) => <button className={kind === key ? "active" : ""} disabled={pending} key={key} onClick={() => chooseKind(key)}><span>{item.label}</span><strong>{countsQuery.data?.[key] ?? "-"}</strong></button>)}</aside>
+      <aside className="library-list"><div className="rail-search"><div className="search-box"><Search size={16} /><input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`搜索${def.label}`} disabled={def.single || pending} /></div>{kind === "characters" && <select className="input library-scope" value={characterScope} disabled={pending} onChange={(event) => chooseScope(event.target.value)} aria-label="人物范围"><option value="valid">全部有效人物</option><option value="auto">自动发现人物</option><option value="invalid">异常空记录（{countsQuery.data?.characters_invalid || 0}）</option></select>}</div><div className="library-items">{pageQuery.isLoading ? <p className="list-empty">正在加载...</p> : items.map((item) => { const id = Number(item.id || 0); return <button className={selectedId === id ? "active" : ""} disabled={pending} key={id || kind} onClick={() => chooseItem(id, item)}><strong>{def.title(item)}</strong><small>{item.updated_at ? `最近修改：${String(item.updated_at)}` : def.label}</small></button>; })}{!pageQuery.isLoading && !items.length && <p className="list-empty">暂无资料</p>}</div>{totalPages > 1 && <div className="pager"><button className="btn small" disabled={pending || page === 1} onClick={() => setPage(page - 1)}>上一页</button><span>{page} / {totalPages} · 共 {total} 条</span><button className="btn small" disabled={pending || page >= totalPages} onClick={() => setPage(page + 1)}>下一页</button></div>}</aside>
+      <main className="library-editor">{showEditor ? detailQuery.isLoading ? <div className="loading-block">正在读取详情...</div> : <><div className="library-editor-head"><div><h3>{def.label}详情</h3><p>修改后点击保存，变更会立即写入作品数据库。</p></div>{!def.single && Boolean(draft.id) && <button className="btn danger" disabled={Boolean(store.task) || pending} onClick={remove}><Trash2 size={15} />{deleting ? "正在删除" : "删除"}</button>}</div><div className="form-grid">{def.fields.map(([key, label, type]) => <LibraryField key={key} label={label} type={type} value={draft[key]} disabled={pending} onChange={(value) => { setDraft({ ...draft, [key]: value }); setDirty(true); }} />)}</div></> : <EmptyState title={`选择一条${def.label}资料`} description="左侧列表用于定位，右侧只加载当前资料的完整字段。" />}</main></div>
   </div>;
 }
 
-function LibraryField({ label, type, value, onChange }: { label: string; type: FieldType; value: unknown; onChange: (value: unknown) => void }) {
-  if (type === "check") return <label className="check-field"><input type="checkbox" checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />{label}</label>;
-  return <label className={`field ${type === "area" ? "span-all" : ""}`}>{label}{type === "area" ? <textarea rows={4} value={String(value || "")} onChange={(e) => onChange(e.target.value)} /> : <input type={type} value={String(value ?? "")} onChange={(e) => onChange(type === "number" ? Number(e.target.value) : e.target.value)} />}</label>;
+function LibraryField({ label, type, value, disabled = false, onChange }: { label: string; type: FieldType; value: unknown; disabled?: boolean; onChange: (value: unknown) => void }) {
+  if (type === "check") return <label className="check-field"><input type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />{label}</label>;
+  return <label className={`field ${type === "area" ? "span-all" : ""}`}>{label}{type === "area" ? <textarea rows={4} value={String(value || "")} disabled={disabled} onChange={(e) => onChange(e.target.value)} /> : <input type={type} value={String(value ?? "")} disabled={disabled} onChange={(e) => onChange(type === "number" ? Number(e.target.value) : e.target.value)} />}</label>;
 }

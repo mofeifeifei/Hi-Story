@@ -184,6 +184,7 @@ def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> di
         review.setdefault(key, 0)
     review.setdefault("length_problem", "")
     review.setdefault("repeat_risk", [])
+    review["scene_coverage"] = _normalize_scene_coverage(review.get("scene_coverage"))
     review["problems"] = _normalize_review_problems(review.get("problems"))
     review["suggestions"] = _normalize_review_suggestions(review.get("suggestions"))
     review["revision_plan"] = _normalize_revision_plan(review.get("revision_plan"))
@@ -196,6 +197,31 @@ def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> di
     if not isinstance(review["title_candidates"], list):
         review["title_candidates"] = []
     return review
+
+
+def _normalize_scene_coverage(value: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    values = value if isinstance(value, list) else []
+    for index, item in enumerate(values, 1):
+        item = _review_mapping(item)
+        if not item:
+            continue
+        status = str(item.get("status") or "missing").strip().lower()
+        if status not in {"complete", "partial", "missing"}:
+            status = "missing"
+        try:
+            scene_index = max(1, int(item.get("scene_index") or index))
+        except (TypeError, ValueError):
+            scene_index = index
+        normalized.append(
+            {
+                "scene_index": scene_index,
+                "status": status,
+                "evidence": str(item.get("evidence") or "").strip(),
+                "missing": str(item.get("missing") or "").strip(),
+            }
+        )
+    return normalized[:6]
 
 
 def _normalize_review_problems(value: Any) -> list[Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Callable
 
 from app.database.repository import Repository
@@ -834,8 +835,29 @@ class NovelWorkflow:
 
         writer_context = context_for_writer(context)
         report_stage("writing", "正在生成初稿")
+        writer_usage: dict[str, Any] = {}
+        writer_output_incomplete = False
+        writer_continuation_attempted = False
         try:
             draft = self.writer.write_chapter(writer_context)
+            writer_usage = self.client.last_usage("writer")
+            writer_output_incomplete = self._writer_output_incomplete(draft, writer_usage)
+            if writer_output_incomplete:
+                writer_continuation_attempted = True
+                report_stage("writing", "检测到正文截断，正在续写剩余内容")
+                first_usage = writer_usage
+                try:
+                    continuation = self.writer.continue_chapter(writer_context, draft)
+                except (AIClientError, JsonValidationError):
+                    continuation = ""
+                    second_usage = {}
+                else:
+                    second_usage = self.client.last_usage("writer")
+                    writer_usage = self._merge_usage(first_usage, second_usage)
+                if continuation:
+                    separator = "" if str(draft or "").rstrip().endswith(("，", "、", "：", "；", ",", ":", ";")) else "\n\n"
+                    draft = f"{draft.rstrip()}{separator}{continuation.lstrip()}"
+                    writer_output_incomplete = self._writer_output_incomplete(draft, second_usage)
         except (AIClientError, JsonValidationError) as exc:
             self.repo.log_agent_run(
                 work_id=work_id,
@@ -847,7 +869,7 @@ class NovelWorkflow:
                 output="",
                 status="failed",
                 error=str(exc),
-                **self.client.last_usage("writer"),
+                **(writer_usage or self.client.last_usage("writer")),
             )
             raise
         draft = strip_chapter_heading(draft, chapter_number, chapter.get("title"))
@@ -863,14 +885,35 @@ class NovelWorkflow:
                 output="",
                 status="failed",
                 error=str(error),
-                **self.client.last_usage("writer"),
+                **(writer_usage or self.client.last_usage("writer")),
             )
             raise error
         if stop_requested():
             raise RuntimeError("任务已停止：第 {0} 章初稿已返回，但未保存。".format(chapter_number))
-        draft_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, draft)
         draft = self.normalize_output_names(work_id, draft)
         draft_quality = self._manuscript_quality_report("初稿", context, chapter, draft)
+        if not writer_continuation_attempted and self._needs_length_completion(draft_quality):
+            report_stage("writing", "检测到正文篇幅不足，正在补齐缺失场景")
+            first_usage = writer_usage
+            try:
+                continuation = self.writer.complete_short_chapter(writer_context, draft)
+            except (AIClientError, JsonValidationError):
+                continuation = ""
+            else:
+                second_usage = self.client.last_usage("writer")
+                writer_usage = self._merge_usage(first_usage, second_usage)
+            if continuation:
+                separator = "" if draft.rstrip().endswith(("，", "、", "：", "；", ",", ":", ";")) else "\n\n"
+                draft = self.normalize_output_names(
+                    work_id,
+                    f"{draft.rstrip()}{separator}{continuation.lstrip()}",
+                )
+                draft_quality = self._manuscript_quality_report("补写后初稿", context, chapter, draft)
+        draft_repeat_warnings = self._repeated_text_warnings(work_id, chapter_number, draft)
+        if writer_output_incomplete:
+            draft_quality["blockers"] = self._dedupe_texts(
+                [*self._as_list(draft_quality.get("blockers")), "模型输出疑似仍被截断，正文没有完整结束。"]
+            )
         if draft_repeat_warnings:
             draft_quality["blockers"] = self._dedupe_texts(
                 [
@@ -893,7 +936,7 @@ class NovelWorkflow:
             prompt_name="writer_prompt.md",
             input_preview=json_dumps(writer_context),
             output=draft,
-            **self.client.last_usage("writer"),
+            **(writer_usage or self.client.last_usage("writer")),
         )
         if draft_blockers:
             review = self._local_quality_review(draft_quality)
@@ -935,34 +978,39 @@ class NovelWorkflow:
 
         review: dict[str, Any] | None = None
         if do_review:
-            if self._local_review_is_sufficient(draft_quality):
+            report_stage("reviewing", "正在检查承接、因果和人物状态")
+            reviewer_context = context_for_reviewer(context)
+            try:
+                review = self.reviewer.review_chapter(reviewer_context, draft)
+            except (AIClientError, JsonValidationError) as exc:
                 review = self._local_quality_review(draft_quality)
-                review["stage_warning"] = "本地检查已定位明确问题，本次跳过重复 AI 审稿并直接进入修订。"
-            else:
-                report_stage("reviewing", "正在检查承接、因果和人物状态")
-                reviewer_context = context_for_reviewer(context)
-                try:
-                    review = self.reviewer.review_chapter(reviewer_context, draft)
-                except (AIClientError, JsonValidationError) as exc:
-                    review = self._local_quality_review(draft_quality)
-                    review["risk_flags"] = self._dedupe_texts(
-                        [*self._as_list(review.get("risk_flags")), "AI 审稿暂时不可用"]
-                    )
-                    review["stage_warning"] = f"初稿已保存，AI 审稿失败：{exc}"
-                if stop_requested():
-                    raise RuntimeError("任务已停止：第 {0} 章审稿已返回，但未继续修订。".format(chapter_number))
-                review = self.normalize_output_names(work_id, review)
-                self.repo.log_agent_run(
-                    work_id=work_id,
-                    chapter_id=chapter["id"],
-                    agent_name="reviewer",
-                    model=self.client.model_for("reviewer"),
-                    prompt_name="reviewer_prompt.md",
-                    input_preview=json_dumps({"context": reviewer_context, "draft": draft[:3000]}),
-                    output=json_dumps(review),
-                    **self.client.last_usage("reviewer"),
+                review["risk_flags"] = self._dedupe_texts(
+                    [*self._as_list(review.get("risk_flags")), "AI 审稿暂时不可用"]
                 )
+                review["stage_warning"] = f"初稿已保存，AI 审稿失败：{exc}"
+            if stop_requested():
+                raise RuntimeError("任务已停止：第 {0} 章审稿已返回，但未继续修订。".format(chapter_number))
+            review = self.normalize_output_names(work_id, review)
+            self.repo.log_agent_run(
+                work_id=work_id,
+                chapter_id=chapter["id"],
+                agent_name="reviewer",
+                model=self.client.model_for("reviewer"),
+                prompt_name="reviewer_prompt.md",
+                input_preview=json_dumps({"context": reviewer_context, "draft": draft[:3000]}),
+                output=json_dumps(review),
+                **self.client.last_usage("reviewer"),
+            )
             review = self._merge_quality_report_into_review(review, draft_quality)
+            draft_coverage_blockers = self.scene_coverage_blockers(
+                review,
+                len((writer_context.get("story_plan") or {}).get("scene_cards") or []),
+            )
+            if draft_coverage_blockers:
+                draft_quality["blockers"] = self._dedupe_texts(
+                    [*self._as_list(draft_quality.get("blockers")), *draft_coverage_blockers]
+                )
+                review = self._merge_quality_report_into_review(review, draft_quality)
             review["revision_plan"] = self._build_revision_plan(review, draft_quality)
             self.repo.save_review(work_id, chapter["id"], review)
 
@@ -1042,13 +1090,57 @@ class NovelWorkflow:
             if self._revision_degraded_opening(draft_quality, final_quality):
                 final_text = draft
                 final_quality = draft_quality
-            # One generation request gets one comprehensive revision pass. Remaining risks stay
-            # visible as a problem draft instead of triggering more full-chapter model calls.
+            preservation_blockers = self.revision_preservation_blockers(
+                draft,
+                final_text,
+                context.get("chapter_word_target"),
+            )
+            if preservation_blockers:
+                final_quality["blockers"] = self._dedupe_texts(
+                    [*self._as_list(final_quality.get("blockers")), *preservation_blockers]
+                )
+            prior_revision_plan = revision_plan
+            if do_review:
+                context["local_quality_report"] = final_quality
+                reviewer_context = context_for_reviewer(context)
+                try:
+                    post_review = self.reviewer.review_chapter(reviewer_context, final_text)
+                except (AIClientError, JsonValidationError):
+                    post_review = None
+                    final_quality["blockers"] = self._dedupe_texts(
+                        [
+                            *self._as_list(final_quality.get("blockers")),
+                            "修订后语义复审失败，无法确认场景卡和上下文承接是否完整。",
+                        ]
+                    )
+                if post_review is not None:
+                    post_review = self.normalize_output_names(work_id, post_review)
+                    self.repo.log_agent_run(
+                        work_id=work_id,
+                        chapter_id=chapter["id"],
+                        agent_name="reviewer",
+                        model=self.client.model_for("reviewer"),
+                        prompt_name="reviewer_prompt.md",
+                        input_preview=json_dumps({"context": reviewer_context, "draft": final_text[:3000]}),
+                        output=json_dumps(post_review),
+                        **self.client.last_usage("reviewer"),
+                    )
+                    review = self._merge_quality_report_into_review(post_review, final_quality)
+                    coverage_blockers = self.scene_coverage_blockers(
+                        review,
+                        len((writer_context.get("story_plan") or {}).get("scene_cards") or []),
+                    )
+                    if coverage_blockers:
+                        final_quality["blockers"] = self._dedupe_texts(
+                            [*self._as_list(final_quality.get("blockers")), *coverage_blockers]
+                        )
+                        review = self._merge_quality_report_into_review(review, final_quality)
+                    review["revision_plan"] = self._build_revision_plan(review, final_quality)
             if review is not None:
                 review["revision_check"] = self.revision_check(
                     draft_quality,
                     final_quality,
-                    review.get("revision_plan") or [],
+                    prior_revision_plan,
                 )
             report_stage("validating", "正在进行本地质量验收")
             final_blockers = self._automated_acceptance_blockers(final_quality)
@@ -1076,8 +1168,6 @@ class NovelWorkflow:
                 output=final_text,
                 **self.client.last_usage("reviser"),
             )
-            if review is not None:
-                self.repo.save_review(work_id, chapter["id"], review)
         else:
             final_quality = draft_quality
 
@@ -1093,12 +1183,17 @@ class NovelWorkflow:
             handoff="",
             memory_json="",
         )
+        if review is not None:
+            self.repo.save_review(work_id, chapter["id"], review)
 
         memory_card: dict[str, Any] | None = None
         if do_memory:
             report_stage("memory", "正在整理章节记忆")
             refreshed_context = self.build_chapter_context(work_id, chapter_number)
             memory_context = context_for_memory(refreshed_context)
+            saved_chapter = self.repo.get_chapter(work_id, chapter_number)
+            source_revision = int(saved_chapter.get("revision") or 0)
+            source_text_hash = hashlib.sha256(final_text.strip().encode("utf-8")).hexdigest()
             try:
                 memory_card = self.memory.make_memory_card(memory_context, final_text)
             except (AIClientError, JsonValidationError) as exc:
@@ -1121,6 +1216,8 @@ class NovelWorkflow:
             if stop_requested():
                 raise RuntimeError("任务已停止：第 {0} 章记忆卡已返回，但未入库。".format(chapter_number))
             memory_card = self.normalize_output_names(work_id, memory_card)
+            memory_card["source_revision"] = source_revision
+            memory_card["source_text_hash"] = source_text_hash
             memory_title = self._choose_memory_title(chapter, memory_card, context, final_title)
             self.repo.apply_memory_card(
                 work_id=work_id,
@@ -1128,6 +1225,9 @@ class NovelWorkflow:
                 chapter_number=chapter_number,
                 memory=memory_card,
                 title=memory_title,
+                expected_revision=source_revision,
+                expected_text_hash=source_text_hash,
+                prune_intermediate=True,
             )
             self.repo.log_agent_run(
                 work_id=work_id,
@@ -1135,7 +1235,13 @@ class NovelWorkflow:
                 agent_name="memory",
                 model=self.client.model_for("memory"),
                 prompt_name="memory_prompt.md",
-                input_preview=json_dumps({"context": memory_context, "final_text": final_text[:3000]}),
+                input_preview=json_dumps(
+                    {
+                        "chapter_number": chapter_number,
+                        "source_revision": source_revision,
+                        "source_text_hash": source_text_hash,
+                    }
+                ),
                 output=json_dumps(memory_card),
                 **self.client.last_usage("memory"),
             )
@@ -1338,6 +1444,32 @@ class NovelWorkflow:
         return False
 
     @staticmethod
+    def _writer_output_incomplete(text: str, usage: dict[str, Any] | None = None) -> bool:
+        finish_reason = str((usage or {}).get("finish_reason") or "").strip().lower()
+        if any(marker in finish_reason for marker in ("length", "max_output", "incomplete")):
+            return True
+        cleaned = str(text or "").rstrip()
+        return bool(cleaned) and cleaned.endswith(("，", "、", "：", "；", ",", ":", ";", "（", "("))
+
+    @staticmethod
+    def _merge_usage(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+        additive = {
+            "input_chars",
+            "output_chars",
+            "estimated_input_tokens",
+            "estimated_output_tokens",
+            "estimated_total_tokens",
+            "elapsed_seconds",
+        }
+        merged: dict[str, Any] = {}
+        for key in additive:
+            merged[key] = round(float(first.get(key) or 0) + float(second.get(key) or 0), 1)
+            if key != "elapsed_seconds":
+                merged[key] = int(merged[key])
+        merged["finish_reason"] = str(second.get("finish_reason") or first.get("finish_reason") or "")
+        return merged
+
+    @staticmethod
     def _quality_blockers(report: dict[str, Any] | None, *, ignored: list[str] | None = None) -> list[str]:
         ignored_set = {str(item).strip() for item in (ignored or []) if str(item).strip()}
         if not isinstance(report, dict):
@@ -1439,6 +1571,60 @@ class NovelWorkflow:
         }
 
     @staticmethod
+    def _needs_length_completion(report: dict[str, Any] | None) -> bool:
+        if not isinstance(report, dict):
+            return False
+        issues = [
+            str(item or "")
+            for item in [*(report.get("blockers") or []), *(report.get("warnings") or [])]
+        ]
+        return any(item.startswith(("严重字数不足", "字数偏低")) for item in issues)
+
+    @staticmethod
+    def revision_preservation_blockers(
+        before_text: str,
+        after_text: str,
+        word_target: dict[str, Any] | None = None,
+        instruction: str = "",
+    ) -> list[str]:
+        before_length = len("".join(str(before_text or "").split()))
+        after_length = len("".join(str(after_text or "").split()))
+        if not after_length:
+            return ["修订稿为空。"]
+        instruction_text = str(instruction or "")
+        shortening_requested = any(
+            marker in instruction_text
+            for marker in ("压缩", "删减", "缩写", "精简", "减少字数", "缩短篇幅")
+        )
+        blockers: list[str] = []
+        if not shortening_requested and before_length >= 800 and after_length < int(before_length * 0.85):
+            blockers.append(
+                f"修订稿异常缩短：修订前约 {before_length} 字符，修订后约 {after_length} 字符，可能删除了已有场景。"
+            )
+        target = word_target if isinstance(word_target, dict) else {}
+        minimum = target.get("min")
+        if not shortening_requested and target.get("strict") and isinstance(minimum, int) and after_length < minimum:
+            blockers.append(f"修订稿未达到最低篇幅：当前约 {after_length} 字符，建议至少 {minimum}。")
+        return blockers
+
+    @staticmethod
+    def scene_coverage_blockers(review: dict[str, Any] | None, expected_count: int = 0) -> list[str]:
+        if not isinstance(review, dict):
+            return []
+        coverage = [item for item in review.get("scene_coverage") or [] if isinstance(item, dict)]
+        blockers: list[str] = []
+        if expected_count and len(coverage) < expected_count:
+            blockers.append(f"审稿只核对了 {len(coverage)}/{expected_count} 张场景卡。")
+        for item in coverage[:6]:
+            status = str(item.get("status") or "").strip().lower()
+            if status not in {"partial", "missing"}:
+                continue
+            index = int(item.get("scene_index") or 0)
+            detail = str(item.get("missing") or item.get("evidence") or "场景内容没有完整落地").strip()
+            blockers.append(f"第 {index or '?'} 张场景卡{('部分完成' if status == 'partial' else '缺失')}：{detail}")
+        return NovelWorkflow._dedupe_texts(blockers)
+
+    @staticmethod
     def _fatal_quality_blockers(report: dict[str, Any] | None) -> list[str]:
         fatal_markers = (
             "为空",
@@ -1468,7 +1654,12 @@ class NovelWorkflow:
             for item in report.get("warnings") or []
             if any(marker in str(item) for marker in repeated_ending_markers)
         ]
-        return NovelWorkflow._dedupe_texts([*blockers, *repeated_endings])
+        low_length = [
+            str(item)
+            for item in report.get("warnings") or []
+            if str(item).startswith("字数偏低")
+        ]
+        return NovelWorkflow._dedupe_texts([*blockers, *repeated_endings, *low_length])
 
     @staticmethod
     def _merge_quality_report_into_review(review: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
@@ -1604,7 +1795,9 @@ class NovelWorkflow:
             action = str(item.get("action") or "").strip()
             if not action:
                 continue
-            issue_type = NovelWorkflow._revision_issue_type(target + action)
+            issue_type = NovelWorkflow._revision_issue_type(target)
+            if issue_type == "structure":
+                issue_type = NovelWorkflow._revision_issue_type(action)
             paired_problem = problems[index] if index < len(problems) else {}
             paired_type = NovelWorkflow._revision_issue_type(
                 " ".join(
@@ -1637,16 +1830,16 @@ class NovelWorkflow:
 
         plan: list[dict[str, str]] = []
         for issue_type in ("continuity", "narrative", "character"):
-            if issue_type in grouped and len(plan) < 2:
+            if issue_type in grouped and len(plan) < 3:
                 plan.append(grouped[issue_type])
-        if "style" in grouped and len(plan) < 3:
+        if "style" in grouped and len(plan) < 5:
             plan.append(grouped["style"])
-        if "length" in grouped and len(plan) < 3:
+        if "length" in grouped and len(plan) < 5:
             plan.append(grouped["length"])
-        if "ending" in grouped and len(plan) < 3:
+        if "ending" in grouped and len(plan) < 5:
             plan.append(grouped["ending"])
         for issue_type in priority:
-            if issue_type in grouped and grouped[issue_type] not in plan and len(plan) < 3:
+            if issue_type in grouped and grouped[issue_type] not in plan and len(plan) < 5:
                 plan.append(grouped[issue_type])
         for item in plan:
             item["priority"] = "主修"
@@ -1670,7 +1863,7 @@ class NovelWorkflow:
         ]
         improved: list[str] = []
         remaining: list[str] = []
-        for item in revision_plan[:3]:
+        for item in revision_plan[:5]:
             if not isinstance(item, dict):
                 continue
             issue_type = str(item.get("type") or "structure")

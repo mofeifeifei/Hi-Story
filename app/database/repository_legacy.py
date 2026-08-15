@@ -258,9 +258,12 @@ class Repository:
         )
         has_outline = bool(str(work.get("full_outline") or "").strip() or str(work.get("volume_outline") or "").strip())
         planned_count = len(chapters)
-        draft_count = sum(1 for chapter in chapters if chapter.get("status") in {"draft", "final", "memory"})
+        draft_count = sum(1 for chapter in chapters if chapter.get("status") in {"draft", "problem_draft", "final", "memory"})
         final_count = sum(1 for chapter in chapters if chapter.get("status") in {"final", "memory"})
         memory_count = sum(1 for chapter in chapters if chapter.get("status") == "memory")
+        next_draft = next((chapter for chapter in chapters if chapter.get("status") not in {"draft", "problem_draft", "final", "memory"}), None)
+        next_final = next((chapter for chapter in chapters if chapter.get("status") not in {"final", "memory"}), None)
+        next_memory = next((chapter for chapter in chapters if chapter.get("status") != "memory"), None)
         if not str(work.get("idea") or "").strip():
             stage = "project_setup"
             next_action = "填写并保存一句话创意。"
@@ -273,15 +276,15 @@ class Repository:
         elif planned_count == 0:
             stage = "chapter_planning"
             next_action = "生成章节细纲。"
-        elif draft_count < planned_count:
+        elif next_draft is not None:
             stage = "chapter_execution"
-            next_action = f"继续生成第 {draft_count + 1} 章正文。"
-        elif final_count < planned_count:
+            next_action = f"继续生成第 {int(next_draft['chapter_number'])} 章正文。"
+        elif next_final is not None:
             stage = "finalize"
-            next_action = f"确认并保存第 {final_count + 1} 章最终稿。"
-        elif memory_count < planned_count:
+            next_action = f"确认并保存第 {int(next_final['chapter_number'])} 章最终稿。"
+        elif next_memory is not None:
             stage = "memory"
-            next_action = f"为第 {memory_count + 1} 章生成记忆并入库。"
+            next_action = f"为第 {int(next_memory['chapter_number'])} 章生成记忆并入库。"
         else:
             stage = "completed"
             next_action = "当前规划章节已完成，可以继续规划后续章节或导出。"
@@ -370,6 +373,52 @@ class Repository:
             conn.commit()
         finally:
             conn.close()
+        self._sync_index_title(work_id, title, updated_at, rename_folder=True)
+
+    def update_work_settings(
+        self,
+        work_id: int,
+        inputs: dict[str, Any],
+        contract: dict[str, Any],
+        *,
+        expected_updated_at: str = "",
+    ) -> None:
+        """Atomically update only fields exposed by the web settings page."""
+        updated_at = now_text()
+        db_path = self._db_path_for_work(work_id)
+        title = str(inputs.get("title") or "").strip() or "未命名文章"
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT settings_locked, updated_at FROM works WHERE id = ?",
+                (work_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("作品不存在，无法保存设定。")
+            if int(row["settings_locked"] or 0):
+                raise ValueError("项目设置已锁定，请先解锁后再保存。")
+            current_updated_at = str(row["updated_at"] or "")
+            if expected_updated_at and current_updated_at and expected_updated_at != current_updated_at:
+                raise ValueError("作品设定已被其他操作更新，请重新载入后再保存。")
+            conn.execute(
+                """
+                UPDATE works
+                SET title = ?, idea = ?, genre = ?, platform = ?, target_words = ?,
+                    style = ?, book_contract_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    title,
+                    str(inputs.get("idea") or "").strip(),
+                    str(inputs.get("genre") or "").strip(),
+                    str(inputs.get("platform") or "").strip(),
+                    int(inputs.get("target_words") or 0),
+                    str(inputs.get("style") or "").strip(),
+                    json_dumps(self._normalize_book_contract(contract)),
+                    updated_at,
+                    work_id,
+                ),
+            )
+            conn.commit()
         self._sync_index_title(work_id, title, updated_at, rename_folder=True)
 
     def set_work_settings_locked(self, work_id: int, locked: bool) -> None:
@@ -603,9 +652,11 @@ class Repository:
             rows = conn.execute(
                 """
                 SELECT id, chapter_number, title,
+                       COALESCE(CAST(json_extract(outline_json, '$.volume_number') AS INTEGER), 1) AS volume_number,
                        CASE
                          WHEN status = 'problem_draft' THEN 'problem_draft'
-                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != ''
+                              AND COALESCE(memory_revision, -1) = COALESCE(revision, 0) THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
@@ -624,10 +675,33 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(
                 """
-                SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
+                SELECT id, chapter_number, title, outline, outline_json, scene_cards_json, ending_hook, updated_at,
                        CASE
                          WHEN status = 'problem_draft' THEN 'problem_draft'
-                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != ''
+                              AND COALESCE(memory_revision, -1) = COALESCE(revision, 0) THEN 'memory'
+                         WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
+                         WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
+                         ELSE status
+                       END AS status
+                FROM chapters
+                WHERE work_id = ?
+                ORDER BY chapter_number
+                """,
+                (work_id,),
+            ).fetchall()
+        return [self._localize_chapter_protocol_text(dict(row)) for row in rows]
+
+    def list_chapter_outline_summaries(self, work_id: int) -> list[dict[str, Any]]:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, chapter_number, title, outline, ending_hook, updated_at,
+                       COALESCE(CAST(json_extract(outline_json, '$.volume_number') AS INTEGER), 1) AS volume_number,
+                       CASE
+                         WHEN status = 'problem_draft' THEN 'problem_draft'
+                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != ''
+                              AND COALESCE(memory_revision, -1) = COALESCE(revision, 0) THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
@@ -647,7 +721,8 @@ class Repository:
                 SELECT chapter_number, title, outline, outline_json, scene_cards_json, ending_hook,
                        CASE
                          WHEN status = 'problem_draft' THEN 'problem_draft'
-                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != '' THEN 'memory'
+                         WHEN memory_json IS NOT NULL AND TRIM(memory_json) != ''
+                              AND COALESCE(memory_revision, -1) = COALESCE(revision, 0) THEN 'memory'
                          WHEN final_text IS NOT NULL AND TRIM(final_text) != '' THEN 'final'
                          WHEN draft IS NOT NULL AND TRIM(draft) != '' THEN 'draft'
                          ELSE status
@@ -1489,9 +1564,9 @@ class Repository:
                 INSERT INTO reviews (
                   chapter_id, continuity_score, character_score, emotion_score,
                   rhythm_score, foreshadow_score, payoff_score, hook_score,
-                  historical_score, repeat_risk, problems, suggestions, template_hits,
+                  historical_score, repeat_risk, scene_coverage, problems, suggestions, template_hits,
                   risk_flags, revision_plan, revision_check, reviewed_text_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chapter_id,
@@ -1504,6 +1579,7 @@ class Repository:
                     int(review.get("hook_score") or 0),
                     int(review.get("historical_score") or 0),
                     json_dumps(review.get("repeat_risk", [])),
+                    json_dumps(review.get("scene_coverage", [])),
                     json_dumps(review.get("problems", [])),
                     json_dumps(review.get("suggestions", [])),
                     json_dumps(review.get("template_hits", [])),
@@ -1533,6 +1609,7 @@ class Repository:
         review = dict(row)
         for key, fallback in [
             ("repeat_risk", []),
+            ("scene_coverage", []),
             ("problems", []),
             ("suggestions", []),
             ("template_hits", []),
@@ -1546,6 +1623,20 @@ class Repository:
                 parsed = fallback
             review[key] = parsed if isinstance(parsed, type(fallback)) else fallback
         return normalize_review(review)
+
+    def update_review_check(self, work_id: int, review_id: int, revision_check: dict[str, Any]) -> bool:
+        with connect(self._db_path_for_work(work_id)) as conn:
+            cur = conn.execute(
+                """
+                UPDATE reviews
+                SET revision_check = ?
+                WHERE id = ?
+                  AND chapter_id IN (SELECT id FROM chapters WHERE work_id = ?)
+                """,
+                (json_dumps(revision_check), review_id, work_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
 
     def get_review_for_current_text(self, work_id: int, chapter_id: int) -> dict[str, Any] | None:
         review = self.get_latest_review(work_id, chapter_id)
@@ -1658,6 +1749,9 @@ class Repository:
         chapter_number: int,
         memory: dict[str, Any],
         title: str | None = None,
+        expected_revision: int | None = None,
+        expected_text_hash: str = "",
+        prune_intermediate: bool = False,
     ) -> None:
         memory = self.normalize_official_names(work_id, memory)
         title = self.normalize_official_names(work_id, title)
@@ -1667,13 +1761,34 @@ class Repository:
         handoff = memory.get("handoff", {})
         handoff_text = json_dumps(handoff)
         with connect(self._db_path_for_work(work_id)) as conn:
+            chapter = conn.execute(
+                """
+                SELECT chapter_number, final_text, revision
+                FROM chapters
+                WHERE id = ? AND work_id = ?
+                """,
+                (chapter_id, work_id),
+            ).fetchone()
+            if chapter is None:
+                raise ValueError("章节不存在，无法保存记忆。")
+            current_revision = int(chapter["revision"] or 0)
+            current_text = str(chapter["final_text"] or "")
+            if int(chapter["chapter_number"] or 0) != int(chapter_number):
+                raise ValueError("章节编号已经变化，请重新载入后再生成记忆。")
+            if expected_revision is not None and current_revision != int(expected_revision):
+                raise ValueError("正文在记忆生成期间已经更新，本次记忆未入库，请重新生成。")
+            if expected_text_hash:
+                current_hash = hashlib.sha256(current_text.strip().encode("utf-8")).hexdigest()
+                if current_hash != expected_text_hash:
+                    raise ValueError("正文在记忆生成期间已经变化，本次记忆未入库，请重新生成。")
+
             self._clear_chapter_memory_side_effects(conn, work_id, chapter_number, timestamp)
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE chapters
                 SET title = COALESCE(NULLIF(?, ''), title), summary = ?, ending_hook = ?, handoff = ?, memory_json = ?,
                     memory_revision = revision, status = 'memory', updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND work_id = ? AND revision = ?
                 """,
                 (
                     _memory_text(title),
@@ -1683,8 +1798,12 @@ class Repository:
                     json_dumps(memory),
                     timestamp,
                     chapter_id,
+                    work_id,
+                    current_revision,
                 ),
             )
+            if cur.rowcount != 1:
+                raise ValueError("正文在记忆写入前已经更新，本次记忆未入库，请重新生成。")
 
             for item in as_list(memory.get("character_state_updates")):
                 if not isinstance(item, dict):
@@ -1907,6 +2026,30 @@ class Repository:
                     timestamp=timestamp,
                 )
 
+            if prune_intermediate:
+                conn.execute(
+                    "UPDATE chapters SET draft = '' WHERE id = ? AND work_id = ?",
+                    (chapter_id, work_id),
+                )
+                conn.execute("DELETE FROM reviews WHERE chapter_id = ?", (chapter_id,))
+                conn.execute("DELETE FROM versions WHERE chapter_id = ?", (chapter_id,))
+                conn.execute(
+                    """
+                    UPDATE agent_runs
+                    SET input_preview = '', output = ''
+                    WHERE chapter_id = ?
+                    """,
+                    (chapter_id,),
+                )
+                conn.execute(
+                    """
+                    UPDATE task_runs
+                    SET input_json = '', output_preview = ''
+                    WHERE chapter_id = ? AND kind IN ('chapter', 'revise')
+                    """,
+                    (chapter_id,),
+                )
+
             conn.commit()
 
     def official_name_map(self, work_id: int) -> dict[str, str]:
@@ -1948,6 +2091,7 @@ class Repository:
         estimated_output_tokens: int = 0,
         estimated_total_tokens: int = 0,
         elapsed_seconds: float = 0,
+        finish_reason: str = "",
     ) -> int:
         if work_id is None:
             return 0
@@ -1963,8 +2107,8 @@ class Repository:
                   work_id, chapter_id, agent_name, model, prompt_name,
                   input_preview, output, input_chars, output_chars,
                   estimated_input_tokens, estimated_output_tokens, estimated_total_tokens,
-                  elapsed_seconds, status, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  elapsed_seconds, finish_reason, status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     work_id,
@@ -1980,6 +2124,7 @@ class Repository:
                     estimated_output_tokens,
                     estimated_total_tokens,
                     float(elapsed_seconds or 0),
+                    str(finish_reason or "")[:80],
                     status,
                     error,
                     now_text(),
@@ -2109,7 +2254,8 @@ class Repository:
                    task_runs.output_preview, task_runs.error, task_runs.created_at,
                    task_runs.updated_at, task_runs.finished_at,
                    0 AS estimated_input_tokens, 0 AS estimated_output_tokens,
-                   0 AS estimated_total_tokens, 0 AS elapsed_seconds
+                   0 AS estimated_total_tokens, 0 AS elapsed_seconds,
+                   '' AS finish_reason, 0 AS input_chars, 0 AS output_chars
             FROM task_runs
             LEFT JOIN chapters ON chapters.id = task_runs.chapter_id
             WHERE task_runs.work_id = ?
@@ -2121,7 +2267,8 @@ class Repository:
                    '' AS output_preview, agent_runs.error, agent_runs.created_at,
                    agent_runs.created_at AS updated_at, '' AS finished_at,
                    agent_runs.estimated_input_tokens, agent_runs.estimated_output_tokens,
-                   agent_runs.estimated_total_tokens, agent_runs.elapsed_seconds
+                   agent_runs.estimated_total_tokens, agent_runs.elapsed_seconds,
+                   agent_runs.finish_reason, agent_runs.input_chars, agent_runs.output_chars
             FROM agent_runs
             LEFT JOIN chapters ON chapters.id = agent_runs.chapter_id
             WHERE agent_runs.work_id = ?
@@ -2145,8 +2292,18 @@ class Repository:
                 filtered + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
+        now = datetime.now()
+        items = []
+        for row in rows:
+            item = dict(row)
+            if item.get("record_type") == "task":
+                end_time = "" if item.get("status") in {"running", "cancelling"} else (
+                    item.get("finished_at") or item.get("updated_at") or ""
+                )
+                item["elapsed_seconds"] = _duration_seconds(item.get("created_at"), end_time, now=now)
+            items.append(item)
         return {
-            "items": [dict(row) for row in rows],
+            "items": items,
             "page": page,
             "page_size": page_size,
             "total": total,
@@ -2184,11 +2341,7 @@ class Repository:
             conn.commit()
 
     def _connect_index(self) -> sqlite3.Connection:
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.index_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        return connect(self.index_path)
 
     def _migrate_legacy_db_if_needed(self) -> None:
         if not self.legacy_db_path.exists():
@@ -2836,6 +2989,9 @@ class Repository:
             "opening_preference",
             "avoid",
             "language_texture",
+            "platform_rhythm",
+            "scene_variety",
+            "title_direction",
         ]
         normalized = {field: str(contract.get(field) or "").strip() for field in fields}
         legacy_fallbacks = {

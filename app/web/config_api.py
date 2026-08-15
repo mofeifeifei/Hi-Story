@@ -7,6 +7,7 @@ ALLOWED_CONFIG_KEYS = {
     "provider",
     "model_provider",
     "base_url",
+    "balance_url",
     "wire_api",
     "requires_openai_auth",
     "api_key",
@@ -23,6 +24,7 @@ ALLOWED_CONFIG_KEYS = {
     "timeout",
     "max_retries",
     "max_output_tokens",
+    "long_text_max_output_tokens",
     "use_system_proxy",
     "proxy_url",
     "mock_mode",
@@ -38,6 +40,17 @@ MODEL_DISCOVERY_KEYS = {
     "api_key",
     "timeout",
     "max_retries",
+    "use_system_proxy",
+    "proxy_url",
+}
+BALANCE_QUERY_KEYS = {
+    "provider",
+    "model_provider",
+    "base_url",
+    "balance_url",
+    "requires_openai_auth",
+    "api_key",
+    "timeout",
     "use_system_proxy",
     "proxy_url",
 }
@@ -58,6 +71,7 @@ def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dic
     config["provider"] = _text(config.get("provider"), "OpenAI")
     config["model_provider"] = _text(config.get("model_provider"), config["provider"])
     config["base_url"] = _text(config.get("base_url"))
+    config["balance_url"] = _text(config.get("balance_url"))
     config["wire_api"] = _choice(config.get("wire_api"), {"responses", "chat_completions"}, "chat_completions")
     config["requires_openai_auth"] = _bool(config.get("requires_openai_auth", True), "requires_openai_auth")
     config["api_key"] = _text(config.get("api_key"))
@@ -83,6 +97,13 @@ def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dic
     config["timeout"] = _integer(config.get("timeout"), "timeout", 10, 1800, 300)
     config["max_retries"] = _integer(config.get("max_retries"), "max_retries", 0, 5, 2)
     config["max_output_tokens"] = _integer(config.get("max_output_tokens"), "max_output_tokens", 512, 64000, 12000)
+    config["long_text_max_output_tokens"] = _integer(
+        config.get("long_text_max_output_tokens"),
+        "long_text_max_output_tokens",
+        4096,
+        64000,
+        24000,
+    )
     config["use_system_proxy"] = _bool(config.get("use_system_proxy", False), "use_system_proxy")
     config["proxy_url"] = _text(config.get("proxy_url"))
     config["mock_mode"] = _bool(config.get("mock_mode", True), "mock_mode")
@@ -94,6 +115,7 @@ def public_config(config: dict[str, Any]) -> dict[str, Any]:
         "provider": config.get("provider", ""),
         "model_provider": config.get("model_provider", ""),
         "base_url": config.get("base_url", ""),
+        "balance_url": config.get("balance_url", ""),
         "wire_api": config.get("wire_api", ""),
         "requires_openai_auth": bool(config.get("requires_openai_auth", True)),
         "api_key": API_KEY_MASK if config.get("api_key") else "",
@@ -111,6 +133,7 @@ def public_config(config: dict[str, Any]) -> dict[str, Any]:
         "timeout": int(config.get("timeout", 300) or 300),
         "max_retries": int(config.get("max_retries", 2) or 0),
         "max_output_tokens": int(config.get("max_output_tokens", 12000) or 12000),
+        "long_text_max_output_tokens": int(config.get("long_text_max_output_tokens", 24000) or 24000),
         "use_system_proxy": bool(config.get("use_system_proxy", False)),
         "proxy_url": config.get("proxy_url", ""),
     }
@@ -121,6 +144,17 @@ def model_discovery_config(current: dict[str, Any], body: dict[str, Any]) -> dic
     if unknown:
         raise ValueError("模型查询包含不支持的字段：" + "、".join(unknown))
     patch = {key: body[key] for key in MODEL_DISCOVERY_KEYS if key in body}
+    supplied_key = _text(patch.get("api_key"))
+    if not supplied_key or supplied_key == API_KEY_MASK:
+        patch.pop("api_key", None)
+    return sanitize_config_update(current, patch)
+
+
+def balance_query_config(current: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    unknown = sorted(set(body) - BALANCE_QUERY_KEYS)
+    if unknown:
+        raise ValueError("余额查询包含不支持的字段：" + "、".join(unknown))
+    patch = {key: body[key] for key in BALANCE_QUERY_KEYS if key in body}
     supplied_key = _text(patch.get("api_key"))
     if not supplied_key or supplied_key == API_KEY_MASK:
         patch.pop("api_key", None)

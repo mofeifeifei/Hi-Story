@@ -44,6 +44,10 @@ def compact_genre_contract(contract: Any) -> dict[str, str]:
         "chapter_payoff",
         "opening_preference",
         "avoid",
+        "language_texture",
+        "platform_rhythm",
+        "scene_variety",
+        "title_direction",
     ]
     result = {
         field: str(contract.get(field) or "").strip()
@@ -59,6 +63,10 @@ def compact_genre_contract(contract: Any) -> dict[str, str]:
         "chapter_payoff": result.get("chapter_payoff", ""),
         "opening_preference": result.get("opening_preference", ""),
         "avoid": result.get("avoid", ""),
+        "language_texture": result.get("language_texture", ""),
+        "platform_rhythm": result.get("platform_rhythm", ""),
+        "scene_variety": result.get("scene_variety", ""),
+        "title_direction": result.get("title_direction", ""),
         "usage_rule": "每章只按这些短字段保持题材味道，不展开成长篇专项提示词。",
     }
 
@@ -218,6 +226,14 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
     if not isinstance(memory_pack, dict):
         memory_pack = {}
     task_sheet = _compact_task_sheet(chapter.get("outline_detail"))
+    scene_handoff = _compact_scene_handoff(context)
+    if scene_handoff:
+        if scene_handoff.get("last_event"):
+            task_sheet["previous_anchor"] = scene_handoff["last_event"]
+        runtime_debt = scene_handoff.get("unfinished_action") or scene_handoff.get("first_event")
+        if runtime_debt:
+            task_sheet["continuity_debt"] = runtime_debt
+        task_sheet["continuity_source"] = "上一章已保存正文与接力棒"
     result: dict[str, Any] = {
         "work": _pick(context.get("work"), _work_keys(task)),
         "chapter": _pick(
@@ -235,9 +251,9 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
         ),
         "chapter_word_target": context.get("chapter_word_target", {}),
         "minimal_memory_pack": memory_pack,
-        "scene_handoff": _compact_scene_handoff(context),
+        "scene_handoff": scene_handoff,
         "chapter_notes": _compact_notes(context.get("chapter_notes")),
-        "history_specialist": _history_marker(context.get("history_specialist")),
+        "history_specialist": _history_specialist_for_task(context.get("history_specialist"), task),
         "style_guard": _compact_style_guard(context),
         "recent_title_ledger": context.get("recent_title_ledger", []),
     }
@@ -262,7 +278,40 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "recent_style_signatures": _recent_style_signatures(context),
             }
         )
+    elif task == "reviser":
+        result.pop("recent_title_ledger", None)
+    elif task == "memory":
+        result["minimal_memory_pack"] = _memory_agent_pack(memory_pack)
+        for key in ["book_bible", "genre_contract", "chapter_word_target", "style_guard"]:
+            result.pop(key, None)
     return _drop_empty(result)
+
+
+def _memory_agent_pack(memory_pack: dict[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "character_states": [
+                _pick(item, ["name", "current_goal", "current_state", "relationship_stage"])
+                for item in memory_pack.get("character_states", [])
+                if isinstance(item, dict)
+            ],
+            "related_foreshadows": [
+                _pick(item, ["content", "status", "planned_resolve_chapter"])
+                for item in memory_pack.get("related_foreshadows", [])
+                if isinstance(item, dict)
+            ],
+            "world_constraints": [
+                _pick(item, ["rule_name", "limitations", "forbidden_changes"])
+                for item in memory_pack.get("world_constraints", [])
+                if isinstance(item, dict)
+            ],
+            "historical_constraints": [
+                _pick(item, ["content", "future_constraint"])
+                for item in memory_pack.get("historical_constraints", [])
+                if isinstance(item, dict)
+            ],
+        }
+    )
 
 
 def _work_keys(task: str) -> list[str]:
@@ -277,6 +326,8 @@ def _work_keys(task: str) -> list[str]:
     ]
     if task == "memory":
         return ["title", "genre", "summary"]
+    if task == "reviser":
+        return ["title", "genre", "platform", "style"]
     return keys
 
 
@@ -293,6 +344,9 @@ def _compact_book_bible(value: Any) -> dict[str, Any]:
             "long_form_engine",
             "must_keep_rules",
             "forbidden_drift",
+            "voice_profile",
+            "paragraph_rhythm",
+            "dialogue_principles",
         ],
     )
 
@@ -302,10 +356,17 @@ def _compact_task_sheet(value: Any) -> dict[str, Any]:
     task = _pick(
         detail,
         [
-            "outline",
             "sequence_id",
             "sequence_goal",
             "sequence_position",
+            "continuity_debt",
+            "previous_anchor",
+            "opening_mode",
+            "opening_subject",
+            "opening_trigger",
+            "forbidden_opening",
+            "allowed_shift",
+            "shift_reason",
             "chapter_goal",
             "conflict",
             "main_scene",
@@ -316,10 +377,17 @@ def _compact_task_sheet(value: Any) -> dict[str, Any]:
             "new_question_out",
             "emotional_turn",
             "cut_reason",
+            "ending_external_anchor",
+            "next_opening_action",
+            "next_continuity_debt",
             "forbidden",
         ],
     )
     task["scene_cards"] = _compact_scene_cards(detail.get("scene_cards"))
+    if not task["scene_cards"]:
+        outline = str(detail.get("outline") or "").strip()
+        if outline:
+            task["outline"] = outline
     return _drop_empty(task)
 
 
@@ -518,7 +586,7 @@ def _history_specialist_for_task(value: Any, task: str) -> dict[str, Any]:
             "enabled": True,
             "trigger_rule": value.get("trigger_rule", ""),
             "profile": _selected_history_profile(value.get("profile")),
-            "facts": _latest_items(value.get("facts") or [], fact_limit),
+            "facts": [] if task in {"writer", "reviewer", "reviser", "memory"} else _latest_items(value.get("facts") or [], fact_limit),
         }
     )
 

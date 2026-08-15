@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Eye, EyeOff, KeyRound, LoaderCircle, RefreshCw, Save, Wifi } from "lucide-react";
+import { Check, CheckCircle2, ChevronDown, CircleDollarSign, Eye, EyeOff, KeyRound, LoaderCircle, RefreshCw, Save, Wifi } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/PageHeader";
@@ -8,6 +8,7 @@ import { useAppStore } from "../stores/appStore";
 
 const agents = [["planner","策划模型"],["writer","正文写作模型"],["reviewer","审稿模型"],["reviser","修订模型"],["memory","记忆模型"]] as const;
 type AvailableModel = { id: string; owned_by?: string };
+type BalanceResult = { supported: boolean; available?: boolean; balances?: Array<{ currency?: string; total?: string; granted?: string; topped_up?: string; used?: string }>; checked_at?: string; message?: string };
 
 export function SettingsPage() {
   const store = useAppStore();
@@ -20,16 +21,22 @@ export function SettingsPage() {
   const [message, setMessage] = useState("");
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [balance, setBalance] = useState<BalanceResult | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (!query.data) return;
+    if (!query.data || dirty) return;
     const configured = String(query.data.api_key || "") === "********";
     const models = (query.data.agent_models as Record<string, string>) || {};
     setForm({ ...query.data, api_key: undefined });
     setNewKey(""); setKeyConfigured(configured);
-    setSingleModel(agents.every(([key]) => !models[key] || models[key] === query.data?.default_model));
+    setSingleModel(agents.every(([key]) => !models[key] || models[key] === query.data?.default_model) && (!query.data.review_model || query.data.review_model === query.data.default_model));
   }, [query.data]);
-  function set(key: string, value: unknown) { setForm((current) => ({ ...current, [key]: value })); }
+  useEffect(() => { store.setNavigationGuard(dirty ? () => window.confirm("模型设置有未保存修改。确定离开当前页面吗？") : null); return () => store.setNavigationGuard(null); }, [dirty]);
+  function set(key: string, value: unknown) { setForm((current) => ({ ...current, [key]: value })); if (["provider", "model_provider", "base_url", "balance_url"].includes(key)) setBalance(null); setDirty(true); }
   function setAgent(key: string, value: string) { set("agent_models", { ...((form.agent_models as Record<string, string>) || {}), [key]: value }); }
   async function fetchModels() {
     setModelsLoading(true);
@@ -60,40 +67,91 @@ export function SettingsPage() {
       setModelsLoading(false);
     }
   }
+  async function fetchBalance() {
+    if (balanceLoading) return;
+    setBalanceLoading(true);
+    setMessage("");
+    try {
+      const body: Record<string, unknown> = {
+        provider: form.provider,
+        model_provider: form.model_provider,
+        base_url: form.base_url,
+        balance_url: form.balance_url,
+        requires_openai_auth: form.requires_openai_auth,
+        timeout: form.timeout,
+        use_system_proxy: form.use_system_proxy,
+        proxy_url: form.proxy_url,
+      };
+      if (newKey.trim()) body.api_key = newKey.trim();
+      const result = await api<BalanceResult>("/api/config/balance", { method: "POST", body });
+      setBalance(result);
+      const text = result.supported ? "账户余额已更新。" : result.message || "当前服务商不支持余额查询。";
+      setMessage(text);
+      store.notify(text, result.supported ? "success" : "warning");
+    } catch (error) {
+      const text = (error as Error).message;
+      setBalance(null);
+      setMessage(text);
+      store.notify(text, "danger");
+    } finally {
+      setBalanceLoading(false);
+    }
+  }
   async function save(test = false) {
+    if (store.task) {
+      const text = `“${store.task.title}”仍在运行，请等待任务结束或先停止任务。`;
+      setMessage(text);
+      store.notify(text, "warning");
+      return;
+    }
+    if (saving || testing) return;
+    setSaving(true);
+    if (test) setTesting(true);
     try {
       const mainModel = String(form.default_model || "").trim();
       const body: Record<string, unknown> = { ...form, review_model: singleModel ? mainModel : form.review_model, agent_models: singleModel ? Object.fromEntries(agents.map(([key]) => [key, mainModel])) : form.agent_models || {} };
       delete body.api_key;
       if (newKey.trim()) body.api_key = newKey.trim();
       const data = await api<Record<string, unknown>>("/api/config", { method: "PUT", body });
-      setForm({ ...data, api_key: undefined }); setKeyConfigured(String(data.api_key || "") === "********"); setNewKey("");
+      setDirty(false); setForm({ ...data, api_key: undefined }); setKeyConfigured(String(data.api_key || "") === "********"); setNewKey("");
       if (test) { const result = await api<{ message?: string }>("/api/config/test", { method: "POST" }); setMessage(result.message || "连接测试完成。"); }
       else setMessage("设置已保存，下次调用模型时生效。");
       store.notify(test ? "接口连接测试完成。" : "模型设置已保存。", "success");
     } catch (error) { setMessage((error as Error).message); store.notify((error as Error).message, "danger"); }
+    finally { setSaving(false); if (test) setTesting(false); }
   }
   if (query.isLoading) return <div className="page"><PageHeader title="设置" /><div className="loading-block">正在读取设置...</div></div>;
   if (query.isError) return <div className="page"><PageHeader title="设置" /><EmptyState title="设置读取失败" /></div>;
-  return <div className="page"><PageHeader title="模型与服务设置" description="配置保存在本机，旧密钥不会发送到浏览器。" actions={<><button className="btn" onClick={() => save(true)}><Wifi size={16} />保存并测试</button><button className="btn primary" onClick={() => save()}><Save size={16} />保存设置</button></>} />
+  const reasoningSupported = ["openai", "tokenflux"].some((name) => `${String(form.provider || "")} ${String(form.model_provider || "")}`.toLowerCase().includes(name));
+  return <div className="page"><PageHeader title="模型与服务设置" description="配置保存在本机，旧密钥不会发送到浏览器。" actions={<><button className="btn" disabled={Boolean(store.task) || saving || testing} title={store.task ? "请等待当前 AI 任务结束" : "保存设置并测试模型连接"} onClick={() => save(true)}>{testing ? <LoaderCircle className="spin" size={16} /> : <Wifi size={16} />}{testing ? "正在测试" : "保存并测试"}</button><button className="btn primary" disabled={Boolean(store.task) || saving || testing} onClick={() => save()}><Save size={16} />{saving && !testing ? "正在保存" : "保存设置"}</button></>} />
     <main className="settings-page"><div className="content-width">
       <section className="form-section"><h3 className="section-title">接口</h3><div className="form-grid">
         <Field label="服务商" value={form.provider} onChange={(v) => set("provider", v)} /><Field label="接口地址" value={form.base_url} onChange={(v) => set("base_url", v)} />
         <SelectField label="接口协议" value={form.wire_api || "chat_completions"} options={[["chat_completions","对话补全接口"],["responses","响应接口"]]} onChange={(v) => set("wire_api", v)} /><ModelField label="主模型" value={form.default_model} models={availableModels} loading={modelsLoading} onChange={(v) => set("default_model", v)} onFetch={fetchModels} />
-        <label className="field span-all">API 密钥<span className={`key-state ${keyConfigured ? "configured" : ""}`}><KeyRound size={13} />{keyConfigured ? "已配置，留空将保留原密钥" : "尚未配置"}</span><div className="input-with-action"><input type={showKey ? "text" : "password"} value={newKey} placeholder={keyConfigured ? "输入新密钥才会替换原密钥" : "输入 API 密钥"} autoComplete="new-password" onChange={(event) => setNewKey(event.target.value)} /><button className="icon-button" type="button" title={showKey ? "隐藏新密钥" : "显示新密钥"} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
-      </div><div className="settings-toggles"><label className="check-field"><input type="checkbox" checked={Boolean(form.mock_mode)} onChange={(e) => set("mock_mode", e.target.checked)} />使用本地模拟模式</label><label className="check-field"><input type="checkbox" checked={singleModel} onChange={(e) => setSingleModel(e.target.checked)} />所有智能体使用主模型</label></div></section>
+        <label className="field span-all">API 密钥<span className={`key-state ${keyConfigured ? "configured" : ""}`}><KeyRound size={13} />{keyConfigured ? "已配置，留空将保留原密钥" : "尚未配置"}</span><div className="input-with-action"><input type={showKey ? "text" : "password"} value={newKey} placeholder={keyConfigured ? "输入新密钥才会替换原密钥" : "输入 API 密钥"} autoComplete="new-password" onChange={(event) => { setNewKey(event.target.value); setDirty(true); setBalance(null); }} /><button className="icon-button" type="button" title={showKey ? "隐藏新密钥" : "显示新密钥"} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
+      </div><div className="balance-actions"><button className="btn" type="button" disabled={balanceLoading} onClick={fetchBalance}>{balanceLoading ? <LoaderCircle className="spin" size={16} /> : <CircleDollarSign size={16} />}{balanceLoading ? "正在查询" : "查询余额"}</button>{balance?.supported && <div className="balance-result">{(balance.balances || []).map((item, index) => <span key={`${item.currency || "currency"}-${index}`}><strong>{formatBalance(item.total, item.currency)}</strong><small>{balance.available === false ? "当前不可用" : "可用余额"}</small></span>)}{balance.checked_at && <time>{balance.checked_at}</time>}</div>}{balance && !balance.supported && <p className="balance-unsupported">{balance.message}</p>}</div><div className="settings-toggles"><label className="check-field"><input type="checkbox" checked={Boolean(form.mock_mode)} onChange={(e) => set("mock_mode", e.target.checked)} />使用本地模拟模式</label><label className="check-field"><input type="checkbox" checked={singleModel} onChange={(e) => { setSingleModel(e.target.checked); setDirty(true); }} />所有智能体跟随主模型</label></div>{singleModel && <p className="effective-model">当前策划、写作、审稿、修订和记忆实际使用：<strong>{String(form.default_model || "未设置")}</strong></p>}</section>
       <section className="form-section"><h3 className="section-title">生成参数</h3><div className="form-grid three">
-        <Field label="请求超时（秒）" type="number" value={form.timeout} onChange={(v) => set("timeout", Number(v))} /><Field label="最大重试次数" type="number" value={form.max_retries} onChange={(v) => set("max_retries", Number(v))} /><Field label="最大输出令牌" type="number" value={form.max_output_tokens} onChange={(v) => set("max_output_tokens", Number(v))} />
-        <SelectField label="推理强度" value={form.model_reasoning_effort || ""} options={[["","自动，由模型决定"],["low","低"],["medium","中"],["high","高"],["xhigh","极高"]]} onChange={(v) => set("model_reasoning_effort", v)} /><Field label="上下文窗口" type="number" value={form.model_context_window} onChange={(v) => set("model_context_window", Number(v))} /><Field label="自动压缩阈值" type="number" value={form.model_auto_compact_token_limit} onChange={(v) => set("model_auto_compact_token_limit", Number(v))} />
+        <Field label="请求超时（秒）" type="number" value={form.timeout} onChange={(v) => set("timeout", Number(v))} /><Field label="最大重试次数" type="number" value={form.max_retries} onChange={(v) => set("max_retries", Number(v))} /><Field label="普通任务输出上限" type="number" value={form.max_output_tokens} onChange={(v) => set("max_output_tokens", Number(v))} /><Field label="正文与修订输出上限" type="number" value={form.long_text_max_output_tokens} onChange={(v) => set("long_text_max_output_tokens", Number(v))} />
+        <SelectField label={reasoningSupported ? "推理强度" : "推理强度（当前服务商不支持）"} value={reasoningSupported ? form.model_reasoning_effort || "" : ""} disabled={!reasoningSupported} options={[["","自动，由模型决定"],["low","低"],["medium","中"],["high","高"],["xhigh","极高"]]} onChange={(v) => set("model_reasoning_effort", v)} /><Field label="上下文窗口" type="number" value={form.model_context_window} onChange={(v) => set("model_context_window", Number(v))} /><Field label="自动压缩阈值" type="number" value={form.model_auto_compact_token_limit} onChange={(v) => set("model_auto_compact_token_limit", Number(v))} />
       </div></section>
       <details className="settings-advanced"><summary>高级模型与网络设置</summary><div className="form-section"><div className="form-grid three">
-        <Field label="独立审稿模型" value={form.review_model} list="available-models" disabled={singleModel} onChange={(v) => set("review_model", v)} />{agents.map(([key,label]) => <Field key={key} label={label} value={(form.agent_models as Record<string,string>)?.[key]} list="available-models" disabled={singleModel} onChange={(v) => setAgent(key, v)} />)}<Field label="温度" type="number" value={form.temperature} onChange={(v) => set("temperature", Number(v))} /><Field label="手动代理地址" value={form.proxy_url} onChange={(v) => set("proxy_url", v)} />
+        <ModelField label="独立审稿模型" value={singleModel ? form.default_model : form.review_model} models={availableModels} disabled={singleModel} onChange={(v) => set("review_model", v)} />{agents.map(([key,label]) => <ModelField key={key} label={label} value={singleModel ? form.default_model : (form.agent_models as Record<string,string>)?.[key]} models={availableModels} disabled={singleModel} onChange={(v) => setAgent(key, v)} />)}<Field label="温度" type="number" value={form.temperature} onChange={(v) => set("temperature", Number(v))} /><Field label="手动代理地址" value={form.proxy_url} onChange={(v) => set("proxy_url", v)} /><Field label="余额查询地址（可选）" value={form.balance_url} onChange={(v) => { set("balance_url", v); setBalance(null); }} />
       </div><div className="settings-toggles"><label className="check-field"><input type="checkbox" checked={Boolean(form.disable_response_storage)} onChange={(e) => set("disable_response_storage", e.target.checked)} />关闭服务端响应存储</label><label className="check-field"><input type="checkbox" checked={Boolean(form.use_system_proxy)} onChange={(e) => set("use_system_proxy", e.target.checked)} />使用系统代理</label></div></div></details>
       {message && <p className="settings-message"><CheckCircle2 size={16} />{message}</p>}
     </div></main>
   </div>;
 }
 
-function Field({ label, value, onChange, type = "text", disabled = false, list }: { label: string; value: unknown; onChange: (value: string) => void; type?: string; disabled?: boolean; list?: string }) { return <label className="field">{label}<input type={type} list={list} value={String(value ?? "")} disabled={disabled} onChange={(e) => onChange(e.target.value)} /></label>; }
-function SelectField({ label, value, options, onChange }: { label: string; value: unknown; options: Array<[string,string]>; onChange: (value: string) => void }) { return <label className="field">{label}<select value={String(value ?? "")} onChange={(e) => onChange(e.target.value)}>{options.map(([key,text]) => <option key={key} value={key}>{text}</option>)}</select></label>; }
-function ModelField({ label, value, models, loading, onChange, onFetch }: { label: string; value: unknown; models: AvailableModel[]; loading: boolean; onChange: (value: string) => void; onFetch: () => void }) { return <label className="field">{label}<div className="model-picker"><input list="available-models" value={String(value ?? "")} placeholder="可手动填写或获取后选择" onChange={(e) => onChange(e.target.value)} /><button className="btn model-fetch-button" type="button" disabled={loading} onClick={onFetch}>{loading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}{loading ? "正在获取" : "获取可用模型"}</button></div><datalist id="available-models">{models.map((model) => <option key={model.id} value={model.id}>{model.owned_by || model.id}</option>)}</datalist></label>; }
+function Field({ label, value, onChange, type = "text", disabled = false }: { label: string; value: unknown; onChange: (value: string) => void; type?: string; disabled?: boolean }) { return <label className="field">{label}<input type={type} value={String(value ?? "")} disabled={disabled} onChange={(e) => onChange(e.target.value)} /></label>; }
+function SelectField({ label, value, options, onChange, disabled = false }: { label: string; value: unknown; options: Array<[string,string]>; onChange: (value: string) => void; disabled?: boolean }) { return <label className="field">{label}<select value={String(value ?? "")} disabled={disabled} onChange={(e) => onChange(e.target.value)}>{options.map(([key,text]) => <option key={key} value={key}>{text}</option>)}</select></label>; }
+function formatBalance(value?: string, currency?: string) { const amount = Number(value); const code = String(currency || "").toUpperCase(); if (!Number.isFinite(amount)) return `${value || "--"}${code ? ` ${code}` : ""}`; if (["CNY", "USD", "EUR", "JPY", "GBP"].includes(code)) return new Intl.NumberFormat("zh-CN", { style: "currency", currency: code, minimumFractionDigits: 2 }).format(amount); return `${amount.toFixed(2)}${code ? ` ${code}` : ""}`; }
+function ModelField({ label, value, models, loading = false, disabled = false, onChange, onFetch }: { label: string; value: unknown; models: AvailableModel[]; loading?: boolean; disabled?: boolean; onChange: (value: string) => void; onFetch?: () => Promise<void> | void }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const selected = String(value ?? "");
+  const normalizedSearch = search.trim().toLowerCase();
+  const filtered = normalizedSearch ? models.filter((model) => `${model.id} ${model.owned_by || ""}`.toLowerCase().includes(normalizedSearch)) : models;
+  function choose(model: AvailableModel) { onChange(model.id); setSearch(""); setOpen(false); }
+  async function fetchAndOpen() { if (!onFetch) return; await onFetch(); setSearch(""); setOpen(true); }
+  return <div className={`field model-field ${disabled ? "disabled" : ""}`}><span>{label}</span><div className="model-picker" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}><div className="model-combobox"><input value={selected} disabled={disabled} placeholder="可手动填写或获取后选择" aria-expanded={open} aria-haspopup="listbox" onFocus={() => { setSearch(""); setOpen(true); }} onChange={(event) => { onChange(event.target.value); setSearch(event.target.value); setOpen(true); }} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }} /><button className="model-toggle" type="button" disabled={disabled} title="展开全部可用模型" aria-label="展开全部可用模型" onClick={() => { setSearch(""); setOpen((current) => !current); }}><ChevronDown size={16} /></button>{open && !disabled && <div className="model-options" role="listbox">{filtered.length ? filtered.map((model) => <button className={`model-option ${model.id === selected ? "selected" : ""}`} type="button" role="option" aria-selected={model.id === selected} key={model.id} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(model)}><span><strong>{model.id}</strong><small>{model.owned_by || "模型服务商未标注"}</small></span>{model.id === selected && <Check size={15} />}</button>) : <p>{models.length ? "没有匹配的模型" : "请先获取可用模型，也可以直接输入模型名称"}</p>}</div>}</div>{onFetch && <button className="btn model-fetch-button" type="button" disabled={loading} onClick={fetchAndOpen}>{loading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}{loading ? "正在获取" : "获取可用模型"}</button>}</div></div>;
+}

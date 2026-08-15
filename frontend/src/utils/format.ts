@@ -59,7 +59,7 @@ const fieldLabels: Record<string, string> = {
   updated_at: "更新时间", duration_seconds: "用时（秒）", kind: "任务类型", stage: "执行阶段",
   model: "模型", chapter_number: "章节", estimated_input_tokens: "输入令牌估算",
   estimated_output_tokens: "输出令牌估算", estimated_total_tokens: "令牌总量估算", elapsed_seconds: "模型用时（秒）",
-  input_chars: "输入字符数", output_chars: "输出字符数", message: "说明", volume_number: "所属卷",
+  input_chars: "输入字符数", output_chars: "输出字符数", finish_reason: "结束原因", message: "说明", volume_number: "所属卷",
   min_chapters: "最少章节", target_chapters: "目标章节", soft_max_chapters: "软上限",
   hard_max_chapters: "硬上限", exit_condition: "退出条件", required_milestones: "必经里程碑",
   record_type: "记录类型", input_json: "输入摘要", revision_check: "修订检查",

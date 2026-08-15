@@ -36,7 +36,10 @@ class AIClient:
         self.config = config or load_config()
         self._session: Any | None = None
         self._last_usage_by_agent: dict[str, dict[str, Any]] = {}
+        self._last_call_by_agent: dict[str, dict[str, Any]] = {}
+        self._last_response_meta_by_agent: dict[str, dict[str, Any]] = {}
         self._closed = False
+        self._deadline: float | None = None
 
     def model_for(self, agent_name: str) -> str:
         agent_models = self.config.get("agent_models", {})
@@ -52,6 +55,7 @@ class AIClient:
         *,
         json_mode: bool = False,
         mock_hint: dict[str, Any] | None = None,
+        output_attempts: int = 1,
     ) -> str:
         if self._closed:
             raise AIClientError("AI 请求已取消。")
@@ -59,13 +63,18 @@ class AIClient:
         input_chars = len(system_prompt) + len(user_prompt)
         input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
         started = time.perf_counter()
+        self._last_response_meta_by_agent.pop(agent_name, None)
         if self.config.get("mock_mode", True):
             output = self._mock_response(agent_name, user_prompt, json_mode=json_mode, hint=mock_hint or {})
+            self._last_response_meta_by_agent[agent_name] = {"finish_reason": "stop"}
             self._record_usage(agent_name, input_chars, output, input_tokens, started)
             if not str(output or "").strip():
+                self._record_failed_call(agent_name, input_chars, input_tokens, started, "模型返回空内容")
                 raise AIClientError(f"{agent_name} 模型返回空内容，请重试。")
+            self._record_successful_call(agent_name)
             return output
         if self.config.get("requires_openai_auth", True) and not api_key:
+            self._record_failed_call(agent_name, input_chars, input_tokens, started, "缺少 API Key")
             raise AIClientError("缺少 API Key。请在工作台的“设置”页填写，或重新开启 mock 模式。")
 
         wire_api = str(self.config.get("wire_api", "chat_completions")).lower()
@@ -78,26 +87,93 @@ class AIClient:
             input_chars,
         )
         try:
-            if wire_api == "responses":
-                output = self._call_responses_api(
-                    agent_name=agent_name,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    api_key=api_key,
-                    json_mode=json_mode,
-                )
-            else:
-                output = self._call_chat_completions(
-                    agent_name=agent_name,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    api_key=api_key,
-                    json_mode=json_mode,
-                )
+            output = ""
+            output_attempts = max(1, min(2, int(output_attempts or 1)))
+            truncated = False
+            attempt_metas: list[dict[str, Any]] = []
+            base_output_budget = self._effective_max_output_tokens(agent_name)
+            for output_attempt in range(output_attempts):
+                self._last_response_meta_by_agent.pop(agent_name, None)
+                output_budget = base_output_budget
+                if output_attempt > 0 and truncated and base_output_budget > 0:
+                    output_budget = max(
+                        base_output_budget,
+                        min(64_000, max(base_output_budget + 8_000, ceil(base_output_budget * 1.5))),
+                    )
+                if wire_api == "responses":
+                    output = self._call_responses_api(
+                        agent_name=agent_name,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        api_key=api_key,
+                        json_mode=json_mode,
+                        max_output_tokens=output_budget,
+                    )
+                else:
+                    output = self._call_chat_completions(
+                        agent_name=agent_name,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        api_key=api_key,
+                        json_mode=json_mode,
+                        max_output_tokens=output_budget,
+                    )
+                attempt_meta = dict(self._last_response_meta_by_agent.get(agent_name, {}))
+                attempt_meta["max_output_tokens"] = output_budget
+                attempt_metas.append(attempt_meta)
+                finish_reason = str(
+                    attempt_meta.get("finish_reason") or ""
+                ).lower()
+                truncated = finish_reason in {"length", "max_tokens", "max_output_tokens"}
+                if str(output or "").strip() and not truncated:
+                    break
+                if output_attempt + 1 < output_attempts:
+                    logger.warning(
+                        "AI returned %s output agent=%s; retrying once",
+                        "truncated" if truncated else "empty",
+                        agent_name,
+                    )
+            if attempt_metas:
+                final_meta = attempt_metas[-1]
+                self._last_response_meta_by_agent[agent_name] = {
+                    **final_meta,
+                    "input_tokens": sum(int(item.get("input_tokens") or 0) for item in attempt_metas),
+                    "output_tokens": sum(int(item.get("output_tokens") or 0) for item in attempt_metas),
+                    "attempts": len(attempt_metas),
+                }
             self._record_usage(agent_name, input_chars, output, input_tokens, started)
+            agent_label = {
+                "planner": "策划",
+                "writer": "写作",
+                "reviewer": "审稿",
+                "reviser": "修订",
+                "memory": "记忆",
+            }.get(agent_name, agent_name)
+            if truncated:
+                retry_note = "程序已自动重试一次；" if output_attempts > 1 else ""
+                effective_budget = int(
+                    self._last_response_meta_by_agent.get(agent_name, {}).get("max_output_tokens")
+                    or base_output_budget
+                    or 0
+                )
+                budget_note = f"本次有效上限为 {effective_budget} Token。" if effective_budget else ""
+                reasoning_note = (
+                    "请提高最大输出令牌，或降低模型推理强度。"
+                    if self._supports_reasoning()
+                    else "当前接口不支持由程序调节推理强度，请改用支持更大完整输出的模型。"
+                )
+                raise AIClientError(
+                    f"{agent_label}模型输出达到 Token 上限，有效内容未完整返回。"
+                    f"{retry_note}{budget_note}{reasoning_note}"
+                )
             if not str(output or "").strip():
-                raise AIClientError(f"{agent_name} 模型返回空内容，请重试。")
+                attempt_label = "连续两次" if output_attempts > 1 else ""
+                raise AIClientError(f"{agent_label}模型{attempt_label}返回空内容，请稍后重试或更换模型。")
+            self._record_successful_call(agent_name)
             return output
+        except Exception as exc:
+            self._record_failed_call(agent_name, input_chars, input_tokens, started, str(exc))
+            raise
         finally:
             logger.info(
                 "AI request end agent=%s elapsed=%.1fs",
@@ -107,6 +183,15 @@ class AIClient:
 
     def last_usage(self, agent_name: str) -> dict[str, Any]:
         return dict(self._last_usage_by_agent.get(agent_name, {}))
+
+    def last_call(self, agent_name: str) -> dict[str, Any]:
+        return dict(self._last_call_by_agent.get(agent_name, {}))
+
+    def set_deadline(self, seconds: int | float) -> None:
+        self._deadline = time.monotonic() + max(1.0, float(seconds))
+
+    def clear_deadline(self) -> None:
+        self._deadline = None
 
     def close(self) -> None:
         self._closed = True
@@ -127,14 +212,48 @@ class AIClient:
         started: float,
     ) -> None:
         output_chars = len(output or "")
-        output_tokens = estimate_tokens(output or "")
+        response_meta = self._last_response_meta_by_agent.get(agent_name, {})
+        server_input_tokens = int(response_meta.get("input_tokens") or 0)
+        server_output_tokens = int(response_meta.get("output_tokens") or 0)
+        output_tokens = server_output_tokens or estimate_tokens(output or "")
         self._last_usage_by_agent[agent_name] = {
             "input_chars": input_chars,
             "output_chars": output_chars,
-            "estimated_input_tokens": input_tokens,
+            "estimated_input_tokens": server_input_tokens or input_tokens,
             "estimated_output_tokens": output_tokens,
-            "estimated_total_tokens": input_tokens + output_tokens,
+            "estimated_total_tokens": (server_input_tokens or input_tokens) + output_tokens,
             "elapsed_seconds": round(time.perf_counter() - started, 1),
+            "finish_reason": str(response_meta.get("finish_reason") or ""),
+        }
+
+    def _record_successful_call(self, agent_name: str) -> None:
+        self._last_call_by_agent[agent_name] = {
+            **self.last_usage(agent_name),
+            "status": "ok",
+            "error": "",
+        }
+
+    def _record_failed_call(
+        self,
+        agent_name: str,
+        input_chars: int,
+        input_tokens: int,
+        started: float,
+        error: str,
+    ) -> None:
+        elapsed = round(time.perf_counter() - started, 1)
+        usage = self.last_usage(agent_name)
+        response_meta = self._last_response_meta_by_agent.get(agent_name, {})
+        self._last_call_by_agent[agent_name] = {
+            "input_chars": input_chars,
+            "output_chars": int(usage.get("output_chars") or 0),
+            "estimated_input_tokens": int(usage.get("estimated_input_tokens") or input_tokens),
+            "estimated_output_tokens": int(usage.get("estimated_output_tokens") or 0),
+            "estimated_total_tokens": int(usage.get("estimated_total_tokens") or input_tokens),
+            "elapsed_seconds": elapsed,
+            "finish_reason": str(response_meta.get("finish_reason") or usage.get("finish_reason") or "error"),
+            "status": "failed",
+            "error": str(error or "模型调用失败")[:1000],
         }
 
     def test_connection(self) -> dict[str, Any]:
@@ -222,6 +341,140 @@ class AIClient:
             by_id.setdefault(model_id, {"id": model_id, "owned_by": owner[:120]})
         return sorted(by_id.values(), key=lambda item: item["id"].casefold())
 
+    def get_balance(self) -> dict[str, Any]:
+        try:
+            import requests
+        except ImportError as exc:
+            raise AIClientError("缺少 requests，请先运行 pip install -r requirements.txt") from exc
+
+        base_url = str(self.config.get("base_url", "") or "").strip().rstrip("/")
+        parsed_base = urlparse(base_url)
+        if parsed_base.scheme not in {"http", "https"} or not parsed_base.netloc:
+            raise AIClientError("接口地址无效，请填写完整的 http:// 或 https:// 地址。")
+        api_key = str(
+            self.config.get("api_key")
+            or os.getenv("NOVEL_AI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        )
+        if self.config.get("requires_openai_auth", True) and not api_key:
+            raise AIClientError("尚未配置 API 密钥，无法查询余额。")
+
+        urls: list[str] = []
+        custom_url = str(self.config.get("balance_url", "") or "").strip()
+        if custom_url:
+            parsed_custom = urlparse(custom_url)
+            if parsed_custom.scheme not in {"http", "https"} or parsed_custom.netloc != parsed_base.netloc:
+                raise AIClientError("余额查询地址必须是完整的 http:// 或 https:// 地址，并且与模型接口使用同一域名。")
+            urls.append(custom_url.rstrip("/"))
+        root_url = base_url[:-3] if base_url.lower().endswith("/v1") else base_url
+        urls.extend(
+            [
+                f"{base_url}/user/balance",
+                f"{root_url}/user/balance",
+                f"{base_url}/dashboard/billing/credit_grants",
+            ]
+        )
+        urls = list(dict.fromkeys(urls))
+        timeout = min(30, max(5, int(self.config.get("timeout", 300) or 300)))
+        session = self._requests_session(requests)
+        session.trust_env = bool(self.config.get("use_system_proxy", False))
+        unsupported: list[str] = []
+        for url in urls:
+            try:
+                response = session.get(
+                    url,
+                    headers=self._headers(api_key),
+                    timeout=timeout,
+                    proxies=self._request_proxies(),
+                )
+            except requests.exceptions.RequestException as exc:
+                if custom_url and url == custom_url.rstrip("/"):
+                    raise AIClientError(self._friendly_request_error(exc, "余额查询接口", url, timeout)) from exc
+                unsupported.append(url)
+                continue
+            if response.status_code == 404:
+                unsupported.append(url)
+                continue
+            if response.status_code == 401:
+                raise AIClientError("API 密钥无效，余额查询接口拒绝了认证。")
+            if response.status_code == 403:
+                raise AIClientError("当前 API 密钥无权查询账户余额。")
+            self._raise_for_status(response, "余额查询接口")
+            data = self._response_json(response, "余额查询接口")
+            normalized = self._normalize_balance(data, url)
+            if normalized is not None:
+                return normalized
+            if custom_url and url == custom_url.rstrip("/"):
+                raise AIClientError("自定义余额接口返回成功，但程序没有找到余额字段。")
+            unsupported.append(url)
+        return {
+            "supported": False,
+            "balances": [],
+            "message": "当前服务商没有提供可由模型 API Key 读取的余额接口，可在高级设置中填写同域的余额查询地址。",
+        }
+
+    @staticmethod
+    def _normalize_balance(data: dict[str, Any], source_url: str) -> dict[str, Any] | None:
+        payload = data.get("data") if isinstance(data.get("data"), dict) else data
+        balance_infos = payload.get("balance_infos")
+        if isinstance(balance_infos, list):
+            balances = []
+            for item in balance_infos:
+                if not isinstance(item, dict):
+                    continue
+                total = item.get("total_balance")
+                if total in (None, ""):
+                    continue
+                balances.append(
+                    {
+                        "currency": str(item.get("currency") or "").upper(),
+                        "total": str(total),
+                        "granted": str(item.get("granted_balance") or ""),
+                        "topped_up": str(item.get("topped_up_balance") or ""),
+                    }
+                )
+            if balances:
+                return {
+                    "supported": True,
+                    "available": bool(payload.get("is_available", True)),
+                    "balances": balances,
+                    "source": source_url,
+                    "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        total_available = payload.get("total_available")
+        if total_available not in (None, ""):
+            return {
+                "supported": True,
+                "available": float(total_available) > 0,
+                "balances": [
+                    {
+                        "currency": str(payload.get("currency") or "USD").upper(),
+                        "total": str(total_available),
+                        "granted": str(payload.get("total_granted") or ""),
+                        "used": str(payload.get("total_used") or ""),
+                    }
+                ],
+                "source": source_url,
+                "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        for key in ["available_balance", "remaining_balance", "total_balance", "balance"]:
+            value = payload.get(key)
+            if isinstance(value, (int, float, str)) and str(value).strip():
+                return {
+                    "supported": True,
+                    "available": True,
+                    "balances": [
+                        {
+                            "currency": str(payload.get("currency") or "").upper(),
+                            "total": str(value),
+                        }
+                    ],
+                    "source": source_url,
+                    "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        return None
+
     def _call_chat_completions(
         self,
         *,
@@ -230,6 +483,7 @@ class AIClient:
         user_prompt: str,
         api_key: str,
         json_mode: bool,
+        max_output_tokens: int = 0,
     ) -> str:
         try:
             import requests
@@ -248,14 +502,17 @@ class AIClient:
             ],
             "temperature": float(self.config.get("temperature", 0.8)),
         }
-        max_output_tokens = int(self.config.get("max_output_tokens", 0) or 0)
         if max_output_tokens > 0:
             payload["max_tokens"] = max_output_tokens
+        reasoning_effort = str(self.config.get("model_reasoning_effort", "") or "").strip()
+        if reasoning_effort and self._supports_reasoning():
+            payload["reasoning_effort"] = reasoning_effort
         if json_mode and self._supports_response_format():
             payload["response_format"] = {"type": "json_object"}
 
         response = self._post_json(
             requests_module=requests,
+            agent_name=agent_name,
             url=f"{base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -268,7 +525,14 @@ class AIClient:
 
         data = self._response_json(response, "AI Chat Completions API")
         try:
-            return data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            self._last_response_meta_by_agent[agent_name] = {
+                "finish_reason": str(choice.get("finish_reason") or ""),
+                "input_tokens": int(usage.get("prompt_tokens") or 0),
+                "output_tokens": int(usage.get("completion_tokens") or 0),
+            }
+            return choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise AIClientError(f"AI Chat Completions API 返回格式异常，程序没有找到正文内容。返回片段：{str(data)[:500]}") from exc
 
@@ -280,6 +544,7 @@ class AIClient:
         user_prompt: str,
         api_key: str,
         json_mode: bool,
+        max_output_tokens: int = 0,
     ) -> str:
         try:
             import requests
@@ -302,12 +567,12 @@ class AIClient:
             payload["store"] = False
         if json_mode and self._supports_response_format():
             payload["text"] = {"format": {"type": "json_object"}}
-        max_output_tokens = int(self.config.get("max_output_tokens", 0) or 0)
         if max_output_tokens > 0:
             payload["max_output_tokens"] = max_output_tokens
 
         response = self._post_json(
             requests_module=requests,
+            agent_name=agent_name,
             url=f"{base_url}/responses",
             headers=self._headers(api_key),
             payload=payload,
@@ -316,6 +581,13 @@ class AIClient:
         self._raise_for_status(response, "AI Responses API")
 
         data = self._response_json(response, "AI Responses API")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        incomplete = data.get("incomplete_details") if isinstance(data.get("incomplete_details"), dict) else {}
+        self._last_response_meta_by_agent[agent_name] = {
+            "finish_reason": str(incomplete.get("reason") or data.get("status") or ""),
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+        }
         text = self._extract_response_text(data)
         if text is None:
             raise AIClientError(f"AI Responses API 返回格式异常，程序没有找到正文内容。返回片段：{str(data)[:500]}")
@@ -325,13 +597,15 @@ class AIClient:
         self,
         *,
         requests_module: Any,
+        agent_name: str,
         url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
         api_name: str,
     ) -> Any:
-        timeout = int(self.config.get("timeout", 300) or 300)
-        max_retries = max(0, int(self.config.get("max_retries", 2) or 0))
+        read_timeout = self._read_timeout(agent_name)
+        connect_timeout = min(10, read_timeout)
+        max_retries = min(5, max(0, int(self.config.get("max_retries", 2) or 0)))
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             if self._closed:
@@ -343,7 +617,7 @@ class AIClient:
                     url,
                     headers=headers,
                     json=payload,
-                    timeout=timeout,
+                    timeout=(connect_timeout, self._remaining_timeout(read_timeout)),
                     proxies=self._request_proxies(),
                 )
                 if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
@@ -362,6 +636,8 @@ class AIClient:
                 return response
             except requests_module.exceptions.RequestException as exc:
                 last_error = exc
+                if isinstance(exc, requests_module.exceptions.ReadTimeout):
+                    break
                 if attempt >= max_retries:
                     break
                 delay = self._retry_delay(attempt, None)
@@ -374,7 +650,30 @@ class AIClient:
                     exc,
                 )
                 self._interruptible_sleep(delay)
-        raise AIClientError(self._friendly_request_error(last_error, api_name, url, timeout))
+        raise AIClientError(self._friendly_request_error(last_error, api_name, url, read_timeout))
+
+    def _read_timeout(self, agent_name: str) -> int:
+        configured = max(10, int(self.config.get("timeout", 300) or 300))
+        if agent_name == "reviser":
+            return min(configured, 300)
+        if agent_name == "reviewer":
+            return min(configured, 120)
+        return configured
+
+    def _effective_max_output_tokens(self, agent_name: str) -> int:
+        configured = max(0, int(self.config.get("max_output_tokens", 0) or 0))
+        if agent_name not in {"writer", "reviser", "memory"}:
+            return configured
+        long_text_budget = max(4_096, int(self.config.get("long_text_max_output_tokens", 24_000) or 24_000))
+        return max(configured, long_text_budget)
+
+    def _remaining_timeout(self, requested: int) -> float:
+        if self._deadline is None:
+            return float(requested)
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 1:
+            raise AIClientError("修订任务已达到总时限，已停止继续调用模型。")
+        return max(1.0, min(float(requested), remaining))
 
     def _interruptible_sleep(self, delay: float) -> None:
         deadline = time.monotonic() + max(0.0, delay)
@@ -441,7 +740,12 @@ class AIClient:
         elif response.status_code == 408:
             message = "服务端等待超时"
         elif response.status_code == 429:
-            message = "请求过于频繁或额度不足"
+            if "concurrency limit" in lower_body or "concurrent" in lower_body:
+                message = "账号并发请求数已满，这与账户余额无关；请等待当前生成任务结束后重试"
+            elif "insufficient" in lower_body or "quota" in lower_body or "balance" in lower_body:
+                message = "账户额度或余额不足"
+            else:
+                message = "请求频率超过服务商限制，请稍后重试"
         elif response.status_code >= 500:
             message = "服务端或中转网关异常"
         else:
@@ -970,11 +1274,28 @@ class AIClient:
         ]
         historical_enabled = bool(hint.get("historical_enabled"))
         problems = [
-            "核心规则需要在后续章节继续保持限制，不能让主角无代价解决问题。",
-            "主角与重要同伴的互信还应保持递进，不宜推进过快。",
+            {
+                "type": "narrative",
+                "severity": "medium",
+                "evidence": "核心规则需要在后续章节继续保持限制。",
+                "why_it_matters": "主角无代价解决问题会削弱长期冲突。",
+            },
+            {
+                "type": "character",
+                "severity": "low",
+                "evidence": "主角与重要同伴的互信仍处于递进阶段。",
+                "why_it_matters": "关系推进过快会削弱人物选择的可信度。",
+            },
         ]
         if historical_hits:
-            problems.append("本章存在疑似现代词或后世概念误入，需要按历史设定卡逐条替换。")
+            problems.append(
+                {
+                    "type": "history",
+                    "severity": "medium",
+                    "evidence": "本章存在疑似现代词或后世概念误入。",
+                    "why_it_matters": "时代违和会破坏历史题材可信度。",
+                }
+            )
         return {
             "continuity_score": 86,
             "character_score": 88,
@@ -986,10 +1307,30 @@ class AIClient:
             "historical_score": 62 if historical_hits else (90 if historical_enabled else 0),
             "readability_score": 82,
             "repeat_risk": hint.get("repeat_risk", []),
+            "scene_coverage": [
+                {
+                    "scene_index": index,
+                    "status": "complete",
+                    "evidence": str(card.get("scene_goal") or "场景已完成"),
+                    "missing": "",
+                }
+                for index, card in enumerate(hint.get("scene_cards") or [], 1)
+                if isinstance(card, dict)
+            ],
             "problems": problems,
             "suggestions": [
-                "保留本章结尾的新条件作为下一章承接点。",
-                "下一章应继续验证新线索，并让早期异常成为可回收伏笔。",
+                {
+                    "target": "本章结尾的新条件",
+                    "action": "把新条件作为下一章承接点继续产生后果。",
+                    "keep": "已经成立的事件与人物选择。",
+                    "avoid": "不要重新介绍背景或重复本章结论。",
+                },
+                {
+                    "target": "尚未验证的新线索",
+                    "action": "让下一步行动验证线索，并推动早期异常进入可回收状态。",
+                    "keep": "线索现有证据边界。",
+                    "avoid": "不要凭空补出答案。",
+                },
             ],
             "template_hits": template_hits,
             "risk_flags": [],

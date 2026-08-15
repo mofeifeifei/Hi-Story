@@ -131,7 +131,7 @@ def scene_cards_to_text(value: Any) -> str:
 def normalize_chapter_outline(chapter: dict[str, Any]) -> dict[str, Any]:
     detail = parse_outline_detail(chapter.get("outline_json"))
     normalized: dict[str, Any] = {}
-    for key in ["id", "chapter_number", "volume_number", "title", "status"]:
+    for key in ["id", "chapter_number", "volume_number", "title", "status", "updated_at"]:
         value = chapter.get(key)
         if value in (None, ""):
             value = detail.get(key)

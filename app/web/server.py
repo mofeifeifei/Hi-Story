@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -21,6 +22,7 @@ from app.exporters.export_docx import export_chapter_docx, export_docx, export_r
 from app.exporters.export_txt import export_chapter_txt, export_range_txt, export_txt
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
 from app.services.ai_client import AIClient, AIClientError
+from app.services.base_agent import JsonValidationError
 from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, save_config
 from app.utils.formatters import (
     format_context_readable,
@@ -29,13 +31,13 @@ from app.utils.formatters import (
     format_project_readable,
     format_review_readable,
 )
-from app.utils.context_filter import context_for_memory, context_for_reviser
+from app.utils.context_filter import context_for_memory, context_for_reviewer, context_for_reviser
 from app.utils.json_parser import json_dumps, parse_json_object
 from app.utils.outline_utils import normalize_chapter_outline
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.text_check import manuscript_quality_report, quality_summary, style_guard_warnings, style_regression_warnings
 from app.utils.word_target import chapter_word_target_from_style
-from app.web.config_api import model_discovery_config, public_config, sanitize_config_update
+from app.web.config_api import balance_query_config, model_discovery_config, public_config, sanitize_config_update
 from app.web.state import STATE
 from app.workflow import NovelWorkflow
 
@@ -105,6 +107,9 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
         if parts == ["api", "health"]:
             config = load_config()
             return {
+                "service": "hi-story",
+                "pid": os.getpid(),
+                "root": str(ROOT_DIR),
                 "status": "running",
                 "mock_mode": bool(config.get("mock_mode", True)),
                 "model": config.get("default_model", ""),
@@ -118,7 +123,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 STATE.reload_config()
                 return public_config(config)
         if parts == ["api", "config", "test"] and method == "POST":
-            return _task_workflow().client.test_connection()
+            return _test_ai_connection()
         if parts == ["api", "config", "models"] and method == "POST":
             config = model_discovery_config(load_config(), body)
             client = AIClient(config)
@@ -129,22 +134,36 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
             finally:
                 client.close()
             return {"models": models, "count": len(models)}
+        if parts == ["api", "config", "balance"] and method == "POST":
+            config = balance_query_config(load_config(), body)
+            client = AIClient(config)
+            try:
+                return client.get_balance()
+            except AIClientError as exc:
+                raise ValueError(str(exc)) from exc
+            finally:
+                client.close()
         if parts == ["api", "shutdown"] and method == "POST":
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"message": "服务正在关闭"}
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "cancel" and method == "POST":
             STATE.cancel_task(parts[2])
             return STATE.task_status(parts[2]) or {"cancelled": True}
+        if parts == ["api", "tasks", "active"] and method == "GET":
+            return _active_task_state()
         if len(parts) == 3 and parts[:2] == ["api", "tasks"] and method == "GET":
             return STATE.task_status(parts[2])
         if parts == ["api", "works"] and method == "GET":
             return {"works": STATE.repo.list_works()}
         if parts == ["api", "works"] and method == "POST":
+            STATE.assert_no_active_task("新建作品")
             work_id = STATE.repo.create_empty_work(_clean_inputs(body))
             return _work_state(work_id)
 
         if len(parts) >= 3 and parts[:2] == ["api", "works"]:
             work_id = _to_int(parts[2], "作品 ID")
+            if _work_mutation_requires_idle_task(method, parts):
+                STATE.assert_work_mutable(work_id)
             if len(parts) == 3:
                 if method == "GET":
                     return _work_state(work_id)
@@ -155,9 +174,26 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     result = STATE.repo.delete_work(work_id)
                     return {**result, "works": STATE.repo.list_works()}
 
+            if len(parts) == 4 and parts[3] == "summary" and method == "GET":
+                return _work_summary_state(work_id)
+
+            if len(parts) == 4 and parts[3] == "outline-state" and method == "GET":
+                return _outline_state(work_id)
+
             if len(parts) == 4 and parts[3] == "settings-lock" and method in {"POST", "PUT"}:
                 STATE.repo.set_work_settings_locked(work_id, bool(body.get("locked", False)))
                 return _work_state(work_id)
+
+            if len(parts) == 4 and parts[3] == "settings" and method == "PUT":
+                settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+                contract = body.get("book_contract") if isinstance(body.get("book_contract"), dict) else {}
+                STATE.repo.update_work_settings(
+                    work_id,
+                    settings,
+                    contract,
+                    expected_updated_at=str(body.get("expected_updated_at") or ""),
+                )
+                return _work_summary_state(work_id)
 
             if len(parts) == 4 and parts[3] == "book-contract" and method in {"POST", "PUT"}:
                 STATE.repo.save_book_contract(work_id, body)
@@ -203,7 +239,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     try:
                         workflow = _task_workflow_for(task_id)
                         workflow.generate_outline(work_id, should_stop=lambda: STATE.task_cancelled(task_id))
-                        return _work_state(work_id)
+                        return _outline_state(work_id)
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id)
                         raise
@@ -245,7 +281,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         "partial_warning": partial_warning,
                         "volume_transition": volume_transition,
                         "volume_decision": outline_result.get("volume_decision", {}),
-                        **_work_state(work_id),
+                        **_outline_state(work_id),
                     }
                 except Exception as exc:
                     _finish_task_error(task_id, exc, work_id=work_id)
@@ -353,8 +389,11 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         finally:
                             STATE.release_chapter(owner_id, work_id, chapter_id)
                         return _work_state(work_id)
-                if len(parts) == 6 and parts[5] == "outline" and method == "PUT":
-                    return _save_chapter_outline(work_id, chapter_number, body)
+                if len(parts) == 6 and parts[5] == "outline":
+                    if method == "GET":
+                        return {"chapter": normalize_chapter_outline(STATE.repo.get_chapter(work_id, chapter_number))}
+                    if method == "PUT":
+                        return _save_chapter_outline(work_id, chapter_number, body)
                 if len(parts) == 6 and parts[5] == "context" and method == "GET":
                     return _chapter_context_state(work_id, chapter_number)
                 if len(parts) == 6 and parts[5] == "clear-text" and method == "POST":
@@ -438,13 +477,17 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     )
                     try:
                         workflow = _task_workflow_for(task_id)
-                        return _generate_memory(
-                            work_id,
-                            chapter_number,
-                            body,
-                            workflow=workflow,
-                            should_stop=lambda: STATE.task_cancelled(task_id),
-                        )
+                        workflow.client.set_deadline(300)
+                        try:
+                            return _generate_memory(
+                                work_id,
+                                chapter_number,
+                                body,
+                                workflow=workflow,
+                                should_stop=lambda: STATE.task_cancelled(task_id),
+                            )
+                        finally:
+                            workflow.client.clear_deadline()
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id, chapter_id=chapter_id)
                         raise
@@ -469,13 +512,24 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     )
                     try:
                         workflow = _task_workflow_for(task_id)
-                        return _revise_chapter_with_instruction(
-                            work_id,
-                            chapter_number,
-                            body,
-                            workflow=workflow,
-                            should_stop=lambda: STATE.task_cancelled(task_id),
-                        )
+                        workflow.client.set_deadline(420)
+                        try:
+                            return _revise_chapter_with_instruction(
+                                work_id,
+                                chapter_number,
+                                body,
+                                workflow=workflow,
+                                should_stop=lambda: STATE.task_cancelled(task_id),
+                                on_stage=lambda stage, detail: _update_task_stage(
+                                    task_id,
+                                    work_id,
+                                    chapter_id,
+                                    stage,
+                                    detail,
+                                ),
+                            )
+                        finally:
+                            workflow.client.clear_deadline()
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id, chapter_id=chapter_id)
                         raise
@@ -584,6 +638,18 @@ def _requires_api_token(method: str, parts: list[str]) -> bool:
     return bool(parts and parts[0] == "api")
 
 
+def _work_mutation_requires_idle_task(method: str, parts: list[str]) -> bool:
+    if method == "GET":
+        return False
+    if len(parts) == 4 and parts[3] in {"plan-draft", "chapter-outlines"} and method == "POST":
+        return False
+    if len(parts) == 4 and parts[3] == "outline" and method == "POST":
+        return False
+    if len(parts) == 6 and parts[3] == "chapters" and parts[5] in {"generate", "memory", "revise", "revision"} and method == "POST":
+        return False
+    return True
+
+
 def _task_workflow() -> NovelWorkflow:
     return NovelWorkflow(repo=Repository(), client=AIClient(load_config()))
 
@@ -592,6 +658,27 @@ def _task_workflow_for(task_id: str) -> NovelWorkflow:
     workflow = _task_workflow()
     STATE.register_task_cleanup(task_id, workflow.client.close)
     return workflow
+
+
+def _test_ai_connection() -> dict[str, Any]:
+    task_id = f"config-test-{uuid.uuid4().hex}"
+    STATE.start_task(task_id, kind="configTest", title="接口连接测试")
+    client: AIClient | None = None
+    try:
+        config = load_config()
+        config["timeout"] = min(60, max(10, int(config.get("timeout", 300) or 300)))
+        config["max_retries"] = 0
+        config["max_output_tokens"] = 64
+        config["model_reasoning_effort"] = "low"
+        config["temperature"] = 0
+        client = AIClient(config)
+        return client.test_connection()
+    except AIClientError as exc:
+        raise ValueError(str(exc)) from exc
+    finally:
+        if client is not None:
+            client.close()
+        STATE.finish_task(task_id)
 
 
 def _available_port(host: str, start: int) -> int:
@@ -747,6 +834,41 @@ def _work_state(work_id: int) -> dict[str, Any]:
     }
 
 
+def _work_summary_state(work_id: int) -> dict[str, Any]:
+    work = STATE.repo.get_work(work_id)
+    chapters = STATE.repo.list_chapters(work_id)
+    return {
+        "work": work,
+        "works": STATE.repo.list_works(),
+        "chapters": chapters,
+        "book_contract": STATE.repo.get_book_contract(work_id),
+        "workflow_state": STATE.repo.workflow_state(work_id),
+        "outline": {
+            "full_outline": work.get("full_outline") or "",
+            "volume_outline": parse_json_object(work.get("volume_outline") or "[]", default=[]),
+            "chapters": chapters,
+        },
+        "export_dir": str(_current_export_dir(work_id)),
+        "default_export_dir": str(STATE.repo.export_dir(work_id)),
+        "custom_export_dir": work_id in STATE.custom_export_dirs,
+    }
+
+
+def _active_task_state() -> dict[str, Any]:
+    task = STATE.active_task()
+    work_id = int(task.get("work_id") or 0)
+    chapter_id = int(task.get("chapter_id") or 0)
+    if not work_id or not chapter_id:
+        return task
+    chapter = next(
+        (item for item in STATE.repo.list_chapters(work_id) if int(item.get("id") or 0) == chapter_id),
+        None,
+    )
+    if chapter is not None:
+        task["chapter_number"] = int(chapter.get("chapter_number") or 0)
+    return task
+
+
 def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     memory = parse_json_object(chapter.get("memory_json") or "{}", default={}) or {}
@@ -898,9 +1020,22 @@ def _save_chapter_text_claimed(
     hard_blockers = _manual_save_hard_blockers(quality)
     if hard_blockers:
         raise ValueError("正文不能保存：" + "；".join(hard_blockers))
+    content_changed = text != str(chapter.get("final_text") or "")
+    title_changed = title != str(chapter.get("title") or "")
+    if not content_changed and not title_changed and not bool(body.get("invalidate_memory", False)):
+        return {
+            **_chapter_state(work_id, chapter_number),
+            "quality_gate": {
+                "manual": quality,
+                "summary": quality_summary(quality),
+                "warning_only": True,
+                "saved_as_final": True,
+                "already_saved": True,
+            },
+            "memory_invalidated": False,
+        }
     if chapter.get("final_text"):
         STATE.repo.add_version(work_id, chapter["id"], "web_manual_before_save", chapter.get("final_text") or "")
-    content_changed = text != str(chapter.get("final_text") or "")
     memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
@@ -912,7 +1047,10 @@ def _save_chapter_text_claimed(
         invalidate_memory=bool(body.get("invalidate_memory", False)),
         expected_revision=int(chapter.get("revision") or 0),
     )
-    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
+    if content_changed and [*(quality.get("blockers") or []), *(quality.get("warnings") or [])]:
+        review = NovelWorkflow._local_quality_review(quality)
+        review["revision_plan"] = NovelWorkflow._build_revision_plan(review, quality)
+        STATE.repo.save_review(work_id, int(chapter["id"]), review)
     return {
         **_chapter_state(work_id, chapter_number),
         "quality_gate": {
@@ -926,12 +1064,7 @@ def _save_chapter_text_claimed(
 
 
 def _manual_save_hard_blockers(quality: dict[str, Any]) -> list[str]:
-    hard_markers = [
-        "为空",
-        "JSON",
-        "Markdown 代码块",
-        "结构化协议内容",
-    ]
+    hard_markers = ["为空"]
     blockers = []
     for item in quality.get("blockers") or []:
         text = str(item or "").strip()
@@ -998,7 +1131,7 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
         outline=outline_json["outline"],
         ending_hook=outline_json["ending_hook"],
         outline_json=outline_json,
-        protect_written=True,
+        protect_written=False,
     )
     return _chapter_state(work_id, chapter_number)
 
@@ -1014,44 +1147,52 @@ def _generate_memory(
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     final_text = str(chapter.get("final_text") or "").strip()
-    promoted_problem_draft = False
-    if chapter.get("status") == "problem_draft":
-        problem_draft = str(chapter.get("draft") or "").strip()
-        if problem_draft:
-            if final_text and final_text != problem_draft:
-                STATE.repo.add_version(
-                    work_id,
-                    chapter["id"],
-                    "web_problem_draft_before_promote",
-                    final_text,
-                )
-            final_text = problem_draft
-            STATE.repo.save_final_after_manual_edit(
-                work_id,
-                chapter["id"],
-                final_text,
-                title=chapter.get("title") or f"第{chapter_number}章",
-                ending_hook=chapter.get("ending_hook") or "",
-                handoff=chapter.get("handoff") or "",
-                memory_json="",
-                invalidate_memory=True,
-                expected_revision=int(chapter.get("revision") or 0),
-            )
-            chapter = STATE.repo.get_chapter(work_id, chapter_number)
-            promoted_problem_draft = True
-    if not final_text:
-        raise ValueError("当前章节没有已保存最终稿，无法生成记忆。")
+    if chapter.get("status") == "problem_draft" or not final_text:
+        raise ValueError("请先把编辑器中的当前稿保存为最终稿，再生成记忆。")
+    source_revision = int(chapter.get("revision") or 0)
+    source_text_hash = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
     context = workflow.build_chapter_context(work_id, chapter_number)
     memory_context = context_for_memory(context)
-    memory = workflow.memory.make_memory_card(memory_context, final_text)
+    try:
+        memory = workflow.memory.make_memory_card(memory_context, final_text)
+    except (AIClientError, JsonValidationError) as exc:
+        _log_agent_call(
+            work_id,
+            chapter,
+            workflow,
+            agent_name="memory",
+            prompt_name="memory_prompt.md",
+            phase="章节记忆",
+            input_preview={
+                "chapter_number": chapter_number,
+                "context_chars": len(json_dumps(memory_context)),
+                "final_text_chars": len(final_text),
+            },
+            output="",
+            status="failed",
+            error=str(exc),
+        )
+        raise
     if should_stop and should_stop():
         raise RuntimeError("任务已停止：章节记忆已返回，但未入库。")
     memory = workflow.normalize_output_names(work_id, memory)
+    memory["source_revision"] = source_revision
+    memory["source_text_hash"] = source_text_hash
+    memory_title = workflow._choose_memory_title(
+        chapter,
+        memory,
+        context,
+        str(chapter.get("title") or f"第{chapter_number}章"),
+    )
     STATE.repo.apply_memory_card(
         work_id=work_id,
         chapter_id=chapter["id"],
         chapter_number=chapter_number,
         memory=memory,
+        title=memory_title,
+        expected_revision=source_revision,
+        expected_text_hash=source_text_hash,
+        prune_intermediate=True,
     )
     STATE.repo.log_agent_run(
         work_id=work_id,
@@ -1059,7 +1200,13 @@ def _generate_memory(
         agent_name="memory",
         model=workflow.client.model_for("memory"),
         prompt_name="memory_prompt.md",
-        input_preview=json_dumps({"context": memory_context, "final_text": final_text[:3000]}),
+        input_preview=json_dumps(
+            {
+                "chapter_number": chapter_number,
+                "source_revision": source_revision,
+                "source_text_hash": source_text_hash,
+            }
+        ),
         output=json_dumps(memory),
         **workflow.client.last_usage("memory"),
     )
@@ -1067,8 +1214,171 @@ def _generate_memory(
         **_chapter_state(work_id, chapter_number),
         "memory": memory,
         "memory_readable": format_memory_readable(memory),
-        "promoted_problem_draft": promoted_problem_draft,
+        "pruned_intermediate_versions": True,
     }
+
+
+def _revision_stage(
+    on_stage: Callable[[str, str], None] | None,
+    stage: str,
+    detail: str,
+) -> None:
+    if on_stage:
+        on_stage(stage, detail)
+
+
+def _call_usage_for_log(workflow: NovelWorkflow, agent_name: str) -> dict[str, Any]:
+    call = workflow.client.last_call(agent_name)
+    return {
+        key: call.get(key, 0 if key != "finish_reason" else "")
+        for key in [
+            "input_chars",
+            "output_chars",
+            "estimated_input_tokens",
+            "estimated_output_tokens",
+            "estimated_total_tokens",
+            "elapsed_seconds",
+            "finish_reason",
+        ]
+    }
+
+
+def _log_agent_call(
+    work_id: int,
+    chapter: dict[str, Any],
+    workflow: NovelWorkflow,
+    *,
+    agent_name: str,
+    prompt_name: str,
+    phase: str,
+    input_preview: dict[str, Any],
+    output: str,
+    status: str = "ok",
+    error: str = "",
+) -> None:
+    STATE.repo.log_agent_run(
+        work_id=work_id,
+        chapter_id=int(chapter["id"]),
+        agent_name=agent_name,
+        model=workflow.client.model_for(agent_name),
+        prompt_name=prompt_name,
+        input_preview=json_dumps({"phase": phase, **input_preview}),
+        output=output,
+        status=status,
+        error=error,
+        **_call_usage_for_log(workflow, agent_name),
+    )
+
+
+def _run_reviser_call(
+    work_id: int,
+    chapter: dict[str, Any],
+    workflow: NovelWorkflow,
+    *,
+    phase: str,
+    detail: str,
+    input_preview: dict[str, Any],
+    call: Callable[[], str],
+    on_stage: Callable[[str, str], None] | None,
+) -> str:
+    _revision_stage(on_stage, "revision", detail)
+    try:
+        output = call()
+    except Exception as exc:
+        _log_agent_call(
+            work_id,
+            chapter,
+            workflow,
+            agent_name="reviser",
+            prompt_name="reviser_prompt.md",
+            phase=phase,
+            input_preview=input_preview,
+            output="",
+            status="failed",
+            error=str(exc),
+        )
+        raise
+    _log_agent_call(
+        work_id,
+        chapter,
+        workflow,
+        agent_name="reviser",
+        prompt_name="reviser_prompt.md",
+        phase=phase,
+        input_preview=input_preview,
+        output=output,
+    )
+    return output
+
+
+def _revision_quality_report(
+    workflow: NovelWorkflow,
+    original_text: str,
+    revised_text: str,
+    context: dict[str, Any],
+    chapter_number: int,
+    chapter_title: str,
+    instruction: str,
+) -> dict[str, Any]:
+    quality = manuscript_quality_report(
+        revised_text,
+        context,
+        chapter_number=chapter_number,
+        chapter_title=chapter_title,
+        stage="修订后",
+    )
+    blockers = [
+        *(quality.get("blockers") or []),
+        *style_regression_warnings(original_text, revised_text),
+        *style_guard_warnings(revised_text),
+        *workflow.revision_preservation_blockers(
+            original_text,
+            revised_text,
+            context.get("chapter_word_target"),
+            instruction,
+        ),
+    ]
+    quality["blockers"] = list(dict.fromkeys(str(item).strip() for item in blockers if str(item).strip()))
+    return quality
+
+
+def _revision_correction_issues(
+    workflow: NovelWorkflow,
+    review: dict[str, Any],
+    quality: dict[str, Any],
+    expected_scenes: int,
+) -> list[str]:
+    issues = [
+        *(quality.get("blockers") or []),
+        *workflow.scene_coverage_blockers(review, expected_scenes),
+    ]
+    for problem in review.get("problems") or []:
+        if not isinstance(problem, dict):
+            continue
+        if str(problem.get("severity") or "medium").lower() not in {"high", "medium"}:
+            continue
+        evidence = str(problem.get("evidence") or "").strip()
+        reason = str(problem.get("why_it_matters") or "").strip()
+        if evidence:
+            issues.append(f"{evidence}；{reason}" if reason else evidence)
+    return list(dict.fromkeys(str(item).strip() for item in issues if str(item).strip()))[:8]
+
+
+def _apply_revision_review_blockers(
+    workflow: NovelWorkflow,
+    review: dict[str, Any],
+    quality: dict[str, Any],
+    expected_scenes: int,
+) -> None:
+    blockers = list(quality.get("blockers") or [])
+    if review.get("semantic_review_failed"):
+        blockers.append("修订后语义复审失败，无法确认场景卡和上下文承接是否完整。")
+    blockers.extend(workflow.scene_coverage_blockers(review, expected_scenes))
+    quality["blockers"] = list(dict.fromkeys(str(item).strip() for item in blockers if str(item).strip()))
+    merged = workflow._merge_quality_report_into_review(review, quality)
+    review.clear()
+    review.update(merged)
+    review["revision_plan"] = workflow._build_revision_plan(review, quality)
 
 
 def _revise_chapter_with_instruction(
@@ -1078,6 +1388,7 @@ def _revise_chapter_with_instruction(
     *,
     workflow: NovelWorkflow,
     should_stop: Callable[[], bool] | None = None,
+    on_stage: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     instruction = str(body.get("instruction") or "").strip()
     current_text = str(body.get("current_text") or "").strip()
@@ -1087,91 +1398,173 @@ def _revise_chapter_with_instruction(
         raise ValueError("当前正文为空，无法按意见修订。")
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
+    _revision_stage(on_stage, "revision_prepare", "正在汇总修改要求")
     context = workflow.build_chapter_context(work_id, chapter_number)
     reviser_context = context_for_reviser(context)
-    revised = workflow.reviser.revise_with_instruction(reviser_context, current_text, instruction)
+    before_quality = manuscript_quality_report(
+        current_text,
+        context,
+        chapter_number=chapter_number,
+        chapter_title=chapter.get("title") or "",
+        stage="修订前",
+    )
+    known_issues = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in [
+                *(before_quality.get("blockers") or []),
+                *(before_quality.get("warnings") or []),
+                *style_guard_warnings(current_text),
+            ]
+            if str(item).strip()
+        )
+    )[:8]
+    revised = _run_reviser_call(
+        work_id,
+        chapter,
+        workflow,
+        phase="主修订",
+        detail="正在进行第一轮修订",
+        input_preview={"instruction": instruction, "known_issues": known_issues, "current_text": current_text[:3000]},
+        call=lambda: workflow.reviser.revise_with_instruction(
+            reviser_context,
+            current_text,
+            instruction,
+            known_issues,
+        ),
+        on_stage=on_stage,
+    )
     if should_stop and should_stop():
-        raise RuntimeError("任务已停止：修订稿已返回，但未写入界面。")
+        return _cancelled_revision_candidate(
+            work_id,
+            chapter_number,
+            chapter,
+            workflow,
+            revised,
+            "第一轮修订稿已完整返回",
+        )
     latest_chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, latest_chapter, require_identity=True)
     revised = workflow.normalize_output_names(work_id, revised)
     revised = strip_chapter_heading(revised, chapter_number, latest_chapter.get("title"))
-    before_context = workflow.build_chapter_context(work_id, chapter_number)
-    before_quality = manuscript_quality_report(
+    _revision_stage(on_stage, "revision_validate", "正在检查字数、语言和内容保留")
+    after_quality = _revision_quality_report(
+        workflow,
         current_text,
-        before_context,
-        chapter_number=chapter_number,
-        chapter_title=latest_chapter.get("title") or "",
-        stage="修订前",
-    )
-    regression_warnings = [
-        *style_regression_warnings(current_text, revised),
-        *style_guard_warnings(revised),
-    ]
-    regression_warnings = list(dict.fromkeys(item for item in regression_warnings if str(item).strip()))
-    if regression_warnings:
-        STATE.repo.add_version(
-            work_id,
-            chapter["id"],
-            "web_user_instruction_rejected_style",
-            revised,
-        )
-        cleaned = workflow.reviser.sanitize_style(reviser_context, revised, regression_warnings)
-        if should_stop and should_stop():
-            raise RuntimeError("任务已停止：语言清理稿已返回，但未写入界面。")
-        cleaned = workflow.normalize_output_names(work_id, strip_chapter_heading(cleaned, chapter_number, latest_chapter.get("title")))
-        cleaned_warnings = [
-            *style_regression_warnings(current_text, cleaned),
-            *style_guard_warnings(cleaned),
-        ]
-        cleaned_warnings = list(dict.fromkeys(item for item in cleaned_warnings if str(item).strip()))
-        if cleaned_warnings:
-            candidate_version_id = STATE.repo.add_version(
-                work_id,
-                chapter["id"],
-                "web_user_instruction_candidate_style",
-                cleaned,
-            )
-            return {
-                **_chapter_state(work_id, chapter_number),
-                "revised_text": cleaned,
-                "saved": False,
-                "candidate_only": True,
-                "candidate_version_id": candidate_version_id,
-                "style_regression_warnings": cleaned_warnings,
-                "quality_blockers": cleaned_warnings,
-                "message": "修订稿风格退化，已作为候选稿保留，未覆盖最终稿。",
-            }
-        revised = cleaned
-    after_quality = manuscript_quality_report(
         revised,
-        before_context,
-        chapter_number=chapter_number,
-        chapter_title=latest_chapter.get("title") or "",
-        stage="修订后",
+        context,
+        chapter_number,
+        latest_chapter.get("title") or "",
+        instruction,
     )
+    try:
+        post_review = _review_revised_text(
+            work_id,
+            chapter,
+            revised,
+            context,
+            after_quality,
+            workflow,
+            phase="第一次语义复审",
+            on_stage=on_stage,
+            should_stop=should_stop,
+        )
+    except RuntimeError as exc:
+        if not str(exc).startswith(TASK_CANCELLED_PREFIX):
+            raise
+        return _cancelled_revision_candidate(
+            work_id,
+            chapter_number,
+            chapter,
+            workflow,
+            revised,
+            "修订稿已返回，语义复审被停止",
+        )
+    expected_scenes = len((reviser_context.get("story_plan") or {}).get("scene_cards") or [])
+    correction_issues = _revision_correction_issues(
+        workflow,
+        post_review,
+        after_quality,
+        expected_scenes,
+    )
+    if correction_issues and not post_review.get("semantic_review_failed"):
+        STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_first_pass", revised)
+        revised = _run_reviser_call(
+            work_id,
+            chapter,
+            workflow,
+            phase="定向返修",
+            detail="复审发现实质问题，正在定向返修",
+            input_preview={"instruction": instruction, "issues": correction_issues, "current_text": revised[:3000]},
+            call=lambda: workflow.reviser.refine_revision(
+                reviser_context,
+                revised,
+                instruction,
+                post_review,
+                correction_issues,
+            ),
+            on_stage=on_stage,
+        )
+        if should_stop and should_stop():
+            return _cancelled_revision_candidate(
+                work_id,
+                chapter_number,
+                chapter,
+                workflow,
+                revised,
+                "定向返修稿已完整返回",
+            )
+        revised = workflow.normalize_output_names(
+            work_id,
+            strip_chapter_heading(revised, chapter_number, latest_chapter.get("title")),
+        )
+        _revision_stage(on_stage, "revision_validate", "正在检查返修结果")
+        after_quality = _revision_quality_report(
+            workflow,
+            current_text,
+            revised,
+            context,
+            chapter_number,
+            latest_chapter.get("title") or "",
+            instruction,
+        )
+        try:
+            post_review = _review_revised_text(
+                work_id,
+                chapter,
+                revised,
+                context,
+                after_quality,
+                workflow,
+                phase="最终语义确认",
+                on_stage=on_stage,
+                should_stop=should_stop,
+            )
+        except RuntimeError as exc:
+            if not str(exc).startswith(TASK_CANCELLED_PREFIX):
+                raise
+            return _cancelled_revision_candidate(
+                work_id,
+                chapter_number,
+                chapter,
+                workflow,
+                revised,
+                "定向返修稿已返回，最终确认被停止",
+            )
+    _apply_revision_review_blockers(workflow, post_review, after_quality, expected_scenes)
     acceptance_blockers = workflow._automated_acceptance_blockers(after_quality)
     if acceptance_blockers:
+        _revision_stage(on_stage, "revision_save", "正在保存问题候选稿")
         candidate_version_id = STATE.repo.add_version(
             work_id,
             chapter["id"],
             "web_user_instruction_candidate_style",
             revised,
         )
-        STATE.repo.log_agent_run(
-            work_id=work_id,
-            chapter_id=chapter["id"],
-            agent_name="reviser",
-            model=workflow.client.model_for("reviser"),
-            prompt_name="reviser_prompt.md",
-            input_preview=json_dumps({"context": reviser_context, "instruction": instruction, "current_text": current_text[:3000]}),
-            output=revised,
-            status="candidate",
-            error="；".join(acceptance_blockers),
-            **workflow.client.last_usage("reviser"),
-        )
         return {
             **_chapter_state(work_id, chapter_number),
+            "review": post_review,
+            "review_readable": format_review_readable(post_review),
             "revised_text": revised,
             "saved": False,
             "candidate_only": True,
@@ -1180,6 +1573,7 @@ def _revise_chapter_with_instruction(
             "quality_gate": {"final": after_quality, "blockers": acceptance_blockers},
             "message": "修订稿未通过自动验收，已作为候选稿保留，未覆盖最终稿。",
         }
+    _revision_stage(on_stage, "revision_save", "正在保存修订结果")
     content_changed = revised != str(latest_chapter.get("final_text") or "")
     memory_invalidated = content_changed and bool(str(latest_chapter.get("memory_json") or "").strip())
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
@@ -1194,29 +1588,144 @@ def _revise_chapter_with_instruction(
         invalidate_memory=memory_invalidated,
         expected_revision=int(latest_chapter.get("revision") or 0),
     )
-    STATE.repo.clear_chapter_candidates(work_id, int(chapter["id"]))
     latest_review = STATE.repo.get_latest_review(work_id, int(chapter["id"])) or {}
     revision_plan = latest_review.get("revision_plan") if isinstance(latest_review, dict) else []
-    if revision_plan:
-        latest_review["revision_check"] = workflow.revision_check(before_quality, after_quality, revision_plan)
-        STATE.repo.save_review(work_id, int(chapter["id"]), latest_review)
-    STATE.repo.log_agent_run(
-        work_id=work_id,
-        chapter_id=chapter["id"],
-        agent_name="reviser",
-        model=workflow.client.model_for("reviser"),
-        prompt_name="reviser_prompt.md",
-        input_preview=json_dumps({"context": reviser_context, "instruction": instruction, "current_text": current_text[:3000]}),
-        output=revised,
-        **workflow.client.last_usage("reviser"),
+    if not isinstance(revision_plan, list):
+        revision_plan = []
+    review_id = int(latest_review.get("id") or 0) if isinstance(latest_review, dict) else 0
+    if revision_plan and review_id:
+        STATE.repo.update_review_check(
+            work_id,
+            review_id,
+            workflow.revision_check(before_quality, after_quality, revision_plan),
+        )
+    post_review["revision_check"] = workflow.revision_check(
+        before_quality,
+        after_quality,
+        revision_plan,
     )
+    post_review["revision_plan"] = workflow._build_revision_plan(post_review, after_quality)
+    STATE.repo.save_review(work_id, int(chapter["id"]), post_review)
     return {
         **_chapter_state(work_id, chapter_number),
+        "review": post_review,
+        "review_readable": format_review_readable(post_review),
         "revised_text": revised,
         "saved": True,
         "memory_invalidated": memory_invalidated,
         "quality_gate": {"final": after_quality, "blockers": []},
     }
+
+
+def _cancelled_revision_candidate(
+    work_id: int,
+    chapter_number: int,
+    chapter: dict[str, Any],
+    workflow: NovelWorkflow,
+    revised: str,
+    detail: str,
+) -> dict[str, Any]:
+    latest_chapter = STATE.repo.get_chapter(work_id, chapter_number)
+    cleaned = workflow.normalize_output_names(
+        work_id,
+        strip_chapter_heading(revised, chapter_number, latest_chapter.get("title")),
+    ).strip()
+    if not cleaned:
+        raise RuntimeError("任务已停止：模型没有返回可保留的修订正文。")
+    candidate_version_id = STATE.repo.add_version(
+        work_id,
+        int(chapter["id"]),
+        "web_user_instruction_candidate_style",
+        cleaned,
+    )
+    message = f"任务已停止；{detail}，已保存为候选稿，未覆盖最终稿。"
+    return {
+        **_chapter_state(work_id, chapter_number),
+        "revised_text": cleaned,
+        "saved": False,
+        "candidate_only": True,
+        "candidate_version_id": candidate_version_id,
+        "quality_blockers": [message],
+        "message": message,
+    }
+
+
+def _review_revised_text(
+    work_id: int,
+    chapter: dict[str, Any],
+    text: str,
+    context: dict[str, Any],
+    quality: dict[str, Any],
+    workflow: NovelWorkflow,
+    *,
+    phase: str,
+    on_stage: Callable[[str, str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    review_context = dict(context)
+    review_context["local_quality_report"] = quality
+    reviewer_context = context_for_reviewer(review_context)
+    review: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt in range(2):
+        detail = "正在检查场景、承接和人物因果" if attempt == 0 else "复审格式不完整，正在重新确认"
+        _revision_stage(on_stage, "revision_review", detail)
+        try:
+            review = workflow.reviewer.review_chapter(reviewer_context, text)
+        except JsonValidationError as exc:
+            last_error = exc
+            _log_agent_call(
+                work_id,
+                chapter,
+                workflow,
+                agent_name="reviewer",
+                prompt_name="reviewer_prompt.md",
+                phase=f"{phase}{'格式重试' if attempt else ''}",
+                input_preview={"context": reviewer_context, "draft": text[:3000]},
+                output="",
+                status="invalid",
+                error=str(exc),
+            )
+            if attempt == 0:
+                continue
+            break
+        except AIClientError as exc:
+            last_error = exc
+            _log_agent_call(
+                work_id,
+                chapter,
+                workflow,
+                agent_name="reviewer",
+                prompt_name="reviewer_prompt.md",
+                phase=phase,
+                input_preview={"context": reviewer_context, "draft": text[:3000]},
+                output="",
+                status="failed",
+                error=str(exc),
+            )
+            break
+        else:
+            review = workflow.normalize_output_names(work_id, review)
+            _log_agent_call(
+                work_id,
+                chapter,
+                workflow,
+                agent_name="reviewer",
+                prompt_name="reviewer_prompt.md",
+                phase=f"{phase}{'格式重试' if attempt else ''}",
+                input_preview={"context": reviewer_context, "draft": text[:3000]},
+                output=json_dumps(review),
+            )
+            break
+    if should_stop and should_stop():
+        raise RuntimeError("任务已停止：语义复审已返回，但未继续保存。")
+    if review is None:
+        review = workflow._local_quality_review(quality)
+        review["stage_warning"] = f"修订稿语义复审失败：{last_error or '没有取得有效结果'}"
+        review["semantic_review_failed"] = True
+    review = workflow._merge_quality_report_into_review(review, quality)
+    review["revision_plan"] = workflow._build_revision_plan(review, quality)
+    return review
 
 
 def _outline_data(work_id: int) -> dict[str, Any]:
@@ -1226,6 +1735,19 @@ def _outline_data(work_id: int) -> dict[str, Any]:
         "full_outline": work.get("full_outline") or "",
         "volume_outline": parse_json_object(work.get("volume_outline") or "[]", default=[]),
         "chapters": chapters,
+    }
+
+
+def _outline_state(work_id: int) -> dict[str, Any]:
+    work = STATE.repo.get_work(work_id)
+    return {
+        "work": work,
+        "works": STATE.repo.list_works(),
+        "outline": {
+            "full_outline": work.get("full_outline") or "",
+            "volume_outline": parse_json_object(work.get("volume_outline") or "[]", default=[]),
+            "chapters": STATE.repo.list_chapter_outline_summaries(work_id),
+        },
     }
 
 
@@ -1242,7 +1764,7 @@ def _save_outline(work_id: int, body: dict[str, Any]) -> dict[str, Any]:
             "volume_outline": volume_outline,
         },
     )
-    return _work_state(work_id)
+    return _outline_state(work_id)
 
 
 def _export_work(work_id: int, body: dict[str, Any]) -> dict[str, Any]:

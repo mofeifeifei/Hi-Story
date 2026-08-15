@@ -22,21 +22,31 @@ export function AppShell({ children }: { children: ReactNode }) {
   const store = useAppStore();
   const queryClient = useQueryClient();
   const [elapsed, setElapsed] = useState(0);
+  const [creatingWork, setCreatingWork] = useState(false);
   const health = useQuery({ queryKey: ["health"], queryFn: () => api<Record<string, unknown>>("/api/health"), refetchInterval: 30_000 });
   const worksQuery = useQuery({ queryKey: ["works"], queryFn: () => api<{ works: Work[] }>("/api/works") });
+  const activeTaskQuery = useQuery({ queryKey: ["active-task"], queryFn: () => api<Record<string, unknown>>("/api/tasks/active"), refetchInterval: store.task ? false : 3000 });
   const currentWork = store.works.find((work) => Number(work.id) === Number(store.selectedWorkId));
   const taskQuery = useQuery({
     queryKey: ["task", store.task?.id],
-    queryFn: () => api<{ stage?: string; detail?: string }>(`/api/tasks/${store.task!.id}`),
+    queryFn: () => api<{ status?: string; stage?: string; detail?: string; error?: string }>(`/api/tasks/${store.task!.id}`),
     enabled: Boolean(store.task),
     refetchInterval: store.task ? 1000 : false,
   });
 
   useEffect(() => {
     if (!worksQuery.data) return;
-    store.setWorks(worksQuery.data.works || []);
-    if (!store.selectedWorkId && worksQuery.data.works?.length) store.selectWork(worksQuery.data.works[0].id);
+    const works = worksQuery.data.works || [];
+    store.setWorks(works);
+    if ((!store.selectedWorkId || !works.some((work) => Number(work.id) === Number(store.selectedWorkId))) && works.length) store.selectWork(works[0].id);
   }, [worksQuery.data]);
+
+  useEffect(() => {
+    const task = activeTaskQuery.data;
+    if (!task?.id || !["running", "cancelling"].includes(String(task.status)) || store.task) return;
+    const startedAt = Date.parse(String(task.started_at || ""));
+    store.setTask({ id: String(task.id), kind: String(task.kind || "task"), title: String(task.title || "AI 任务"), detail: String(task.detail || ""), startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(), controller: new AbortController(), workId: Number(task.work_id || 0) || undefined, chapterNumber: Number(task.chapter_number || 0) || undefined });
+  }, [activeTaskQuery.data, store.task]);
 
   useEffect(() => {
     if (!store.task) { setElapsed(0); return; }
@@ -46,25 +56,67 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer);
   }, [store.task]);
 
+  useEffect(() => {
+    const status = String(taskQuery.data?.status || "");
+    if (!store.task || !["done", "failed", "cancelled"].includes(status)) return;
+    const finishedTask = store.task;
+    if (status === "failed" && taskQuery.data?.error) store.notify(taskQuery.data.error, "danger");
+    store.setTask(null);
+    queryClient.invalidateQueries({ queryKey: ["active-task"] });
+    queryClient.invalidateQueries({ queryKey: ["work", finishedTask.workId] });
+    queryClient.invalidateQueries({ queryKey: ["outline-state", finishedTask.workId] });
+    queryClient.invalidateQueries({ queryKey: ["chapter", finishedTask.workId] });
+    queryClient.invalidateQueries({ queryKey: ["library-counts", finishedTask.workId] });
+    queryClient.invalidateQueries({ queryKey: ["records-page", finishedTask.workId] });
+    queryClient.invalidateQueries({ queryKey: ["works"] });
+  }, [taskQuery.data?.status]);
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!store.navigationGuard) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [store.navigationGuard]);
+
   async function createWork() {
+    if (creatingWork || store.task) return;
+    const guard = store.navigationGuard;
+    if (guard && !guard()) return;
+    setCreatingWork(true);
     try {
       const data = await api<{ work: Work; works: Work[] }>("/api/works", {
         method: "POST",
         body: { title: "未命名作品", idea: "", genre: "", platform: "", target_words: 0, style: "" },
       });
       store.setWorks(data.works || [...store.works, data.work]);
+      store.setNavigationGuard(null);
       store.selectWork(data.work.id);
       store.setPage("project");
       queryClient.setQueryData(["works"], { works: data.works });
       store.notify("新作品已创建。", "success");
     } catch (error) { store.notify((error as Error).message, "danger"); }
+    finally { setCreatingWork(false); }
   }
 
   async function stopTask() {
     if (!store.task) return;
-    try { await cancelTask(store.task.id); } catch { /* The local abort still prevents a late UI write. */ }
-    store.task.controller.abort();
-    store.notify("已请求停止任务，模型请求可能需要片刻才会结束。", "warning");
+    try { await cancelTask(store.task.id); } catch { /* The active request will report its own final state. */ }
+    store.notify("已请求停止任务，正在等待模型请求退出；已经完整返回的修订稿会保留为候选稿。", "warning");
+  }
+
+  function openPendingResult() {
+    const item = store.pendingResults[0];
+    if (!item) return;
+    const guard = store.navigationGuard;
+    if (guard && !guard()) return;
+    store.setNavigationGuard(null);
+    store.selectWork(item.workId);
+    store.selectChapter(item.chapterNumber);
+    store.setPage("writing");
+    store.dismissPendingResult(item.id);
   }
 
   const pageLabel = pages.find((item) => item.key === store.page)?.label || "小说工作台";
@@ -84,7 +136,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </select>
             <ChevronDown size={16} />
           </div>
-          <button className="btn new-work" onClick={createWork} title="新建作品"><Plus size={17} /><span>新建作品</span></button>
+          <button className="btn new-work" disabled={Boolean(store.task) || creatingWork} onClick={createWork} title={store.task ? "请等待当前任务结束" : "新建作品"}><Plus size={17} /><span>{creatingWork ? "正在创建" : "新建作品"}</span></button>
           <div className="nav-label">创作流程</div>
           <nav className="main-nav">
             {pages.map(({ key, label, icon: Icon }) => (
@@ -101,8 +153,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="topbar-title"><h1>{currentWork?.title || "未选择作品"}</h1><p>{pageLabel}{currentWork?.genre ? ` · ${currentWork.genre}` : ""}</p></div>
           <div className="topbar-actions">
             {store.task && <div className="task-chip"><LoaderCircle className="spinner" size={15} /><span>{store.task.title} · {stageLabel(taskQuery.data?.stage, taskQuery.data?.detail)} · {formatElapsed(elapsed)}</span><button className="icon-button" onClick={stopTask} title="停止任务"><CircleStop size={17} /></button></div>}
-            <button className="icon-button" onClick={() => queryClient.invalidateQueries()} title="刷新当前数据"><RefreshCw size={17} /></button>
-            {store.pendingResults.length > 0 && <button className="pending-result-button" onClick={() => { const item = store.pendingResults[0]; store.selectWork(item.workId); store.selectChapter(item.chapterNumber); store.setPage("writing"); store.dismissPendingResult(item.id); }} title="打开最早一条待处理结果"><BookOpenText size={16} />待处理结果 {store.pendingResults.length}</button>}
+            <button className="icon-button" disabled={Boolean(store.navigationGuard)} onClick={() => queryClient.invalidateQueries()} title={store.navigationGuard ? "请先保存当前修改" : "刷新当前数据"}><RefreshCw size={17} /></button>
+            {store.pendingResults.length > 0 && <button className="pending-result-button" onClick={openPendingResult} title="打开最早一条待处理结果"><BookOpenText size={16} />待处理结果 {store.pendingResults.length}</button>}
           </div>
         </header>
         <main className="page-host">{children}</main>

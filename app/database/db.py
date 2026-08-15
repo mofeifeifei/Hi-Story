@@ -11,9 +11,17 @@ SCHEMA_PATH = RESOURCE_DIR / "app" / "database" / "schema.sql"
 MIGRATIONS_DIR = RESOURCE_DIR / "app" / "database" / "migrations"
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore[no-untyped-def]
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -50,6 +58,7 @@ def init_db(db_path: Path) -> None:
             ("estimated_output_tokens", "INTEGER DEFAULT 0"),
             ("estimated_total_tokens", "INTEGER DEFAULT 0"),
             ("elapsed_seconds", "REAL DEFAULT 0"),
+            ("finish_reason", "TEXT"),
         ]:
             _ensure_column(conn, "agent_runs", column, definition)
         for column, definition in [
@@ -57,6 +66,7 @@ def init_db(db_path: Path) -> None:
             ("hook_score", "INTEGER"),
             ("historical_score", "INTEGER"),
             ("repeat_risk", "TEXT"),
+            ("scene_coverage", "TEXT"),
             ("revision_plan", "TEXT"),
             ("revision_check", "TEXT"),
             ("reviewed_text_hash", "TEXT"),

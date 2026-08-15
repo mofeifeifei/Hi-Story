@@ -23,18 +23,22 @@ class JsonValidationError(ValueError):
 class BaseAgent:
     agent_name = "base"
     prompt_file = ""
+    output_attempts = 1
 
     def __init__(self, client: AIClient):
         self.client = client
         self.system_prompt = load_prompt(self.prompt_file)
 
     def complete(self, user_prompt: str, *, json_mode: bool = False, mock_hint: dict | None = None) -> str:
+        # Prompt files are editable while the local service is running.
+        self.system_prompt = load_prompt(self.prompt_file)
         return self.client.complete(
             self.agent_name,
             self.system_prompt,
             user_prompt,
             json_mode=json_mode,
             mock_hint=mock_hint,
+            output_attempts=self.output_attempts,
         )
 
     def complete_json(
@@ -66,7 +70,6 @@ class BaseAgent:
                 "你上一次输出的 JSON 无法写入程序数据库。请只修复 JSON 结构和缺失字段，"
                 "不要输出 Markdown、解释或代码块。\n\n"
                 f"校验问题：\n{json_dumps(issues)}\n\n"
-                f"原始任务：\n{user_prompt}\n\n"
                 f"上一次输出：\n{raw}"
             )
             raw = self.complete(repair_prompt, json_mode=True, mock_hint=mock_hint)

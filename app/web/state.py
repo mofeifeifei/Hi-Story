@@ -43,6 +43,15 @@ class WebState:
         if not task_id:
             return
         with self._task_lock:
+            active = next(
+                (task for task in self._tasks.values() if task.get("status") in {"running", "cancelling"}),
+                None,
+            )
+            if active is not None:
+                active_title = str(active.get("title") or active.get("kind") or "AI 任务")
+                if active.get("id") == task_id:
+                    raise ValueError(f"{active_title}已经在运行，请勿重复提交。")
+                raise ValueError(f"已有 AI 任务正在运行：{active_title}。请等待任务结束或先停止当前任务。")
             self._claim_chapter_locked(task_id, work_id, chapter_id)
             self._tasks[task_id] = {
                 "id": task_id,
@@ -148,6 +157,36 @@ class WebState:
             return {}
         with self._task_lock:
             return dict(self._tasks.get(task_id, {}))
+
+    def active_task(self) -> dict[str, Any]:
+        with self._task_lock:
+            task = next(
+                (item for item in self._tasks.values() if item.get("status") in {"running", "cancelling"}),
+                None,
+            )
+            return dict(task or {})
+
+    def assert_work_mutable(self, work_id: int, action: str = "修改作品") -> None:
+        with self._task_lock:
+            active = next(
+                (item for item in self._tasks.values() if item.get("status") in {"running", "cancelling"}),
+                None,
+            )
+            if active is None or int(active.get("work_id") or 0) != int(work_id):
+                return
+            title = str(active.get("title") or active.get("kind") or "AI 任务")
+            raise ValueError(f"{title}仍在运行，暂时不能{action}。请等待任务结束或先停止任务。")
+
+    def assert_no_active_task(self, action: str) -> None:
+        with self._task_lock:
+            active = next(
+                (item for item in self._tasks.values() if item.get("status") in {"running", "cancelling"}),
+                None,
+            )
+            if active is None:
+                return
+            title = str(active.get("title") or active.get("kind") or "AI 任务")
+            raise ValueError(f"{title}仍在运行，暂时不能{action}。请等待任务结束或先停止任务。")
 
     def _claim_chapter_locked(self, owner_id: str, work_id: int | None, chapter_id: int | None) -> None:
         if work_id is None or chapter_id is None:

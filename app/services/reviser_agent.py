@@ -10,16 +10,19 @@ from app.utils.json_parser import json_dumps
 class ReviserAgent(BaseAgent):
     agent_name = "reviser"
     prompt_file = "reviser_prompt.md"
+    # A larger single budget is safer than repeating the same expensive full-chapter request.
+    output_attempts = 1
 
     def revise_chapter(self, context: dict[str, Any], draft: str, review: dict[str, Any]) -> str:
         history_section = history_prompt_section(context, task="reviser")
         revision_plan = review.get("revision_plan") if isinstance(review, dict) else []
         if not isinstance(revision_plan, list):
             revision_plan = []
-        revision_tasks = [item for item in revision_plan if isinstance(item, dict)][:3]
+        revision_tasks = [item for item in revision_plan if isinstance(item, dict)][:5]
         user_prompt = (
             "按修订任务局部编辑正文，只输出修订后的完整正文。\n"
-            "最多执行三项；未列出的内容保持原样。scene_handoff、story_plan、既有事实和人物选择不可被改坏。\n"
+            "最多执行五项；未列出的内容保持原样。scene_handoff、story_plan、既有事实和人物选择不可被改坏。\n"
+            "除非任务明确要求压缩，否则修订稿不得明显短于初稿，也不得低于 chapter_word_target.min；补写缺失场景时不能删除已有有效场景。\n"
             "连续性优先，其次是因果和人物，再处理结尾与语言。结尾可以自然收场，不要强造悬念。\n"
             "语言清理只改命中句段：保留人物声音，删去替读者解释、格言式总结和整齐造势，不做同义词轮换。\n"
             "不要在正文中复述任何上下文字段名。\n\n"
@@ -30,20 +33,63 @@ class ReviserAgent(BaseAgent):
         )
         return self.complete(user_prompt, mock_hint={"draft": draft, "revision_plan": revision_tasks}).strip()
 
-    def revise_with_instruction(self, context: dict[str, Any], draft: str, instruction: str) -> str:
+    def revise_with_instruction(
+        self,
+        context: dict[str, Any],
+        draft: str,
+        instruction: str,
+        known_issues: list[str] | None = None,
+    ) -> str:
         history_section = history_prompt_section(context, task="reviser")
+        issue_section = (
+            f"\n程序预检发现的问题：\n{json_dumps((known_issues or [])[:8])}\n"
+            if known_issues
+            else ""
+        )
         user_prompt = (
             "请根据用户修改意见修订章节正文，只输出修订后的正文。\n"
             "用户意见优先级最高；在不违背锁定设定、细纲和上下文的前提下，尽量保留当前正文中可用的段落、对白和事件，"
             "不要从零重写成另一章。\n\n"
+            "除非用户明确要求压缩或删减，否则输出长度不得明显短于当前正文，也不得低于 chapter_word_target.min。"
+            "新增开头、场景或结尾时保留其他已经成立的场景，不能用新段落替换掉整章。\n"
             "必要事实以 minimal_memory_pack、story_plan 和 scene_handoff 为准；不要新增无关设定或破坏下一章所需事实。"
             "开头、结尾和语言的改动同时遵守 style_guard 和 chapter_word_target。\n\n"
             f"{history_section}\n"
             f"上下文：\n{json_dumps(context)}\n\n"
             f"用户修改意见：\n{instruction.strip()}\n\n"
+            f"{issue_section}"
             f"当前正文：\n{draft}"
         )
         return self.complete(user_prompt, mock_hint={"draft": draft, "instruction": instruction}).strip()
+
+    def refine_revision(
+        self,
+        context: dict[str, Any],
+        draft: str,
+        instruction: str,
+        review: dict[str, Any],
+        issues: list[str],
+    ) -> str:
+        history_section = history_prompt_section(context, task="reviser")
+        revision_plan = review.get("revision_plan") if isinstance(review, dict) else []
+        if not isinstance(revision_plan, list):
+            revision_plan = []
+        user_prompt = (
+            "这是同一次修订任务的定向返修。只输出返修后的完整正文。\n"
+            "第一轮已经完成的有效修改必须保留；只修复复审仍然确认存在的问题，不要从头换一种写法。\n"
+            "用户原始修改意见仍是最高目标。依次保证上下文承接、场景完成、人物因果、内容保留和语言自然。\n"
+            "不得通过删除场景规避问题，不得明显缩短正文，不得输出解释、清单或字段名。\n\n"
+            f"{history_section}\n"
+            f"上下文：\n{json_dumps(context)}\n\n"
+            f"用户原始修改意见：\n{instruction.strip()}\n\n"
+            f"复审确认的问题：\n{json_dumps(issues[:8])}\n\n"
+            f"复审任务单：\n{json_dumps([item for item in revision_plan if isinstance(item, dict)][:5])}\n\n"
+            f"第一轮修订稿：\n{draft}"
+        )
+        return self.complete(
+            user_prompt,
+            mock_hint={"draft": draft, "instruction": instruction, "revision_plan": revision_plan[:5]},
+        ).strip()
 
     def revise_opening_ending(self, context: dict[str, Any], draft: str, issues: list[str]) -> str:
         history_section = history_prompt_section(context, task="reviser")
