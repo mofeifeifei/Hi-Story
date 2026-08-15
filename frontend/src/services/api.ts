@@ -22,7 +22,10 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
   });
   const payload = await response.json().catch(() => ({ ok: false, error: "服务返回了无法识别的数据。" }));
   if (!response.ok || !payload.ok) {
-    throw new ApiError(payload.error || `请求失败（${response.status}）`, response.status);
+    const message = payload.error || `请求失败（${response.status}）`;
+    const error = new ApiError(message, response.status);
+    if (message === "AI 请求已取消。" || message.startsWith("任务已停止")) error.name = "AbortError";
+    throw error;
   }
   return payload.data as T;
 }
@@ -32,5 +35,17 @@ export function createTaskId(kind: string): string {
 }
 
 export async function cancelTask(taskId: string): Promise<void> {
-  await api(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+      return;
+    } catch (error) {
+      lastError = error;
+      const registrationRace = error instanceof ApiError && error.status === 400 && error.message.includes("任务不存在");
+      if (!registrationRace || attempt === 3) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 120 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }

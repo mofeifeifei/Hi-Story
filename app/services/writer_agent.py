@@ -11,6 +11,7 @@ class WriterAgent(BaseAgent):
     agent_name = "writer"
     prompt_file = "writer_prompt.md"
     output_attempts = 2
+    allow_truncated_output = True
 
     def write_chapter(self, context: dict[str, Any]) -> str:
         chapter = context.get("chapter", {})

@@ -24,6 +24,7 @@ class BaseAgent:
     agent_name = "base"
     prompt_file = ""
     output_attempts = 1
+    allow_truncated_output = False
 
     def __init__(self, client: AIClient):
         self.client = client
@@ -39,6 +40,7 @@ class BaseAgent:
             json_mode=json_mode,
             mock_hint=mock_hint,
             output_attempts=self.output_attempts,
+            allow_truncated_output=self.allow_truncated_output,
         )
 
     def complete_json(

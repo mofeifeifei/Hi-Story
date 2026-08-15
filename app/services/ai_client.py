@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import re
+import threading
 import time
 from math import ceil
 from typing import Any
@@ -19,6 +21,53 @@ class AIClientError(RuntimeError):
 
 
 logger = logging.getLogger(__name__)
+
+
+class _ProcessResponse:
+    def __init__(self, result: dict[str, Any]):
+        self.status_code = int(result.get("status_code") or 0)
+        self.text = str(result.get("text") or "")
+        self.headers = dict(result.get("headers") or {})
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+
+def _http_request_worker(connection: Any, request: dict[str, Any]) -> None:
+    try:
+        import requests
+
+        session = requests.Session()
+        session.trust_env = bool(request.get("trust_env", False))
+        response = session.request(
+            str(request.get("method") or "POST").upper(),
+            str(request.get("url") or ""),
+            headers=dict(request.get("headers") or {}),
+            json=request.get("payload"),
+            timeout=tuple(request.get("timeout") or (10, 300)),
+            proxies=request.get("proxies"),
+        )
+        connection.send(
+            {
+                "ok": True,
+                "status_code": int(response.status_code),
+                "text": response.text,
+                "headers": dict(response.headers),
+            }
+        )
+    except BaseException as exc:  # noqa: BLE001
+        try:
+            connection.send(
+                {
+                    "ok": False,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                }
+            )
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        connection.close()
 
 
 def estimate_tokens(text: str) -> int:
@@ -39,7 +88,8 @@ class AIClient:
         self._last_call_by_agent: dict[str, dict[str, Any]] = {}
         self._last_response_meta_by_agent: dict[str, dict[str, Any]] = {}
         self._closed = False
-        self._deadline: float | None = None
+        self._request_process: Any | None = None
+        self._request_process_lock = threading.Lock()
 
     def model_for(self, agent_name: str) -> str:
         agent_models = self.config.get("agent_models", {})
@@ -56,6 +106,7 @@ class AIClient:
         json_mode: bool = False,
         mock_hint: dict[str, Any] | None = None,
         output_attempts: int = 1,
+        allow_truncated_output: bool = False,
     ) -> str:
         if self._closed:
             raise AIClientError("AI 请求已取消。")
@@ -63,6 +114,8 @@ class AIClient:
         input_chars = len(system_prompt) + len(user_prompt)
         input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
         started = time.perf_counter()
+        self._last_usage_by_agent.pop(agent_name, None)
+        self._last_call_by_agent.pop(agent_name, None)
         self._last_response_meta_by_agent.pop(agent_name, None)
         if self.config.get("mock_mode", True):
             output = self._mock_response(agent_name, user_prompt, json_mode=json_mode, hint=mock_hint or {})
@@ -127,6 +180,8 @@ class AIClient:
                 truncated = finish_reason in {"length", "max_tokens", "max_output_tokens"}
                 if str(output or "").strip() and not truncated:
                     break
+                if str(output or "").strip() and truncated and allow_truncated_output:
+                    break
                 if output_attempt + 1 < output_attempts:
                     logger.warning(
                         "AI returned %s output agent=%s; retrying once",
@@ -150,6 +205,9 @@ class AIClient:
                 "memory": "记忆",
             }.get(agent_name, agent_name)
             if truncated:
+                if allow_truncated_output and str(output or "").strip():
+                    self._record_successful_call(agent_name)
+                    return output
                 retry_note = "程序已自动重试一次；" if output_attempts > 1 else ""
                 effective_budget = int(
                     self._last_response_meta_by_agent.get(agent_name, {}).get("max_output_tokens")
@@ -187,14 +245,17 @@ class AIClient:
     def last_call(self, agent_name: str) -> dict[str, Any]:
         return dict(self._last_call_by_agent.get(agent_name, {}))
 
-    def set_deadline(self, seconds: int | float) -> None:
-        self._deadline = time.monotonic() + max(1.0, float(seconds))
-
-    def clear_deadline(self) -> None:
-        self._deadline = None
-
     def close(self) -> None:
         self._closed = True
+        with self._request_process_lock:
+            process = self._request_process
+        if process is not None:
+            try:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=2)
+            except (AssertionError, OSError, ValueError):
+                pass
         session = self._session
         self._session = None
         if session is not None:
@@ -299,14 +360,15 @@ class AIClient:
 
         url = f"{base_url}/models"
         timeout = min(60, int(self.config.get("timeout", 300) or 300))
-        session = self._requests_session(requests)
-        session.trust_env = bool(self.config.get("use_system_proxy", False))
         try:
-            response = session.get(
-                url,
+            response = self._cancellable_request(
+                requests_module=requests,
+                method="GET",
+                url=url,
                 headers=self._headers(api_key),
-                timeout=timeout,
-                proxies=self._request_proxies(),
+                payload=None,
+                connect_timeout=min(10, timeout),
+                read_timeout=timeout,
             )
         except requests.exceptions.RequestException as exc:
             raise AIClientError(self._friendly_request_error(exc, "模型列表接口", url, timeout)) from exc
@@ -377,16 +439,17 @@ class AIClient:
         )
         urls = list(dict.fromkeys(urls))
         timeout = min(30, max(5, int(self.config.get("timeout", 300) or 300)))
-        session = self._requests_session(requests)
-        session.trust_env = bool(self.config.get("use_system_proxy", False))
         unsupported: list[str] = []
         for url in urls:
             try:
-                response = session.get(
-                    url,
+                response = self._cancellable_request(
+                    requests_module=requests,
+                    method="GET",
+                    url=url,
                     headers=self._headers(api_key),
-                    timeout=timeout,
-                    proxies=self._request_proxies(),
+                    payload=None,
+                    connect_timeout=min(10, timeout),
+                    read_timeout=timeout,
                 )
             except requests.exceptions.RequestException as exc:
                 if custom_url and url == custom_url.rstrip("/"):
@@ -610,15 +673,14 @@ class AIClient:
         for attempt in range(max_retries + 1):
             if self._closed:
                 raise AIClientError("AI 请求已取消。")
-            session = self._requests_session(requests_module)
-            session.trust_env = bool(self.config.get("use_system_proxy", False))
             try:
-                response = session.post(
-                    url,
+                response = self._cancellable_post(
+                    requests_module=requests_module,
+                    url=url,
                     headers=headers,
-                    json=payload,
-                    timeout=(connect_timeout, self._remaining_timeout(read_timeout)),
-                    proxies=self._request_proxies(),
+                    payload=payload,
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
                 )
                 if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
                     if attempt < max_retries:
@@ -652,6 +714,105 @@ class AIClient:
                 self._interruptible_sleep(delay)
         raise AIClientError(self._friendly_request_error(last_error, api_name, url, read_timeout))
 
+    def _cancellable_post(
+        self,
+        *,
+        requests_module: Any,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        connect_timeout: int,
+        read_timeout: int,
+    ) -> _ProcessResponse:
+        return self._cancellable_request(
+            requests_module=requests_module,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+
+    def _cancellable_request(
+        self,
+        *,
+        requests_module: Any,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None,
+        connect_timeout: int,
+        read_timeout: int,
+    ) -> _ProcessResponse:
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_http_request_worker,
+            args=(
+                sender,
+                {
+                    "method": method,
+                    "url": url,
+                    "headers": headers,
+                    "payload": payload,
+                    "timeout": (connect_timeout, read_timeout),
+                    "proxies": self._request_proxies(),
+                    "trust_env": bool(self.config.get("use_system_proxy", False)),
+                },
+            ),
+            daemon=True,
+        )
+        try:
+            process.start()
+        except Exception:
+            receiver.close()
+            sender.close()
+            raise
+        sender.close()
+        with self._request_process_lock:
+            if self._closed:
+                process.terminate()
+                process.join(timeout=2)
+                receiver.close()
+                raise AIClientError("AI 请求已取消。")
+            self._request_process = process
+        result: dict[str, Any] | None = None
+        hard_deadline = time.monotonic() + connect_timeout + read_timeout + 15
+        try:
+            while result is None:
+                if self._closed:
+                    raise AIClientError("AI 请求已取消。")
+                if receiver.poll(0.1):
+                    try:
+                        result = receiver.recv()
+                    except (EOFError, BrokenPipeError, OSError) as exc:
+                        if self._closed:
+                            raise AIClientError("AI 请求已取消。") from exc
+                        raise requests_module.exceptions.RequestException("模型请求进程通信中断。") from exc
+                    break
+                if not process.is_alive():
+                    raise requests_module.exceptions.RequestException("模型请求进程意外退出。")
+                if time.monotonic() >= hard_deadline:
+                    raise requests_module.exceptions.ReadTimeout(f"模型请求超过 {read_timeout} 秒仍未返回。")
+        finally:
+            with self._request_process_lock:
+                if self._request_process is process:
+                    self._request_process = None
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2)
+            receiver.close()
+        if not result.get("ok"):
+            error_type = str(result.get("error_type") or "")
+            message = str(result.get("error") or "模型请求失败。")
+            if error_type == "ReadTimeout":
+                raise requests_module.exceptions.ReadTimeout(message)
+            if error_type == "ConnectTimeout":
+                raise requests_module.exceptions.ConnectTimeout(message)
+            raise requests_module.exceptions.RequestException(message)
+        return _ProcessResponse(result)
+
     def _read_timeout(self, agent_name: str) -> int:
         configured = max(10, int(self.config.get("timeout", 300) or 300))
         if agent_name == "reviser":
@@ -666,14 +827,6 @@ class AIClient:
             return configured
         long_text_budget = max(4_096, int(self.config.get("long_text_max_output_tokens", 24_000) or 24_000))
         return max(configured, long_text_budget)
-
-    def _remaining_timeout(self, requested: int) -> float:
-        if self._deadline is None:
-            return float(requested)
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 1:
-            raise AIClientError("修订任务已达到总时限，已停止继续调用模型。")
-        return max(1.0, min(float(requested), remaining))
 
     def _interruptible_sleep(self, delay: float) -> None:
         deadline = time.monotonic() + max(0.0, delay)

@@ -1698,9 +1698,14 @@ class Repository:
                 SELECT id, chapter_id, version_name, content, created_at
                 FROM versions
                 WHERE chapter_id = ?
-                  AND version_name IN (
-                    'web_user_instruction_rejected_style',
-                    'web_user_instruction_candidate_style'
+                  AND (
+                    version_name IN (
+                      'web_user_instruction_rejected_style',
+                      'web_user_instruction_candidate_style',
+                      'web_user_instruction_first_pass'
+                    )
+                    OR version_name LIKE 'reviser_rejected_style_%'
+                    OR version_name LIKE 'reviser_rejected_repeat_%'
                   )
                 ORDER BY id DESC
                 LIMIT ?
@@ -1715,9 +1720,14 @@ class Repository:
                 """
                 DELETE FROM versions
                 WHERE id = ? AND chapter_id = ?
-                  AND version_name IN (
-                    'web_user_instruction_rejected_style',
-                    'web_user_instruction_candidate_style'
+                  AND (
+                    version_name IN (
+                      'web_user_instruction_rejected_style',
+                      'web_user_instruction_candidate_style',
+                      'web_user_instruction_first_pass'
+                    )
+                    OR version_name LIKE 'reviser_rejected_style_%'
+                    OR version_name LIKE 'reviser_rejected_repeat_%'
                   )
                 """,
                 (version_id, chapter_id),
@@ -1731,9 +1741,14 @@ class Repository:
                 """
                 DELETE FROM versions
                 WHERE chapter_id = ?
-                  AND version_name IN (
-                    'web_user_instruction_rejected_style',
-                    'web_user_instruction_candidate_style'
+                  AND (
+                    version_name IN (
+                      'web_user_instruction_rejected_style',
+                      'web_user_instruction_candidate_style',
+                      'web_user_instruction_first_pass'
+                    )
+                    OR version_name LIKE 'reviser_rejected_style_%'
+                    OR version_name LIKE 'reviser_rejected_repeat_%'
                   )
                 """,
                 (chapter_id,),

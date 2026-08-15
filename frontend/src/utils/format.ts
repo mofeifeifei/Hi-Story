@@ -76,7 +76,7 @@ const internalValues: Record<string, string> = {
   task: "系统任务", agent: "模型调用", writer: "正文写作", reviewer: "质量检查", reviser: "正文修订",
   planner: "大纲策划", memory: "记忆整理", chapter: "正文生成", chapterOutlines: "细纲生成",
   standard: "正式生成", fast: "快速试稿", success: "成功", completed: "已完成", interrupted: "意外中断",
-  web_user_instruction_rejected_style: "未通过验收的候选稿", web_user_instruction_candidate_style: "修订候选稿",
+  web_user_instruction_rejected_style: "未通过验收的候选稿", web_user_instruction_candidate_style: "修订候选稿", web_user_instruction_first_pass: "第一轮修订稿",
 };
 
 function localizedValue(key: string, value: unknown): string {

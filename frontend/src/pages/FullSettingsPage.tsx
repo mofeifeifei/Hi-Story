@@ -3,7 +3,7 @@ import { Check, CheckCircle2, ChevronDown, CircleDollarSign, Eye, EyeOff, KeyRou
 import { useQuery } from "@tanstack/react-query";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/PageHeader";
-import { api } from "../services/api";
+import { api, createTaskId } from "../services/api";
 import { useAppStore } from "../stores/appStore";
 
 const agents = [["planner","策划模型"],["writer","正文写作模型"],["reviewer","审稿模型"],["reviser","修订模型"],["memory","记忆模型"]] as const;
@@ -39,6 +39,10 @@ export function SettingsPage() {
   function set(key: string, value: unknown) { setForm((current) => ({ ...current, [key]: value })); if (["provider", "model_provider", "base_url", "balance_url"].includes(key)) setBalance(null); setDirty(true); }
   function setAgent(key: string, value: string) { set("agent_models", { ...((form.agent_models as Record<string, string>) || {}), [key]: value }); }
   async function fetchModels() {
+    if (store.task) return;
+    const taskId = createTaskId("configModels");
+    const controller = new AbortController();
+    store.setTask({ id: taskId, kind: "configModels", title: "获取可用模型", detail: "", startedAt: Date.now(), controller });
     setModelsLoading(true);
     setMessage("");
     try {
@@ -51,24 +55,27 @@ export function SettingsPage() {
         max_retries: form.max_retries,
         use_system_proxy: form.use_system_proxy,
         proxy_url: form.proxy_url,
+        task_id: taskId,
       };
       if (newKey.trim()) body.api_key = newKey.trim();
-      const result = await api<{ models: AvailableModel[]; count: number }>("/api/config/models", { method: "POST", body });
+      const result = await api<{ models: AvailableModel[]; count: number }>("/api/config/models", { method: "POST", signal: controller.signal, body });
       setAvailableModels(result.models || []);
       const text = result.count > 0 ? `已获取 ${result.count} 个可用模型，可在模型输入框中搜索选择。` : "接口返回了空模型列表，可继续手动填写模型名称。";
       setMessage(text);
       store.notify(text, result.count > 0 ? "success" : "warning");
     } catch (error) {
-      const text = (error as Error).message;
-      setAvailableModels([]);
-      setMessage(text);
-      store.notify(text, "danger");
+      if ((error as Error).name === "AbortError") setMessage("获取可用模型已停止。");
+      else { const text = (error as Error).message; setAvailableModels([]); setMessage(text); store.notify(text, "danger"); }
     } finally {
       setModelsLoading(false);
+      if (useAppStore.getState().task?.id === taskId) store.setTask(null);
     }
   }
   async function fetchBalance() {
-    if (balanceLoading) return;
+    if (balanceLoading || store.task) return;
+    const taskId = createTaskId("configBalance");
+    const controller = new AbortController();
+    store.setTask({ id: taskId, kind: "configBalance", title: "查询账户余额", detail: "", startedAt: Date.now(), controller });
     setBalanceLoading(true);
     setMessage("");
     try {
@@ -81,20 +88,20 @@ export function SettingsPage() {
         timeout: form.timeout,
         use_system_proxy: form.use_system_proxy,
         proxy_url: form.proxy_url,
+        task_id: taskId,
       };
       if (newKey.trim()) body.api_key = newKey.trim();
-      const result = await api<BalanceResult>("/api/config/balance", { method: "POST", body });
+      const result = await api<BalanceResult>("/api/config/balance", { method: "POST", signal: controller.signal, body });
       setBalance(result);
       const text = result.supported ? "账户余额已更新。" : result.message || "当前服务商不支持余额查询。";
       setMessage(text);
       store.notify(text, result.supported ? "success" : "warning");
     } catch (error) {
-      const text = (error as Error).message;
-      setBalance(null);
-      setMessage(text);
-      store.notify(text, "danger");
+      if ((error as Error).name === "AbortError") setMessage("余额查询已停止。");
+      else { const text = (error as Error).message; setBalance(null); setMessage(text); store.notify(text, "danger"); }
     } finally {
       setBalanceLoading(false);
+      if (useAppStore.getState().task?.id === taskId) store.setTask(null);
     }
   }
   async function save(test = false) {
@@ -114,10 +121,23 @@ export function SettingsPage() {
       if (newKey.trim()) body.api_key = newKey.trim();
       const data = await api<Record<string, unknown>>("/api/config", { method: "PUT", body });
       setDirty(false); setForm({ ...data, api_key: undefined }); setKeyConfigured(String(data.api_key || "") === "********"); setNewKey("");
-      if (test) { const result = await api<{ message?: string }>("/api/config/test", { method: "POST" }); setMessage(result.message || "连接测试完成。"); }
+      if (test) {
+        const taskId = createTaskId("configTest");
+        const controller = new AbortController();
+        store.setTask({ id: taskId, kind: "configTest", title: "接口连接测试", detail: "", startedAt: Date.now(), controller });
+        try {
+          const result = await api<{ message?: string }>("/api/config/test", { method: "POST", signal: controller.signal, body: { task_id: taskId } });
+          setMessage(result.message || "连接测试完成。");
+        } finally {
+          if (useAppStore.getState().task?.id === taskId) store.setTask(null);
+        }
+      }
       else setMessage("设置已保存，下次调用模型时生效。");
       store.notify(test ? "接口连接测试完成。" : "模型设置已保存。", "success");
-    } catch (error) { setMessage((error as Error).message); store.notify((error as Error).message, "danger"); }
+    } catch (error) {
+      if ((error as Error).name === "AbortError") setMessage("接口连接测试已停止。");
+      else { setMessage((error as Error).message); store.notify((error as Error).message, "danger"); }
+    }
     finally { setSaving(false); if (test) setTesting(false); }
   }
   if (query.isLoading) return <div className="page"><PageHeader title="设置" /><div className="loading-block">正在读取设置...</div></div>;

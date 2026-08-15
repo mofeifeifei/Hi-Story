@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -36,6 +36,8 @@ export function WritingPage() {
   const [previewCandidate, setPreviewCandidate] = useState<{ text: string; label: string } | null>(null);
   const editorScroll = useRef<HTMLDivElement>(null);
   const loadingChapter = useRef(false);
+  const suppressScrollSave = useRef(false);
+  const scrollOwner = useRef<{ workId: number; chapterNumber: number } | null>(null);
   const restoreTimer = useRef<number | null>(null);
   const contextRequest = useRef<AbortController | null>(null);
 
@@ -65,6 +67,26 @@ export function WritingPage() {
     store.selectChapter(Number(chapters[0].chapter_number));
   }, [chapters.length, store.selectedChapter]);
 
+  useLayoutEffect(() => {
+    const workId = Number(store.selectedWorkId);
+    const chapterNumber = Number(store.selectedChapter);
+    const previous = scrollOwner.current;
+    if (previous && editorScroll.current && !loadingChapter.current && !suppressScrollSave.current) {
+      writeScroll(scrollKey(previous.chapterNumber, previous.workId), editorScroll.current.scrollTop);
+    }
+    if (!workId || !chapterNumber) {
+      scrollOwner.current = null;
+      return;
+    }
+    if (restoreTimer.current !== null) window.clearTimeout(restoreTimer.current);
+    loadingChapter.current = true;
+    suppressScrollSave.current = true;
+    scrollOwner.current = { workId, chapterNumber };
+    if (editorScroll.current) {
+      editorScroll.current.scrollTop = readScroll(scrollKey(chapterNumber, workId));
+    }
+  }, [store.selectedWorkId, store.selectedChapter]);
+
   useEffect(() => {
     if (!chapterState.data?.chapter || !editor) return;
     const chapter = chapterState.data.chapter;
@@ -85,9 +107,10 @@ export function WritingPage() {
     restoreTimer.current = window.setTimeout(() => {
       const current = useAppStore.getState();
       if (Number(current.selectedWorkId) !== targetWorkId || Number(current.selectedChapter) !== targetChapter) return;
+      restoreLocalDraft(chapter, targetWorkId);
+      restoreScroll(targetWorkId, targetChapter);
       loadingChapter.current = false;
-      restoreLocalDraft(chapter);
-      restoreScroll(chapter);
+      suppressScrollSave.current = false;
       restoreTimer.current = null;
     }, 0);
     return () => {
@@ -96,22 +119,25 @@ export function WritingPage() {
     };
   }, [chapterState.data?.chapter.id, chapterState.data?.chapter.updated_at, editor]);
 
-  useEffect(() => {
-    return () => { saveScroll(); };
-  }, [store.selectedWorkId, store.selectedChapter, chapterState.data?.chapter.updated_at]);
+  useEffect(() => () => {
+    const owner = scrollOwner.current;
+    if (owner && editorScroll.current) {
+      writeScroll(scrollKey(owner.chapterNumber, owner.workId), editorScroll.current.scrollTop);
+    }
+  }, []);
   useEffect(() => { store.setNavigationGuard(dirty ? () => window.confirm("当前正文有未保存修改。确定离开当前页面吗？") : null); return () => store.setNavigationGuard(null); }, [dirty]);
 
   function plainText() { return editor?.getText({ blockSeparator: "\n\n" }) || ""; }
   function draftKey(chapterNumber = store.selectedChapter, workId = store.selectedWorkId) { return `hi-story:draft:${workId}:${chapterNumber}`; }
-  function scrollKey(chapterNumber = store.selectedChapter, workId = store.selectedWorkId) { return `hi-story:scroll:${workId}:${chapterNumber}`; }
+  function scrollKey(chapterNumber: number, workId: number) { return `hi-story:scroll:v2:${workId}:${chapterNumber}`; }
   function expandedKey() { return `hi-story:writing-expanded:${store.selectedWorkId}`; }
   function saveLocalDraft(nextTitle = title) {
     if (!editor || !store.selectedChapter) return;
     try { localStorage.setItem(draftKey(), JSON.stringify({ text: plainText(), title: nextTitle, updatedAt: chapterState.data?.chapter.updated_at || "", savedAt: Date.now() })); } catch { /* Browser storage can be disabled. */ }
   }
-  function restoreLocalDraft(chapter: Chapter) {
+  function restoreLocalDraft(chapter: Chapter, workId: number) {
     try {
-      const draft = JSON.parse(localStorage.getItem(draftKey(chapter.chapter_number)) || "null");
+      const draft = JSON.parse(localStorage.getItem(draftKey(chapter.chapter_number, workId)) || "null");
       if (!draft || typeof draft.text !== "string" || draft.text === plainText()) return;
       if (window.confirm(`第 ${chapter.chapter_number} 章有一份尚未保存的本地草稿，是否恢复？`)) {
         loadingChapter.current = true;
@@ -119,22 +145,26 @@ export function WritingPage() {
         setTitle(draft.title || chapter.title || "");
         setDirty(true);
         loadingChapter.current = false;
-      } else localStorage.removeItem(draftKey(chapter.chapter_number));
+      } else localStorage.removeItem(draftKey(chapter.chapter_number, workId));
     } catch { /* Ignore malformed local data. */ }
   }
   function saveScroll() {
-    if (!editorScroll.current || !store.selectedChapter) return;
-    writeScroll(scrollKey(), editorScroll.current.scrollTop);
+    const owner = scrollOwner.current;
+    if (!owner || !editorScroll.current || loadingChapter.current || suppressScrollSave.current) return;
+    writeScroll(scrollKey(owner.chapterNumber, owner.workId), editorScroll.current.scrollTop);
   }
-  function restoreScroll(chapter: Chapter) {
+  function restoreScroll(workId: number, chapterNumber: number) {
     if (!editorScroll.current) return;
-    editorScroll.current.scrollTop = readScroll(scrollKey(chapter.chapter_number));
+    editorScroll.current.scrollTop = readScroll(scrollKey(chapterNumber, workId));
   }
 
   async function chooseChapter(number: number) {
     if (number === store.selectedChapter) return;
     if (dirty && !window.confirm("当前章节有未保存修改。切换后仍会保留本地草稿，确定继续吗？")) return;
-    saveScroll();
+    const owner = scrollOwner.current;
+    if (owner && editorScroll.current) {
+      writeScroll(scrollKey(owner.chapterNumber, owner.workId), editorScroll.current.scrollTop);
+    }
     store.selectChapter(number);
   }
 
@@ -184,7 +214,7 @@ export function WritingPage() {
       if (kind === "revise") data = await api(`/api/works/${taskWorkId}/chapters/${chapter.chapter_number}/revise`, { method: "POST", signal: controller.signal, body: { task_id: taskId, instruction: instruction.trim(), current_text: plainText(), chapter_id: chapter.id, updated_at: chapter.updated_at, revision: Number(chapter.revision || 0) } });
       if (kind === "memory") data = await api(`/api/works/${taskWorkId}/chapters/${chapter.chapter_number}/memory`, { method: "POST", signal: controller.signal, body: { task_id: taskId, chapter_id: chapter.id, updated_at: chapter.updated_at, revision: Number(chapter.revision || 0) } });
       const current = useAppStore.getState();
-      const targetStillActive = Number(current.selectedWorkId) === taskWorkId && Number(current.selectedChapter) === Number(chapter.chapter_number);
+      const targetStillActive = current.page === "writing" && Number(current.selectedWorkId) === taskWorkId && Number(current.selectedChapter) === Number(chapter.chapter_number);
       if (kind === "revise" && targetStillActive) {
         setInstruction("");
       }
@@ -207,7 +237,7 @@ export function WritingPage() {
         if (targetStillActive) {
           setDirty(false);
           if (kind === "memory") {
-            localStorage.removeItem(draftKey(chapter.chapter_number));
+            localStorage.removeItem(draftKey(chapter.chapter_number, taskWorkId));
             setCandidateText(null);
           }
         }
@@ -351,7 +381,7 @@ export function WritingPage() {
       const next = [...remaining].sort((a, b) => Number(a.chapter_number) - Number(b.chapter_number)).find((item) => Number(item.chapter_number) >= chapter.chapter_number)
         || [...remaining].sort((a, b) => Number(b.chapter_number) - Number(a.chapter_number))[0];
       store.selectChapter(next ? Number(next.chapter_number) : null);
-      setDirty(false); localStorage.removeItem(draftKey(chapter.chapter_number));
+      setDirty(false); localStorage.removeItem(draftKey(chapter.chapter_number, Number(store.selectedWorkId)));
       store.notify(fromCurrent ? `已删除 ${Number(data.deleted_count || 0)} 章。` : `第 ${chapter.chapter_number} 章已删除。`, "success");
     } catch (error) { store.notify((error as Error).message, "danger"); }
   }
@@ -380,7 +410,7 @@ export function WritingPage() {
         {inspectorTab === "continuity" && <><h3>上下章衔接</h3><pre className="readable">{loadingContext ? "正在构建本章上下文..." : contextReadable || readable(context)}</pre></>}
         {inspectorTab === "revision" && <div className="revision-box"><h3>修订建议</h3>{candidateText && <p className="candidate-warning">当前显示的是候选稿复审结果。候选稿未覆盖编辑器正文。</p>}{visibleRevisionAdvice.length ? <div className="revision-advice-list">{visibleRevisionAdvice.map((item, index) => <section className="revision-advice-item" key={`${index}-${item.target}-${item.action}`}><div className="revision-advice-head"><span>{index + 1}</span><strong>{item.target || item.evidence || "本章相关段落"}</strong></div><p><b>修改：</b>{item.action}</p></section>)}</div> : <p className="revision-empty">当前正文没有可用的修订建议。</p>}<button className="btn" disabled={!revisionCopyText.trim()} onClick={copyRevisionText}><Copy size={15} />复制修改话术</button><label className="field">修改要求<textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="粘贴上方修改话术，或直接写清楚要改什么。" /></label><button className="btn primary" disabled={!instruction.trim() || Boolean(store.task)} onClick={() => runTask("revise")}><Play size={15} />按要求修订</button></div>}
         {inspectorTab === "memory" && <><h3>章节记忆</h3><pre className="readable">{chapterState.data?.memory_readable || readable(safeJson(chapter?.memory_json, null))}</pre></>}
-        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); return <Candidate key={String(version.id)} text={text} label="历史候选稿" disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label: "历史候选稿" })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
+        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); const label = candidateLabel(version); return <Candidate key={String(version.id)} text={text} label={label} disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
       </div></aside>
     </div>
     {previewCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPreviewCandidate(null)}><section className="candidate-preview" role="dialog" aria-modal="true" aria-label="候选稿预览" onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{previewCandidate.label}</strong><span>候选稿，未覆盖最终稿</span></div><button className="icon-button" title="关闭预览" onClick={() => setPreviewCandidate(null)}><X size={17} /></button></header><div className="candidate-preview-body">{previewCandidate.text}</div><footer><button className="btn" onClick={() => setPreviewCandidate(null)}>关闭</button><button className="btn" disabled={Boolean(store.task) || saveMutation.isPending} onClick={() => loadCandidate(previewCandidate.text)}><Eye size={15} />载入编辑器</button><button className="btn primary" disabled={Boolean(store.task) || saveMutation.isPending} onClick={() => promoteCandidate(previewCandidate.text)}><Save size={15} />保存为最终稿</button></footer></section></div>}
@@ -388,6 +418,13 @@ export function WritingPage() {
 }
 
 function Candidate({ text, label, disabled = false, onPreview, onLoad, onPromote, onDelete }: { text: string; label: string; disabled?: boolean; onPreview: () => void; onLoad: () => void; onPromote: () => void; onDelete?: () => void }) { return <div className="candidate"><div className="candidate-head"><strong>{label}</strong><span className="status-badge problem_draft">未覆盖最终稿</span></div><p>{text}</p><div className="candidate-actions"><button className="btn small" onClick={onPreview}><Eye size={14} />预览</button><button className="btn small" disabled={disabled} onClick={onLoad}><Play size={14} />载入</button><button className="btn small" disabled={disabled} onClick={onPromote}><Save size={14} />转为最终稿</button>{onDelete && <button className="icon-button danger-icon" disabled={disabled} title="删除候选稿" onClick={onDelete}><Trash2 size={14} /></button>}</div></div>; }
+function candidateLabel(version: Record<string, unknown>): string {
+  const name = String(version.version_name || "");
+  if (name === "web_user_instruction_first_pass") return "第一轮修订稿";
+  if (name.startsWith("reviser_rejected_repeat_")) return "重复风险未采用稿";
+  if (name.startsWith("reviser_rejected_style_")) return "风格校验未采用稿";
+  return "历史候选稿";
+}
 function textToHtml(text: string) { return String(text || "").split(/\n{2,}|\r?\n/).filter(Boolean).map((line) => `<p>${escapeHtml(line)}</p>`).join(""); }
 function escapeHtml(text: string) { return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }
 function revisionAdviceFrom(review?: Record<string, unknown>): RevisionAdvice[] {

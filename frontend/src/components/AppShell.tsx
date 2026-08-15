@@ -29,10 +29,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   const currentWork = store.works.find((work) => Number(work.id) === Number(store.selectedWorkId));
   const taskQuery = useQuery({
     queryKey: ["task", store.task?.id],
-    queryFn: () => api<{ status?: string; stage?: string; detail?: string; error?: string }>(`/api/tasks/${store.task!.id}`),
+    queryFn: () => api<{ status?: string; stage?: string; detail?: string; error?: string } | null>(`/api/tasks/${store.task!.id}`),
     enabled: Boolean(store.task),
     refetchInterval: store.task ? 1000 : false,
   });
+  const taskBlocksNavigation = ["plan", "configModels", "configBalance", "configTest"].includes(String(store.task?.kind || ""));
 
   useEffect(() => {
     if (!worksQuery.data) return;
@@ -58,6 +59,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const status = String(taskQuery.data?.status || "");
+    if (store.task && taskQuery.isSuccess && taskQuery.data === null) {
+      store.setTask(null);
+      queryClient.invalidateQueries({ queryKey: ["active-task"] });
+      return;
+    }
     if (!store.task || !["done", "failed", "cancelled"].includes(status)) return;
     const finishedTask = store.task;
     if (status === "failed" && taskQuery.data?.error) store.notify(taskQuery.data.error, "danger");
@@ -69,7 +75,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     queryClient.invalidateQueries({ queryKey: ["library-counts", finishedTask.workId] });
     queryClient.invalidateQueries({ queryKey: ["records-page", finishedTask.workId] });
     queryClient.invalidateQueries({ queryKey: ["works"] });
-  }, [taskQuery.data?.status]);
+  }, [taskQuery.data?.status, taskQuery.data, taskQuery.isSuccess]);
 
   useEffect(() => {
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -103,8 +109,15 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   async function stopTask() {
     if (!store.task) return;
-    try { await cancelTask(store.task.id); } catch { /* The active request will report its own final state. */ }
-    store.notify("已请求停止任务，正在等待模型请求退出；已经完整返回的修订稿会保留为候选稿。", "warning");
+    const taskId = store.task.id;
+    if (String(taskQuery.data?.status || "") === "cancelling") return;
+    try {
+      await cancelTask(taskId);
+      queryClient.setQueryData(["task", taskId], (current: Record<string, unknown> | undefined) => ({ ...current, status: "cancelling", detail: "正在终止模型请求" }));
+      store.notify("正在停止任务；已经完整返回的修订稿会保留为候选稿。", "warning");
+    } catch (error) {
+      store.notify(`停止任务失败：${(error as Error).message}`, "danger");
+    }
   }
 
   function openPendingResult() {
@@ -130,7 +143,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="sidebar-body">
           <div className="work-switcher">
-            <select className="work-select" value={store.selectedWorkId || ""} onChange={(event) => store.selectWork(Number(event.target.value))} aria-label="切换作品">
+            <select className="work-select" value={store.selectedWorkId || ""} disabled={Boolean(store.task)} title={store.task ? "请先停止或等待当前任务结束" : "切换作品"} onChange={(event) => store.selectWork(Number(event.target.value))} aria-label="切换作品">
               {!store.works.length && <option value="">暂无作品</option>}
               {store.works.map((work) => <option key={work.id} value={work.id}>{work.title || "未命名作品"}</option>)}
             </select>
@@ -140,7 +153,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="nav-label">创作流程</div>
           <nav className="main-nav">
             {pages.map(({ key, label, icon: Icon }) => (
-              <button key={key} className={`nav-button ${store.page === key ? "active" : ""}`} onClick={() => store.setPage(key)} title={label}>
+              <button key={key} className={`nav-button ${store.page === key ? "active" : ""}`} disabled={taskBlocksNavigation && store.page !== key} onClick={() => store.setPage(key)} title={taskBlocksNavigation && store.page !== key ? "当前任务的结果只在本页显示，请先等待完成或停止任务" : label}>
                 <Icon size={18} /><span>{label}</span>
               </button>
             ))}
@@ -152,7 +165,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <header className="topbar">
           <div className="topbar-title"><h1>{currentWork?.title || "未选择作品"}</h1><p>{pageLabel}{currentWork?.genre ? ` · ${currentWork.genre}` : ""}</p></div>
           <div className="topbar-actions">
-            {store.task && <div className="task-chip"><LoaderCircle className="spinner" size={15} /><span>{store.task.title} · {stageLabel(taskQuery.data?.stage, taskQuery.data?.detail)} · {formatElapsed(elapsed)}</span><button className="icon-button" onClick={stopTask} title="停止任务"><CircleStop size={17} /></button></div>}
+            {store.task && <div className="task-chip"><LoaderCircle className="spinner" size={15} /><span>{store.task.title} · {String(taskQuery.data?.status || "") === "cancelling" ? "正在停止" : stageLabel(taskQuery.data?.stage, taskQuery.data?.detail)} · {formatElapsed(elapsed)}</span><button className="icon-button" disabled={String(taskQuery.data?.status || "") === "cancelling"} onClick={stopTask} title="停止任务"><CircleStop size={17} /></button></div>}
             <button className="icon-button" disabled={Boolean(store.navigationGuard)} onClick={() => queryClient.invalidateQueries()} title={store.navigationGuard ? "请先保存当前修改" : "刷新当前数据"}><RefreshCw size={17} /></button>
             {store.pendingResults.length > 0 && <button className="pending-result-button" onClick={openPendingResult} title="打开最早一条待处理结果"><BookOpenText size={16} />待处理结果 {store.pendingResults.length}</button>}
           </div>

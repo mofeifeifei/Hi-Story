@@ -93,25 +93,29 @@ class WebState:
     def register_task_cleanup(self, task_id: str, cleanup: Any) -> None:
         if not task_id or cleanup is None:
             return
+        run_immediately = False
         with self._task_lock:
-            self._task_cleanups[task_id] = cleanup
+            task = self._tasks.get(task_id)
+            if task is None or task.get("status") not in {"running", "cancelling"}:
+                run_immediately = True
+            elif task.get("status") == "cancelling":
+                run_immediately = True
+            else:
+                self._task_cleanups[task_id] = cleanup
+        if run_immediately:
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001
+                return
 
-    def cancel_task(self, task_id: str) -> None:
+    def cancel_task(self, task_id: str) -> bool:
         if not task_id:
-            return
+            return False
         cleanup = None
         with self._task_lock:
-            task = self._tasks.setdefault(
-                task_id,
-                {
-                    "id": task_id,
-                    "kind": "",
-                    "title": "",
-                    "started_at": now_text(),
-                    "finished_at": "",
-                    "error": "",
-                },
-            )
+            task = self._tasks.get(task_id)
+            if task is None:
+                return False
             if task.get("status") not in {"done", "failed", "cancelled"}:
                 task["status"] = "cancelling"
                 cleanup = self._task_cleanups.get(task_id)
@@ -119,7 +123,8 @@ class WebState:
             try:
                 cleanup()
             except Exception:  # noqa: BLE001
-                return
+                return True
+        return True
 
     def task_cancelled(self, task_id: str) -> bool:
         if not task_id:

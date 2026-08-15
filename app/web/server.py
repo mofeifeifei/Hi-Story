@@ -86,6 +86,9 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
+            if _is_expected_cancellation(exc):
+                self._send_json({"ok": False, "error": str(exc)}, status=409)
+                return
             _log_server_error(method, path, exc)
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
@@ -123,31 +126,54 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 STATE.reload_config()
                 return public_config(config)
         if parts == ["api", "config", "test"] and method == "POST":
-            return _test_ai_connection()
+            return _test_ai_connection(body)
         if parts == ["api", "config", "models"] and method == "POST":
-            config = model_discovery_config(load_config(), body)
-            client = AIClient(config)
+            task_id = _task_id(body)
+            STATE.start_task(task_id, kind="configModels", title="获取可用模型")
+            client: AIClient | None = None
             try:
+                config = model_discovery_config(load_config(), _without_task_control(body))
+                client = AIClient(config)
+                STATE.register_task_cleanup(task_id, client.close)
                 models = client.list_models()
             except AIClientError as exc:
+                _finish_config_task_error(task_id, exc)
                 raise ValueError(str(exc)) from exc
+            except Exception as exc:
+                _finish_config_task_error(task_id, exc)
+                raise
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
+                if not STATE.task_status(task_id).get("finished_at"):
+                    STATE.finish_task(task_id)
             return {"models": models, "count": len(models)}
         if parts == ["api", "config", "balance"] and method == "POST":
-            config = balance_query_config(load_config(), body)
-            client = AIClient(config)
+            task_id = _task_id(body)
+            STATE.start_task(task_id, kind="configBalance", title="查询账户余额")
+            client: AIClient | None = None
             try:
+                config = balance_query_config(load_config(), _without_task_control(body))
+                client = AIClient(config)
+                STATE.register_task_cleanup(task_id, client.close)
                 return client.get_balance()
             except AIClientError as exc:
+                _finish_config_task_error(task_id, exc)
                 raise ValueError(str(exc)) from exc
+            except Exception as exc:
+                _finish_config_task_error(task_id, exc)
+                raise
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
+                if not STATE.task_status(task_id).get("finished_at"):
+                    STATE.finish_task(task_id)
         if parts == ["api", "shutdown"] and method == "POST":
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return {"message": "服务正在关闭"}
         if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "cancel" and method == "POST":
-            STATE.cancel_task(parts[2])
+            if not STATE.cancel_task(parts[2]):
+                raise ValueError("任务不存在或已经结束，请刷新页面后重试。")
             return STATE.task_status(parts[2]) or {"cancelled": True}
         if parts == ["api", "tasks", "active"] and method == "GET":
             return _active_task_state()
@@ -466,6 +492,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 if len(parts) == 6 and parts[5] == "memory" and method == "POST":
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
+                    output_preview = ""
                     _start_task(
                         task_id,
                         work_id,
@@ -477,23 +504,21 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     )
                     try:
                         workflow = _task_workflow_for(task_id)
-                        workflow.client.set_deadline(300)
-                        try:
-                            return _generate_memory(
-                                work_id,
-                                chapter_number,
-                                body,
-                                workflow=workflow,
-                                should_stop=lambda: STATE.task_cancelled(task_id),
-                            )
-                        finally:
-                            workflow.client.clear_deadline()
+                        result = _generate_memory(
+                            work_id,
+                            chapter_number,
+                            body,
+                            workflow=workflow,
+                            should_stop=lambda: STATE.task_cancelled(task_id),
+                        )
+                        output_preview = f"第 {chapter_number} 章记忆已入库。"
+                        return result
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id, chapter_id=chapter_id)
                         raise
                     finally:
                         if not STATE.task_status(task_id).get("finished_at"):
-                            _finish_task(task_id, work_id, chapter_id=chapter_id)
+                            _finish_task(task_id, work_id, chapter_id=chapter_id, output_preview=output_preview)
                 if len(parts) == 6 and parts[5] in {"revise", "revision"} and method == "POST":
                     if not str(body.get("instruction") or "").strip():
                         raise ValueError("请先填写修改意见。")
@@ -501,6 +526,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         raise ValueError("当前正文为空，无法按意见修订。")
                     task_id = _task_id(body)
                     chapter_id = _chapter_id_or_none(work_id, chapter_number)
+                    output_preview = ""
                     _start_task(
                         task_id,
                         work_id,
@@ -512,30 +538,34 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     )
                     try:
                         workflow = _task_workflow_for(task_id)
-                        workflow.client.set_deadline(420)
-                        try:
-                            return _revise_chapter_with_instruction(
+                        result = _revise_chapter_with_instruction(
+                            work_id,
+                            chapter_number,
+                            body,
+                            workflow=workflow,
+                            should_stop=lambda: STATE.task_cancelled(task_id),
+                            on_stage=lambda stage, detail: _update_task_stage(
+                                task_id,
                                 work_id,
-                                chapter_number,
-                                body,
-                                workflow=workflow,
-                                should_stop=lambda: STATE.task_cancelled(task_id),
-                                on_stage=lambda stage, detail: _update_task_stage(
-                                    task_id,
-                                    work_id,
-                                    chapter_id,
-                                    stage,
-                                    detail,
-                                ),
+                                chapter_id,
+                                stage,
+                                detail,
+                            ),
+                        )
+                        output_preview = str(result.get("message") or "").strip()
+                        if not output_preview:
+                            output_preview = (
+                                f"第 {chapter_number} 章修订稿已保存为候选版本。"
+                                if result.get("candidate_only")
+                                else f"第 {chapter_number} 章正文修订已保存。"
                             )
-                        finally:
-                            workflow.client.clear_deadline()
+                        return result
                     except Exception as exc:
                         _finish_task_error(task_id, exc, work_id=work_id, chapter_id=chapter_id)
                         raise
                     finally:
                         if not STATE.task_status(task_id).get("finished_at"):
-                            _finish_task(task_id, work_id, chapter_id=chapter_id)
+                            _finish_task(task_id, work_id, chapter_id=chapter_id, output_preview=output_preview)
                 if len(parts) == 7 and parts[5] == "versions" and method == "DELETE":
                     chapter = STATE.repo.get_chapter(work_id, chapter_number)
                     version_id = _to_int(parts[6], "版本 ID")
@@ -660,8 +690,8 @@ def _task_workflow_for(task_id: str) -> NovelWorkflow:
     return workflow
 
 
-def _test_ai_connection() -> dict[str, Any]:
-    task_id = f"config-test-{uuid.uuid4().hex}"
+def _test_ai_connection(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    task_id = _task_id(body or {})
     STATE.start_task(task_id, kind="configTest", title="接口连接测试")
     client: AIClient | None = None
     try:
@@ -672,13 +702,25 @@ def _test_ai_connection() -> dict[str, Any]:
         config["model_reasoning_effort"] = "low"
         config["temperature"] = 0
         client = AIClient(config)
+        STATE.register_task_cleanup(task_id, client.close)
         return client.test_connection()
     except AIClientError as exc:
+        _finish_config_task_error(task_id, exc)
         raise ValueError(str(exc)) from exc
+    except Exception as exc:
+        _finish_config_task_error(task_id, exc)
+        raise
     finally:
         if client is not None:
             client.close()
-        STATE.finish_task(task_id)
+        if not STATE.task_status(task_id).get("finished_at"):
+            STATE.finish_task(task_id)
+
+
+def _finish_config_task_error(task_id: str, exc: Exception) -> None:
+    message = str(exc)
+    cancelled = STATE.task_cancelled(task_id) or message == "AI 请求已取消。"
+    STATE.finish_task(task_id, status="cancelled" if cancelled else "failed", error=message)
 
 
 def _available_port(host: str, start: int) -> int:
@@ -709,8 +751,17 @@ def _log_server_error(method: str, path: str, exc: Exception) -> None:
         return
 
 
+def _is_expected_cancellation(exc: Exception) -> bool:
+    message = str(exc)
+    return message == "AI 请求已取消。" or message.startswith(TASK_CANCELLED_PREFIX)
+
+
 def _task_id(body: dict[str, Any]) -> str:
     return str(body.get("task_id") or "").strip() or f"task-{uuid.uuid4().hex}"
+
+
+def _without_task_control(body: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in body.items() if key != "task_id"}
 
 
 def _raise_if_stopped(task_id: str, message: str) -> None:
@@ -1488,23 +1539,44 @@ def _revise_chapter_with_instruction(
         expected_scenes,
     )
     if correction_issues and not post_review.get("semantic_review_failed"):
-        STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_first_pass", revised)
-        revised = _run_reviser_call(
+        first_pass = revised
+        first_pass_version_id = STATE.repo.add_version(
             work_id,
-            chapter,
-            workflow,
-            phase="定向返修",
-            detail="复审发现实质问题，正在定向返修",
-            input_preview={"instruction": instruction, "issues": correction_issues, "current_text": revised[:3000]},
-            call=lambda: workflow.reviser.refine_revision(
-                reviser_context,
-                revised,
-                instruction,
-                post_review,
-                correction_issues,
-            ),
-            on_stage=on_stage,
+            chapter["id"],
+            "web_user_instruction_first_pass",
+            first_pass,
         )
+        try:
+            revised = _run_reviser_call(
+                work_id,
+                chapter,
+                workflow,
+                phase="定向返修",
+                detail="复审发现实质问题，正在定向返修",
+                input_preview={"instruction": instruction, "issues": correction_issues, "current_text": first_pass[:3000]},
+                call=lambda: workflow.reviser.refine_revision(
+                    reviser_context,
+                    first_pass,
+                    instruction,
+                    post_review,
+                    correction_issues,
+                ),
+                on_stage=on_stage,
+            )
+        except AIClientError as exc:
+            message = f"第一轮修订已完成，但定向返修未完成：{exc} 第一轮稿已保留为候选稿，未覆盖最终稿。"
+            return {
+                **_chapter_state(work_id, chapter_number),
+                "review": post_review,
+                "review_readable": format_review_readable(post_review),
+                "revised_text": first_pass,
+                "saved": False,
+                "candidate_only": True,
+                "candidate_version_id": first_pass_version_id,
+                "quality_blockers": [message, *correction_issues],
+                "quality_gate": {"final": after_quality, "blockers": correction_issues},
+                "message": message,
+            }
         if should_stop and should_stop():
             return _cancelled_revision_candidate(
                 work_id,
