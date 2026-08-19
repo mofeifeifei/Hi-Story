@@ -66,6 +66,15 @@ def init_db(db_path: Path) -> None:
             _ensure_column(conn, "characters", column, definition)
         _ensure_column(conn, "chapters", "outline_json", "TEXT")
         _ensure_column(conn, "chapters", "scene_cards_json", "TEXT")
+        _ensure_column(conn, "versions", "candidate_number", "INTEGER")
+        _backfill_candidate_numbers(conn)
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_candidate_number
+            ON versions(chapter_id, candidate_number)
+            WHERE candidate_number IS NOT NULL
+            """
+        )
         for column, definition in [
             ("input_chars", "INTEGER DEFAULT 0"),
             ("output_chars", "INTEGER DEFAULT 0"),
@@ -200,6 +209,43 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_candidate_numbers(conn: sqlite3.Connection) -> None:
+    """Assign permanent sequence numbers to legacy candidate versions once."""
+    existing = conn.execute(
+        """
+        SELECT chapter_id, COALESCE(MAX(candidate_number), 0) AS maximum
+        FROM versions
+        WHERE candidate_number IS NOT NULL
+        GROUP BY chapter_id
+        """
+    ).fetchall()
+    counters = {int(row["chapter_id"]): int(row["maximum"] or 0) for row in existing}
+    rows = conn.execute(
+        """
+        SELECT id, chapter_id
+        FROM versions
+        WHERE candidate_number IS NULL
+          AND (
+            version_name IN (
+              'web_user_instruction_rejected_style',
+              'web_user_instruction_candidate_style',
+              'web_user_instruction_first_pass'
+            )
+            OR version_name LIKE 'reviser_rejected_style_%'
+            OR version_name LIKE 'reviser_rejected_repeat_%'
+          )
+        ORDER BY chapter_id, created_at, id
+        """
+    ).fetchall()
+    for row in rows:
+        chapter_id = int(row["chapter_id"])
+        counters[chapter_id] = counters.get(chapter_id, 0) + 1
+        conn.execute(
+            "UPDATE versions SET candidate_number = ? WHERE id = ?",
+            (counters[chapter_id], int(row["id"])),
+        )
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:

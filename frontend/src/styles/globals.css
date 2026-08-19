@@ -67,8 +67,6 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .btn.quiet { border-color: transparent; background: transparent; }
 .btn.small { min-height: 30px; padding: 0 9px; font-size: 12px; }
 .button-menu { position: relative; }
-.button-menu > summary { list-style: none; }
-.button-menu > summary::-webkit-details-marker { display: none; }
 .menu-popover { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: 210px; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-md); }
 .menu-popover button { width: 100%; justify-content: flex-start; }
 .menu-popover .btn + .btn { margin-top: 4px; }
@@ -148,6 +146,9 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .candidate-warning { margin: 0; padding: 9px 10px; border-left: 2px solid var(--gold); background: var(--gold-soft); color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
 .candidate { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
 .candidate-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.candidate-title { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.latest-mark { display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px; border-radius: 999px; background: var(--green-soft); color: var(--green-deep); font-size: 10px; font-weight: 650; }
+.candidate-meta { margin: -2px 0 7px; color: var(--muted); font-size: 11px; }
 .candidate p { max-height: 100px; overflow: hidden; margin: 0 0 8px; color: var(--muted); font-family: var(--font-copy); line-height: 1.65; }
 .candidate-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .danger-icon { color: var(--red); }

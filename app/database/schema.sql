@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS versions (
   chapter_id INTEGER NOT NULL,
   version_name TEXT,
   content TEXT,
+  candidate_number INTEGER,
   created_at TEXT,
   FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
 );

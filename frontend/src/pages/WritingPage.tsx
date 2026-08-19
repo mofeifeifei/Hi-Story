@@ -31,15 +31,34 @@ export function WritingPage() {
   const [loadingContext, setLoadingContext] = useState(false);
   const [mode, setMode] = useState("standard");
   const [candidateText, setCandidateText] = useState<string | null>(null);
+  const [candidateVersion, setCandidateVersion] = useState<Record<string, unknown> | null>(null);
   const [candidateReview, setCandidateReview] = useState<Record<string, unknown> | null>(null);
   const [candidateBlockers, setCandidateBlockers] = useState<string[]>([]);
   const [previewCandidate, setPreviewCandidate] = useState<{ text: string; label: string } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const editorScroll = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const loadingChapter = useRef(false);
   const suppressScrollSave = useRef(false);
   const scrollOwner = useRef<{ workId: number; chapterNumber: number } | null>(null);
   const restoreTimer = useRef<number | null>(null);
   const contextRequest = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function closeOnOutside(event: PointerEvent) {
+      if (menuRef.current && event.target instanceof Node && !menuRef.current.contains(event.target)) setMenuOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
 
   const workState = useQuery({
     queryKey: ["work", store.selectedWorkId],
@@ -99,6 +118,7 @@ export function WritingPage() {
     editor.commands.setContent(textToHtml(text), { emitUpdate: false });
     setDirty(false);
     setCandidateText(null);
+    setCandidateVersion(null);
     setCandidateReview(null);
     setCandidateBlockers([]);
     setInstruction("");
@@ -165,6 +185,7 @@ export function WritingPage() {
     if (owner && editorScroll.current) {
       writeScroll(scrollKey(owner.chapterNumber, owner.workId), editorScroll.current.scrollTop);
     }
+    setMenuOpen(false);
     store.selectChapter(number);
   }
 
@@ -187,7 +208,7 @@ export function WritingPage() {
         store.addPendingResult({ workId: target.workId, chapterNumber: target.chapterNumber, title: "最终稿保存完成", detail: `第 ${target.chapterNumber} 章已保存。` });
         return;
       }
-      setCandidateText(null); setCandidateReview(null); setCandidateBlockers([]); setDirty(false); setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" }));
+      setCandidateText(null); setCandidateVersion(null); setCandidateReview(null); setCandidateBlockers([]); setDirty(false); setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" }));
       const gate = (data as any).quality_gate?.manual || {};
       const issueCount = [...(gate.blockers || []), ...(gate.warnings || [])].length;
       const alreadySaved = Boolean((data as any).quality_gate?.already_saved);
@@ -209,6 +230,7 @@ export function WritingPage() {
     const taskWorkId = Number(store.selectedWorkId);
     if (kind !== "chapter" && dirty && !window.confirm("当前修改尚未保存。修订和记忆将以编辑区当前内容为准，确定继续吗？")) return;
     if (kind === "revise" && !instruction.trim()) { store.notify("请先填写明确的修改要求。", "warning"); return; }
+    setMenuOpen(false);
     const taskId = createTaskId(kind);
     const controller = new AbortController();
     store.setTask({ id: taskId, kind, title: kind === "chapter" ? `生成第 ${chapter.chapter_number} 章` : kind === "revise" ? `修订第 ${chapter.chapter_number} 章` : `整理第 ${chapter.chapter_number} 章记忆`, detail: "", startedAt: Date.now(), controller, workId: taskWorkId, chapterNumber: chapter.chapter_number });
@@ -224,6 +246,10 @@ export function WritingPage() {
       }
       if (kind === "revise" && data.candidate_only && data.revised_text && targetStillActive) {
         setCandidateText(data.revised_text);
+        const savedCandidate = Array.isArray(data.candidate_versions)
+          ? data.candidate_versions.find((item: Record<string, unknown>) => Number(item.id || 0) === Number(data.candidate_version_id || 0))
+          : null;
+        setCandidateVersion(savedCandidate || null);
         setCandidateReview(data.review || null);
         setCandidateBlockers((data.quality_blockers || []).map((item: unknown) => String(item)));
         setInspectorTab("revision");
@@ -232,6 +258,7 @@ export function WritingPage() {
       } else {
         if (kind === "revise" && targetStillActive) {
           setCandidateText(null);
+          setCandidateVersion(null);
           setCandidateReview(null);
           setCandidateBlockers([]);
         }
@@ -243,6 +270,7 @@ export function WritingPage() {
           if (kind === "memory") {
             localStorage.removeItem(draftKey(chapter.chapter_number, taskWorkId));
             setCandidateText(null);
+            setCandidateVersion(null);
           }
         }
         if (targetStillActive) store.notify(kind === "memory" ? "章节记忆已入库。" : kind === "revise" ? (data.candidate_only ? "修订稿已保存为候选版本。" : "正文已修订。") : "正文生成完成。", data.candidate_only ? "warning" : "success");
@@ -296,7 +324,7 @@ export function WritingPage() {
   const visibleRevisionAdvice = revisionAdvice;
   const revisionCopyText = useMemo(() => formatRevisionCopy(visibleRevisionAdvice), [visibleRevisionAdvice]);
   const versions = chapterState.data?.candidate_versions || [];
-  const visibleVersions = versions.filter((version) => !candidateText || String(version.content || "").trim() !== candidateText.trim());
+  const visibleVersions = versions.filter((version) => !candidateText || Number(version.id || 0) !== Number(candidateVersion?.id || 0));
   const canSaveFinal = Boolean(
     chapter
     && plainText().trim()
@@ -402,7 +430,7 @@ export function WritingPage() {
       <button className="btn" disabled={!canSaveFinal} onClick={() => saveMutation.mutate()}><Save size={16} />保存最终稿</button>
       <button className="btn" disabled={!canGenerateMemory} title={canGenerateMemory ? "根据当前稿生成记忆；问题稿会先保存为最终稿" : "当前章节没有可用正文"} onClick={() => runTask("memory")}><FileClock size={16} />记忆入库</button>
       <button className="icon-button" onClick={store.toggleInspector} title={store.inspectorOpen ? "收起辅助面板" : "展开辅助面板"}>{store.inspectorOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
-      <details className="button-menu"><summary className="icon-button" title="更多操作"><MoreHorizontal size={18} /></summary><div className="menu-popover"><button className="btn danger" onClick={() => clearChapter(store.selectedWorkId!, chapter!, queryClient, store.notify, () => { localStorage.removeItem(draftKey(chapter!.chapter_number)); setDirty(false); })} disabled={!chapter || workTask}><Trash2 size={15} />清空本章正文</button><button className="btn danger" onClick={() => deleteChapterRange(false)} disabled={!chapter || workTask}><Trash2 size={15} />删除当前章节</button><button className="btn danger" onClick={() => deleteChapterRange(true)} disabled={!chapter || workTask}><Trash2 size={15} />删除本章及之后</button></div></details>
+      <div className="button-menu" ref={menuRef}><button className="icon-button" type="button" aria-expanded={menuOpen} aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)} title="更多操作"><MoreHorizontal size={18} /></button>{menuOpen && <div className="menu-popover" role="menu"><button className="btn danger" role="menuitem" onClick={() => { setMenuOpen(false); clearChapter(store.selectedWorkId!, chapter!, queryClient, store.notify, () => { localStorage.removeItem(draftKey(chapter!.chapter_number)); setDirty(false); }); }} disabled={!chapter || workTask}><Trash2 size={15} />清空本章正文</button><button className="btn danger" role="menuitem" onClick={() => { setMenuOpen(false); deleteChapterRange(false); }} disabled={!chapter || workTask}><Trash2 size={15} />删除当前章节</button><button className="btn danger" role="menuitem" onClick={() => { setMenuOpen(false); deleteChapterRange(true); }} disabled={!chapter || workTask}><Trash2 size={15} />删除本章及之后</button></div>}</div>
     </>} />
     <div className={`writing-shell ${store.inspectorOpen ? "" : "inspector-closed"}`}>
       <aside className="chapter-rail"><div className="rail-search"><div className="search-box"><Search size={16} /><input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索章节" /></div></div><div className="chapter-list">
@@ -418,20 +446,29 @@ export function WritingPage() {
         {inspectorTab === "continuity" && <><h3>上下章衔接</h3><pre className="readable">{loadingContext ? "正在构建本章上下文..." : contextReadable || readable(context)}</pre></>}
         {inspectorTab === "revision" && <div className="revision-box"><h3>修订建议</h3>{candidateText && <p className="candidate-warning">当前显示的是候选稿复审结果。候选稿未覆盖编辑器正文。</p>}{visibleRevisionAdvice.length ? <div className="revision-advice-list">{visibleRevisionAdvice.map((item, index) => <section className="revision-advice-item" key={`${index}-${item.target}-${item.action}`}><div className="revision-advice-head"><span>{index + 1}</span><strong>{item.target || item.evidence || "本章相关段落"}</strong></div><p><b>修改：</b>{item.action}</p></section>)}</div> : <p className="revision-empty">当前正文没有可用的修订建议。</p>}<button className="btn" disabled={!revisionCopyText.trim()} onClick={copyRevisionText}><Copy size={15} />复制修改话术</button><label className="field">修改要求<textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="粘贴上方修改话术，或直接写清楚要改什么。" /></label><button className="btn primary" disabled={!instruction.trim() || chapterTask} onClick={() => runTask("revise")}><Play size={15} />按要求修订</button></div>}
         {inspectorTab === "memory" && <><h3>章节记忆</h3><pre className="readable">{chapterState.data?.memory_readable || readable(safeJson(chapter?.memory_json, null))}</pre></>}
-        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); const label = candidateLabel(version); return <Candidate key={String(version.id)} text={text} label={label} disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
+        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" candidateNumber={Number(candidateVersion?.candidate_number || 0) || undefined} createdAt={String(candidateVersion?.created_at || "")} source={String(candidateVersion?.candidate_source || "刚刚生成")} latest={Boolean(candidateVersion?.is_latest)} disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); const label = candidateLabel(version); return <Candidate key={String(version.id)} text={text} label={label} candidateNumber={Number(version.candidate_number || 0) || undefined} createdAt={String(version.created_at || "")} source={String(version.candidate_source || "候选稿")} latest={Boolean(version.is_latest)} disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
       </div></aside>
     </div>
     {previewCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPreviewCandidate(null)}><section className="candidate-preview" role="dialog" aria-modal="true" aria-label="候选稿预览" onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{previewCandidate.label}</strong><span>候选稿，未覆盖最终稿</span></div><button className="icon-button" title="关闭预览" onClick={() => setPreviewCandidate(null)}><X size={17} /></button></header><div className="candidate-preview-body">{previewCandidate.text}</div><footer><button className="btn" onClick={() => setPreviewCandidate(null)}>关闭</button><button className="btn" disabled={Boolean(workTask) || saveMutation.isPending} onClick={() => loadCandidate(previewCandidate.text)}><Eye size={15} />载入编辑器</button><button className="btn primary" disabled={Boolean(workTask) || saveMutation.isPending} onClick={() => promoteCandidate(previewCandidate.text)}><Save size={15} />保存为最终稿</button></footer></section></div>}
   </div>;
 }
 
-function Candidate({ text, label, disabled = false, onPreview, onLoad, onPromote, onDelete }: { text: string; label: string; disabled?: boolean; onPreview: () => void; onLoad: () => void; onPromote: () => void; onDelete?: () => void }) { return <div className="candidate"><div className="candidate-head"><strong>{label}</strong><span className="status-badge problem_draft">未覆盖最终稿</span></div><p>{text}</p><div className="candidate-actions"><button className="btn small" onClick={onPreview}><Eye size={14} />预览</button><button className="btn small" disabled={disabled} onClick={onLoad}><Play size={14} />载入</button><button className="btn small" disabled={disabled} onClick={onPromote}><Save size={14} />转为最终稿</button>{onDelete && <button className="icon-button danger-icon" disabled={disabled} title="删除候选稿" onClick={onDelete}><Trash2 size={14} /></button>}</div></div>; }
+function Candidate({ text, label, candidateNumber, createdAt, source = "候选稿", meta = "未覆盖最终稿", latest = false, disabled = false, onPreview, onLoad, onPromote, onDelete }: { text: string; label: string; candidateNumber?: number; createdAt?: string; source?: string; meta?: string; latest?: boolean; disabled?: boolean; onPreview: () => void; onLoad: () => void; onPromote: () => void; onDelete?: () => void }) {
+  const displayLabel = candidateNumber ? `第${candidateNumber}次候选稿` : label;
+  return <div className="candidate"><div className="candidate-head"><div className="candidate-title"><strong>{displayLabel}</strong>{latest && <span className="latest-mark">最新</span>}</div><span className="status-badge problem_draft">{meta}</span></div><div className="candidate-meta">{formatCandidateTime(createdAt)} · {candidateNumber ? source : "本次修订"}</div><p>{text}</p><div className="candidate-actions"><button className="btn small" onClick={onPreview}><Eye size={14} />预览</button><button className="btn small" disabled={disabled} onClick={onLoad}><Play size={14} />载入</button><button className="btn small" disabled={disabled} onClick={onPromote}><Save size={14} />转为最终稿</button>{onDelete && <button className="icon-button danger-icon" disabled={disabled} title="删除候选稿" onClick={onDelete}><Trash2 size={14} /></button>}</div></div>;
+}
 function candidateLabel(version: Record<string, unknown>): string {
   const name = String(version.version_name || "");
   if (name === "web_user_instruction_first_pass") return "第一轮修订稿";
   if (name.startsWith("reviser_rejected_repeat_")) return "重复风险未采用稿";
   if (name.startsWith("reviser_rejected_style_")) return "风格校验未采用稿";
   return "历史候选稿";
+}
+function formatCandidateTime(value?: string) {
+  if (!value) return "刚刚生成";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.replace("T", " ").slice(0, 19);
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 function textToHtml(text: string) { return String(text || "").split(/\n{2,}|\r?\n/).filter(Boolean).map((line) => `<p>${escapeHtml(line)}</p>`).join(""); }
 function escapeHtml(text: string) { return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }

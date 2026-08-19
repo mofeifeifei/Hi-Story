@@ -39,6 +39,33 @@ def now_text() -> str:
     return datetime.now().isoformat(timespec="microseconds")
 
 
+_CANDIDATE_VERSION_NAMES = {
+    "web_user_instruction_rejected_style",
+    "web_user_instruction_candidate_style",
+    "web_user_instruction_first_pass",
+}
+
+
+def _is_candidate_version_name(version_name: str) -> bool:
+    return version_name in _CANDIDATE_VERSION_NAMES or version_name.startswith(
+        ("reviser_rejected_style_", "reviser_rejected_repeat_")
+    )
+
+
+def _candidate_source(version_name: str) -> str:
+    if version_name == "web_user_instruction_first_pass":
+        return "修订第一轮"
+    if version_name == "web_user_instruction_candidate_style":
+        return "修订质量闸门未通过"
+    if version_name == "web_user_instruction_rejected_style":
+        return "修订风格校验未采用"
+    if version_name.startswith("reviser_rejected_repeat_"):
+        return "重复风险未采用"
+    if version_name.startswith("reviser_rejected_style_"):
+        return "风格校验未采用"
+    return "候选稿"
+
+
 def _estimate_tokens_from_chars(chars: int) -> int:
     if chars <= 0:
         return 0
@@ -1772,12 +1799,22 @@ class Repository:
 
     def add_version(self, work_id: int, chapter_id: int, version_name: str, content: str) -> int:
         with connect(self._db_path_for_work(work_id)) as conn:
+            candidate_number: int | None = None
+            if _is_candidate_version_name(version_name):
+                # Serialize the counter allocation so concurrent revision tasks
+                # cannot receive the same chapter-local number.
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT COALESCE(MAX(candidate_number), 0) FROM versions WHERE chapter_id = ?",
+                    (chapter_id,),
+                ).fetchone()
+                candidate_number = int(current[0] or 0) + 1
             cur = conn.execute(
                 """
-                INSERT INTO versions (chapter_id, version_name, content, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO versions (chapter_id, version_name, content, candidate_number, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (chapter_id, version_name, content, now_text()),
+                (chapter_id, version_name, content, candidate_number, now_text()),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -1786,7 +1823,7 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             rows = conn.execute(
                 """
-                SELECT id, chapter_id, version_name, content, created_at
+                SELECT id, chapter_id, version_name, content, candidate_number, created_at
                 FROM versions
                 WHERE chapter_id = ?
                   AND (
@@ -1798,12 +1835,19 @@ class Repository:
                     OR version_name LIKE 'reviser_rejected_style_%'
                     OR version_name LIKE 'reviser_rejected_repeat_%'
                   )
-                ORDER BY id DESC
+                ORDER BY candidate_number DESC, id DESC
                 LIMIT ?
                 """,
                 (chapter_id, max(1, int(limit))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        latest_number = max((int(row["candidate_number"] or 0) for row in rows), default=0)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["candidate_source"] = _candidate_source(str(item.get("version_name") or ""))
+            item["is_latest"] = bool(latest_number and int(item.get("candidate_number") or 0) == latest_number)
+            result.append(item)
+        return result
 
     def delete_chapter_candidate(self, work_id: int, chapter_id: int, version_id: int) -> bool:
         with connect(self._db_path_for_work(work_id)) as conn:
