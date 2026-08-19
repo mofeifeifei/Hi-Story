@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable
 
 from app.utils.name_normalizer import character_identity_key, normalize_character_name
+from app.utils.outline_utils import compile_planning_core, normalize_planning_core
 from app.utils.validators import (
     validate_chapter_outlines,
     validate_memory_card,
@@ -103,6 +104,21 @@ def normalize_chapter_outlines(data: Any) -> dict[str, Any]:
         if not isinstance(chapter, dict):
             continue
         item = dict(chapter)
+        core = item.get("planning_core") or item.get("core")
+        if isinstance(core, dict):
+            normalized_core = normalize_planning_core(core)
+            item["planning_core"] = normalized_core
+            item["outline_schema_version"] = int(
+                normalized_core.get("schema_version") or 2
+            )
+            item = {
+                **item,
+                **compile_planning_core(
+                    normalized_core,
+                    chapter_number=item.get("chapter_number"),
+                    volume_number=item.get("volume_number"),
+                ),
+            }
         item.setdefault("volume_number", "")
         item.setdefault("scene_cards", [])
         item.setdefault("sequence_id", "")
@@ -193,10 +209,48 @@ def normalize_review(data: Any, *, template_hits: list[str] | None = None) -> di
         review["revision_check"] = {}
     review.setdefault("template_hits", template_hits or [])
     review.setdefault("risk_flags", [])
-    review.setdefault("title_candidates", [])
-    if not isinstance(review["title_candidates"], list):
-        review["title_candidates"] = []
+    legacy_candidates = _normalize_title_candidates(review.get("title_candidates"))
+    review["title_decision"] = _normalize_title_decision(
+        review.get("title_decision"),
+        fallback_candidates=legacy_candidates,
+    )
+    review["title_candidates"] = list(review["title_decision"]["candidates"])
     return review
+
+
+def _normalize_title_decision(
+    value: Any,
+    *,
+    fallback_candidates: Any = None,
+    fallback_reason: Any = "",
+) -> dict[str, Any]:
+    decision = dict(value) if isinstance(value, dict) else {}
+    candidates = _normalize_title_candidates(
+        decision.get("candidates") or fallback_candidates
+    )
+    recommended = str(decision.get("recommended_title") or "").strip()
+    if not recommended and candidates:
+        recommended = candidates[0]
+    if recommended and recommended not in candidates:
+        candidates.insert(0, recommended)
+    return {
+        "chapter_summary": str(decision.get("chapter_summary") or "").strip(),
+        "recommended_title": recommended,
+        "reason": str(decision.get("reason") or fallback_reason or "").strip(),
+        "candidates": candidates[:8],
+    }
+
+
+def _normalize_title_candidates(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else []
+    result: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            item = item.get("title") or item.get("name") or item.get("text")
+        title = str(item or "").strip().strip('"“”‘’')
+        if title and title not in result:
+            result.append(title)
+    return result
 
 
 def _normalize_scene_coverage(value: Any) -> list[dict[str, Any]]:
@@ -333,9 +387,13 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
         result_card = {}
     for key in ["core_change", "reader_payoff", "key_action", "key_cost", "title_reason"]:
         result_card.setdefault(key, "")
-    result_card.setdefault("title_candidates", [])
-    if not isinstance(result_card["title_candidates"], list):
-        result_card["title_candidates"] = []
+    result_card["title_decision"] = _normalize_title_decision(
+        result_card.get("title_decision"),
+        fallback_candidates=result_card.get("title_candidates"),
+        fallback_reason=result_card.get("title_reason"),
+    )
+    result_card["title_candidates"] = list(result_card["title_decision"]["candidates"])
+    result_card["recommended_title"] = result_card["title_decision"]["recommended_title"]
     memory["chapter_result_card"] = result_card
     if isinstance(memory["historical_updates"], list):
         normalized_history = []

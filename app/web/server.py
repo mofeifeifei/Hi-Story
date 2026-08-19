@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
 import webbrowser
@@ -906,18 +907,19 @@ def _work_summary_state(work_id: int) -> dict[str, Any]:
 
 
 def _active_task_state() -> dict[str, Any]:
-    task = STATE.active_task()
-    work_id = int(task.get("work_id") or 0)
-    chapter_id = int(task.get("chapter_id") or 0)
-    if not work_id or not chapter_id:
-        return task
-    chapter = next(
-        (item for item in STATE.repo.list_chapters(work_id) if int(item.get("id") or 0) == chapter_id),
-        None,
-    )
-    if chapter is not None:
-        task["chapter_number"] = int(chapter.get("chapter_number") or 0)
-    return task
+    tasks = STATE.active_tasks()
+    for task in tasks:
+        work_id = int(task.get("work_id") or 0)
+        chapter_id = int(task.get("chapter_id") or 0)
+        if not work_id or not chapter_id:
+            continue
+        chapter = next(
+            (item for item in STATE.repo.list_chapters(work_id) if int(item.get("id") or 0) == chapter_id),
+            None,
+        )
+        if chapter is not None:
+            task["chapter_number"] = int(chapter.get("chapter_number") or 0)
+    return {"tasks": tasks}
 
 
 def _chapter_state(work_id: int, chapter_number: int) -> dict[str, Any]:
@@ -1183,6 +1185,9 @@ def _save_chapter_outline(work_id: int, chapter_number: int, body: dict[str, Any
         ending_hook=outline_json["ending_hook"],
         outline_json=outline_json,
         protect_written=False,
+        title_source="manual",
+        title_locked=True,
+        title_reason="用户在大纲与细纲页面修改章节标题。",
     )
     return _chapter_state(work_id, chapter_number)
 
@@ -1198,8 +1203,21 @@ def _generate_memory(
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
     final_text = str(chapter.get("final_text") or "").strip()
-    if chapter.get("status") == "problem_draft" or not final_text:
-        raise ValueError("请先把编辑器中的当前稿保存为最终稿，再生成记忆。")
+    if not final_text and str(chapter.get("draft") or "").strip():
+        # A problem draft is still a user-visible manuscript. Promote it before
+        # memory generation so the memory card always points at final_text.
+        final_text = str(chapter.get("draft") or "").strip()
+        STATE.repo.save_final_after_manual_edit(
+            work_id,
+            int(chapter["id"]),
+            final_text,
+            title=chapter.get("title") or f"第{chapter_number}章",
+            expected_revision=int(chapter.get("revision") or 0),
+        )
+        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+        final_text = str(chapter.get("final_text") or "").strip()
+    if not final_text:
+        raise ValueError("当前章节没有可保存的正文，无法生成记忆。")
     source_revision = int(chapter.get("revision") or 0)
     source_text_hash = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
     context = workflow.build_chapter_context(work_id, chapter_number)
@@ -1229,7 +1247,7 @@ def _generate_memory(
     memory = workflow.normalize_output_names(work_id, memory)
     memory["source_revision"] = source_revision
     memory["source_text_hash"] = source_text_hash
-    memory_title = workflow._choose_memory_title(
+    memory_title_decision = workflow._memory_title_decision(
         chapter,
         memory,
         context,
@@ -1240,7 +1258,9 @@ def _generate_memory(
         chapter_id=chapter["id"],
         chapter_number=chapter_number,
         memory=memory,
-        title=memory_title,
+        title=memory_title_decision["title"],
+        title_source=memory_title_decision.get("source"),
+        title_reason=memory_title_decision.get("reason"),
         expected_revision=source_revision,
         expected_text_hash=source_text_hash,
         prune_intermediate=True,
@@ -1406,7 +1426,10 @@ def _revision_correction_issues(
     for problem in review.get("problems") or []:
         if not isinstance(problem, dict):
             continue
-        if str(problem.get("severity") or "medium").lower() not in {"high", "medium"}:
+        # Medium findings are shown to the user but should not automatically
+        # trigger another full-chapter model call. Reserve a second pass for
+        # confirmed structural or continuity risks.
+        if str(problem.get("severity") or "medium").lower() != "high":
             continue
         evidence = str(problem.get("evidence") or "").strip()
         reason = str(problem.get("why_it_matters") or "").strip()
@@ -1422,9 +1445,8 @@ def _apply_revision_review_blockers(
     expected_scenes: int,
 ) -> None:
     blockers = list(quality.get("blockers") or [])
-    if review.get("semantic_review_failed"):
-        blockers.append("修订后语义复审失败，无法确认场景卡和上下文承接是否完整。")
-    blockers.extend(workflow.scene_coverage_blockers(review, expected_scenes))
+    if not review.get("semantic_review_failed"):
+        blockers.extend(workflow.scene_coverage_blockers(review, expected_scenes))
     quality["blockers"] = list(dict.fromkeys(str(item).strip() for item in blockers if str(item).strip()))
     merged = workflow._merge_quality_report_into_review(review, quality)
     review.clear()
@@ -1449,6 +1471,24 @@ def _revise_chapter_with_instruction(
         raise ValueError("当前正文为空，无法按意见修订。")
     chapter = STATE.repo.get_chapter(work_id, chapter_number)
     _validate_chapter_request(work_id, chapter_number, body, chapter, require_identity=True)
+    revision_limit = min(900, max(180, int(load_config().get("timeout", 300) or 300) * 2))
+    revision_deadline = time.monotonic() + revision_limit
+
+    def revision_expired() -> bool:
+        return time.monotonic() >= revision_deadline
+
+    def keep_candidate_if_expired(text: str, detail: str) -> dict[str, Any] | None:
+        if not revision_expired():
+            return None
+        return _cancelled_revision_candidate(
+            work_id,
+            chapter_number,
+            chapter,
+            workflow,
+            text,
+            f"修订任务达到 {revision_limit} 秒总时限，{detail}",
+        )
+
     _revision_stage(on_stage, "revision_prepare", "正在汇总修改要求")
     context = workflow.build_chapter_context(work_id, chapter_number)
     reviser_context = context_for_reviser(context)
@@ -1485,6 +1525,9 @@ def _revise_chapter_with_instruction(
         ),
         on_stage=on_stage,
     )
+    expired_result = keep_candidate_if_expired(revised, "已保存为候选稿")
+    if expired_result is not None:
+        return expired_result
     if should_stop and should_stop():
         return _cancelled_revision_candidate(
             work_id,
@@ -1531,6 +1574,9 @@ def _revise_chapter_with_instruction(
             revised,
             "修订稿已返回，语义复审被停止",
         )
+    expired_result = keep_candidate_if_expired(revised, "语义复审未继续")
+    if expired_result is not None:
+        return expired_result
     expected_scenes = len((reviser_context.get("story_plan") or {}).get("scene_cards") or [])
     correction_issues = _revision_correction_issues(
         workflow,
@@ -1577,6 +1623,9 @@ def _revise_chapter_with_instruction(
                 "quality_gate": {"final": after_quality, "blockers": correction_issues},
                 "message": message,
             }
+        expired_result = keep_candidate_if_expired(revised, "定向返修已返回")
+        if expired_result is not None:
+            return expired_result
         if should_stop and should_stop():
             return _cancelled_revision_candidate(
                 work_id,
@@ -1623,8 +1672,18 @@ def _revise_chapter_with_instruction(
                 revised,
                 "定向返修稿已返回，最终确认被停止",
             )
+        expired_result = keep_candidate_if_expired(revised, "最终语义确认未继续")
+        if expired_result is not None:
+            return expired_result
     _apply_revision_review_blockers(workflow, post_review, after_quality, expected_scenes)
     acceptance_blockers = workflow._automated_acceptance_blockers(after_quality)
+    if post_review.get("semantic_review_failed"):
+        acceptance_blockers = workflow._dedupe_texts(
+            [
+                "AI 语义复审未完成，当前修订稿只保留为候选稿；这是模型服务异常，不代表正文新增了质量问题。",
+                *acceptance_blockers,
+            ]
+        )
     if acceptance_blockers:
         _revision_stage(on_stage, "revision_save", "正在保存问题候选稿")
         candidate_version_id = STATE.repo.add_version(
@@ -1648,12 +1707,20 @@ def _revise_chapter_with_instruction(
     _revision_stage(on_stage, "revision_save", "正在保存修订结果")
     content_changed = revised != str(latest_chapter.get("final_text") or "")
     memory_invalidated = content_changed and bool(str(latest_chapter.get("memory_json") or "").strip())
+    revision_title_decision = workflow._final_title_decision(
+        latest_chapter,
+        post_review,
+        context,
+    )
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
     memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
         revised,
-        title=latest_chapter.get("title") or f"第{chapter_number}章",
+        title=revision_title_decision["title"],
+        title_source=revision_title_decision.get("source"),
+        title_reason=revision_title_decision.get("reason"),
+        title_locked=False if revision_title_decision.get("source") else None,
         ending_hook="" if content_changed else latest_chapter.get("ending_hook") or "",
         handoff="" if content_changed else latest_chapter.get("handoff") or "",
         memory_json=latest_chapter.get("memory_json") or "",

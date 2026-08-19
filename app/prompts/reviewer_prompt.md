@@ -38,9 +38,16 @@ output_contract: 结构化数据
 
 ## 标题候选
 
-基于正文实际发生的核心变化，给出 4 到 6 个 `title_candidates`。标题应概括关键行动、发现、选择、关系变化或代价，不是抽象主题词；不要泄露最后反转。
+基于正文实际发生的核心变化生成 `title_decision`。先用一句自然中文写清“谁做了什么，造成了什么变化”，再拟 4 到 6 个标题并选出唯一推荐标题。标题是本章核心变化的压缩总结，不是细纲标签、场景名称或关键词清单；不要泄露最后反转。
 
 候选必须有不同结构，避开 `recent_title_ledger` 中的重复关键词和结构。不要连续给出“X之Y”，也不要用“风波、迷雾、转机、暗流”这类脱离本章事件的泛词。
+
+推荐前逐项自检：
+
+- 是否包含本章已经完成的行动、选择、发现、关系变化或代价，而非只摘取地点、物件、人物名和时辰。
+- 是否符合自然汉语，朗读时不像案卷字段、公文状态、数据库标签或几个名词的机械堆叠。
+- 是否真正概括本章主要回报；次要线索只能在能代表全章时使用。
+- `recommended_title` 必须来自 `candidates`，`reason` 要说明它如何对应本章核心变化。
 
 ## 输出契约
 
@@ -63,8 +70,13 @@ output_contract: 结构化数据
   "suggestions": [],
   "template_hits": [],
   "risk_flags": [],
-  "title_candidates": []
+  "title_decision": {
+    "chapter_summary": "",
+    "recommended_title": "",
+    "reason": "",
+    "candidates": []
+  }
 }
 ```
 
-分数范围为 0 到 100。`scene_coverage` 每项使用 `scene_index`、`status`、`evidence`、`missing`；`problems` 每项使用 `type`、`severity`、`evidence`、`why_it_matters`；`suggestions` 每项使用 `target`、`action`、`keep`、`avoid`。所有数组可为空，但字段必须存在。
+分数范围为 0 到 100。`scene_coverage` 每项使用 `scene_index`、`status`、`evidence`、`missing`；`problems` 每项使用 `type`、`severity`、`evidence`、`why_it_matters`；`suggestions` 每项使用 `target`、`action`、`keep`、`avoid`。除 `title_decision.candidates` 必须有 4 到 6 项外，其余数组可为空，但字段必须存在。

@@ -25,6 +25,7 @@ export function LibraryPage() {
   const store = useAppStore();
   const queryClient = useQueryClient();
   const workId = store.selectedWorkId;
+  const workTask = store.tasks.some((task) => Number(task.workId || 0) === Number(workId));
   const [kind, setKind] = useState("characters");
   const [selectedId, setSelectedId] = useState<number | "new" | null>(null);
   const [draft, setDraft] = useState<Item>({});
@@ -57,7 +58,10 @@ export function LibraryPage() {
     await Promise.all([queryClient.invalidateQueries({ queryKey: ["library-page", workId, kind] }), queryClient.invalidateQueries({ queryKey: ["library-counts", workId] })]);
   }
   async function save() {
-    if (!workId || saving || store.task) return;
+    if (!workId || saving || workTask) {
+      if (workTask && !saving) store.notify("当前作品仍有任务运行，暂时不能保存资料。", "warning");
+      return;
+    }
     setSaving(true);
     try {
       const data = await api<{ id: number; item?: Item }>(`/api/works/${workId}/library/${kind}/item`, { method: "POST", body: draft });
@@ -67,7 +71,7 @@ export function LibraryPage() {
     finally { setSaving(false); }
   }
   async function remove() {
-    if (!workId || !draft.id || def.single || deleting || store.task || !window.confirm("确定删除当前资料吗？")) return;
+    if (!workId || !draft.id || def.single || deleting || workTask || !window.confirm("确定删除当前资料吗？")) return;
     setDeleting(true);
     try {
       await api(`/api/works/${workId}/library/${kind}/items/${draft.id}`, { method: "DELETE" });
@@ -82,10 +86,10 @@ export function LibraryPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const showEditor = def.single || selectedId === "new" || Boolean(selectedId);
   const pending = saving || deleting;
-  return <div className="page"><PageHeader title="资料库" description="分类按需加载，每页最多显示 50 条。" actions={<><button className="btn" disabled={def.single || Boolean(store.task) || saving || deleting} onClick={createItem}><Plus size={16} />新增{def.label}</button><button className="btn primary" disabled={!showEditor || detailQuery.isLoading || Boolean(store.task) || saving || deleting} onClick={save}><Save size={16} />{saving ? "正在保存" : "保存当前资料"}</button></>} />
+  return <div className="page"><PageHeader title="资料库" description="分类按需加载，每页最多显示 50 条。" actions={<><button className="btn" disabled={def.single || workTask || saving || deleting} onClick={createItem}><Plus size={16} />新增{def.label}</button><button className="btn primary" disabled={!showEditor || detailQuery.isLoading || workTask || saving || deleting} onClick={save}><Save size={16} />{saving ? "正在保存" : "保存当前资料"}</button></>} />
     <div className="library-layout"><aside className="library-categories">{Object.entries(categories).map(([key, item]) => <button className={kind === key ? "active" : ""} disabled={pending} key={key} onClick={() => chooseKind(key)}><span>{item.label}</span><strong>{countsQuery.data?.[key] ?? "-"}</strong></button>)}</aside>
       <aside className="library-list"><div className="rail-search"><div className="search-box"><Search size={16} /><input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`搜索${def.label}`} disabled={def.single || pending} /></div>{kind === "characters" && <select className="input library-scope" value={characterScope} disabled={pending} onChange={(event) => chooseScope(event.target.value)} aria-label="人物范围"><option value="valid">全部有效人物</option><option value="auto">自动发现人物</option><option value="invalid">异常空记录（{countsQuery.data?.characters_invalid || 0}）</option></select>}</div><div className="library-items">{pageQuery.isLoading ? <p className="list-empty">正在加载...</p> : items.map((item) => { const id = Number(item.id || 0); return <button className={selectedId === id ? "active" : ""} disabled={pending} key={id || kind} onClick={() => chooseItem(id, item)}><strong>{def.title(item)}</strong><small>{item.updated_at ? `最近修改：${String(item.updated_at)}` : def.label}</small></button>; })}{!pageQuery.isLoading && !items.length && <p className="list-empty">暂无资料</p>}</div>{totalPages > 1 && <div className="pager"><button className="btn small" disabled={pending || page === 1} onClick={() => setPage(page - 1)}>上一页</button><span>{page} / {totalPages} · 共 {total} 条</span><button className="btn small" disabled={pending || page >= totalPages} onClick={() => setPage(page + 1)}>下一页</button></div>}</aside>
-      <main className="library-editor">{showEditor ? detailQuery.isLoading ? <div className="loading-block">正在读取详情...</div> : <><div className="library-editor-head"><div><h3>{def.label}详情</h3><p>修改后点击保存，变更会立即写入作品数据库。</p></div>{!def.single && Boolean(draft.id) && <button className="btn danger" disabled={Boolean(store.task) || pending} onClick={remove}><Trash2 size={15} />{deleting ? "正在删除" : "删除"}</button>}</div><div className="form-grid">{def.fields.map(([key, label, type]) => <LibraryField key={key} label={label} type={type} value={draft[key]} disabled={pending} onChange={(value) => { setDraft({ ...draft, [key]: value }); setDirty(true); }} />)}</div></> : <EmptyState title={`选择一条${def.label}资料`} description="左侧列表用于定位，右侧只加载当前资料的完整字段。" />}</main></div>
+      <main className="library-editor">{showEditor ? detailQuery.isLoading ? <div className="loading-block">正在读取详情...</div> : <><div className="library-editor-head"><div><h3>{def.label}详情</h3><p>修改后点击保存，变更会立即写入作品数据库。</p></div>{!def.single && Boolean(draft.id) && <button className="btn danger" disabled={workTask || pending} onClick={remove}><Trash2 size={15} />{deleting ? "正在删除" : "删除"}</button>}</div><div className="form-grid">{def.fields.map(([key, label, type]) => <LibraryField key={key} label={label} type={type} value={draft[key]} disabled={pending} onChange={(value) => { setDraft({ ...draft, [key]: value }); setDirty(true); }} />)}</div></> : <EmptyState title={`选择一条${def.label}资料`} description="左侧列表用于定位，右侧只加载当前资料的完整字段。" />}</main></div>
   </div>;
 }
 

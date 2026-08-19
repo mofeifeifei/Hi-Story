@@ -52,6 +52,14 @@ from app.utils.word_target import chapter_word_target_from_style
 
 
 class NovelWorkflow:
+    # Chapter outlines contain many continuity fields and scene cards. Keeping
+    # each planner request small prevents a valid multi-chapter request from
+    # being lost when the provider truncates the final JSON response.
+    # The current default planner budget is 12,000 tokens. One detailed
+    # chapter is the safe unit at that budget, so a multi-chapter request is
+    # deliberately handled as a sequence of small, independently saved calls.
+    CHAPTER_OUTLINE_BATCH_SIZE = 1
+
     def __init__(self, repo: Repository | None = None, client: AIClient | None = None):
         self.repo = repo or Repository()
         self.client = client or AIClient()
@@ -108,47 +116,144 @@ class NovelWorkflow:
         volume_number: int | None = None,
         should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        requested_count = max(1, min(30, int(count or 1)))
+        next_chapter = max(1, int(start_chapter or 1))
+        remaining = requested_count
+        saved_chapters: list[dict[str, Any]] = []
+        last_decision: dict[str, Any] = {}
+        last_transition: dict[str, Any] = {}
+
+        while remaining > 0:
+            if should_stop and should_stop():
+                raise RuntimeError("任务已停止：已保存的章节细纲保留，未完成部分未继续生成。")
+
+            batch_count = min(self.CHAPTER_OUTLINE_BATCH_SIZE, remaining)
+            result = self._generate_chapter_outline_batch(
+                work_id,
+                start_chapter=next_chapter,
+                count=batch_count,
+                volume_number=volume_number,
+            )
+            if should_stop and should_stop():
+                raise RuntimeError("任务已停止：章节细纲已返回，但未写入当前批次。")
+
+            saved = self.save_generated_chapter_outlines(
+                work_id,
+                result,
+                start_chapter=next_chapter,
+                count=batch_count,
+                volume_number=volume_number,
+            )
+            batch_chapters = [
+                item for item in saved.get("chapters", []) if isinstance(item, dict)
+            ]
+            if not batch_chapters:
+                raise ValueError(f"第 {next_chapter} 章细纲没有可保存内容，已停止继续生成。")
+
+            saved_chapters.extend(batch_chapters)
+            last_decision = saved.get("volume_decision") or last_decision
+            transition = saved.get("volume_transition")
+            if isinstance(transition, dict) and transition.get("changed"):
+                last_transition = transition
+
+            next_chapter += len(batch_chapters)
+            remaining -= len(batch_chapters)
+
+        return {
+            "chapters": saved_chapters,
+            "volume_transition": last_transition,
+            "volume_decision": last_decision,
+        }
+
+    def _generate_chapter_outline_batch(
+        self,
+        work_id: int,
+        *,
+        start_chapter: int,
+        count: int,
+        volume_number: int | None,
+    ) -> dict[str, Any]:
         bundle = self.build_planning_context(
             work_id,
             start_chapter=start_chapter,
             volume_number=volume_number,
         )
         try:
-            result = self.planner.generate_chapter_outlines(
+            return self.planner.generate_chapter_outlines(
                 bundle,
                 start_chapter=start_chapter,
                 count=count,
                 volume_number=volume_number,
             )
-        except JsonValidationError as exc:
-            self.repo.log_agent_run(
-                work_id=work_id,
-                chapter_id=None,
-                agent_name="planner",
-                model=self.client.model_for("planner"),
-                prompt_name="planner_prompt.md",
-                input_preview=json_dumps(
-                    {
-                        "work_id": work_id,
-                        "start_chapter": start_chapter,
-                        "count": count,
-                        "volume_number": volume_number,
-                    }
-                ),
-                output=exc.raw or json_dumps(exc.parsed),
-                status="failed",
-                error=str(exc),
-                **self.client.last_usage("planner"),
-            )
+        except AIClientError as exc:
+            if self._is_output_limit_error(exc):
+                try:
+                    return self.planner.generate_chapter_outlines(
+                        bundle,
+                        start_chapter=start_chapter,
+                        count=count,
+                        volume_number=volume_number,
+                        compact=True,
+                    )
+                except (AIClientError, JsonValidationError) as compact_exc:
+                    self._log_failed_outline_call(work_id, start_chapter, count, volume_number, compact_exc)
+                    raise compact_exc from exc
+            self._log_failed_outline_call(work_id, start_chapter, count, volume_number, exc)
             raise
-        if should_stop and should_stop():
-            raise RuntimeError("任务已停止：章节细纲已返回，但未保存。")
-        return self.save_generated_chapter_outlines(
-            work_id,
-            result,
-            start_chapter=start_chapter,
-            count=count,
-            volume_number=volume_number,
+        except JsonValidationError as exc:
+            try:
+                return self.planner.generate_chapter_outlines(
+                    bundle,
+                    start_chapter=start_chapter,
+                    count=count,
+                    volume_number=volume_number,
+                    compact=True,
+                )
+            except (AIClientError, JsonValidationError) as compact_exc:
+                self._log_failed_outline_call(work_id, start_chapter, count, volume_number, compact_exc)
+                raise compact_exc from exc
+
+    def _log_failed_outline_call(
+        self,
+        work_id: int,
+        start_chapter: int,
+        count: int,
+        volume_number: int | None,
+        exc: Exception,
+    ) -> None:
+        self.repo.log_agent_run(
+            work_id=work_id,
+            chapter_id=None,
+            agent_name="planner",
+            model=self.client.model_for("planner"),
+            prompt_name="planner_prompt.md",
+            input_preview=json_dumps(
+                {
+                    "work_id": work_id,
+                    "start_chapter": start_chapter,
+                    "count": count,
+                    "volume_number": volume_number,
+                }
+            ),
+            output=getattr(exc, "raw", "") or json_dumps(getattr(exc, "parsed", {})),
+            status="failed",
+            error=str(exc),
+            **self.client.last_usage("planner"),
+        )
+
+    @staticmethod
+    def _is_output_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "token 上限",
+                "输出达到 token",
+                "max_tokens",
+                "max_output_tokens",
+                "truncated",
+                "截断",
+            )
         )
 
     def save_generated_chapter_outlines(
@@ -1100,18 +1205,19 @@ class NovelWorkflow:
                     [*self._as_list(final_quality.get("blockers")), *preservation_blockers]
                 )
             prior_revision_plan = revision_plan
+            semantic_review_incomplete = False
             if do_review:
                 context["local_quality_report"] = final_quality
                 reviewer_context = context_for_reviewer(context)
                 try:
                     post_review = self.reviewer.review_chapter(reviewer_context, final_text)
-                except (AIClientError, JsonValidationError):
+                except (AIClientError, JsonValidationError) as exc:
                     post_review = None
-                    final_quality["blockers"] = self._dedupe_texts(
-                        [
-                            *self._as_list(final_quality.get("blockers")),
-                            "修订后语义复审失败，无法确认场景卡和上下文承接是否完整。",
-                        ]
+                    semantic_review_incomplete = True
+                    review = review or self._local_quality_review(final_quality)
+                    review["stage_warning"] = f"AI 语义复审未完成：{exc}"
+                    review["risk_flags"] = self._dedupe_texts(
+                        [*self._as_list(review.get("risk_flags")), "AI 语义复审未完成"]
                     )
                 if post_review is not None:
                     post_review = self.normalize_output_names(work_id, post_review)
@@ -1144,6 +1250,13 @@ class NovelWorkflow:
                 )
             report_stage("validating", "正在进行本地质量验收")
             final_blockers = self._automated_acceptance_blockers(final_quality)
+            if semantic_review_incomplete:
+                final_blockers = self._dedupe_texts(
+                    [
+                        "AI 语义复审未完成，当前稿件只保留为候选稿；这是模型服务异常，不代表正文新增了质量问题。",
+                        *final_blockers,
+                    ]
+                )
             if final_blockers:
                 review = self._merge_quality_report_into_review(review or {}, final_quality)
                 review["revision_plan"] = self._build_revision_plan(review, final_quality)
@@ -1171,7 +1284,8 @@ class NovelWorkflow:
         else:
             final_quality = draft_quality
 
-        final_title = self._choose_final_title(chapter, review, context)
+        final_title_decision = self._final_title_decision(chapter, review, context)
+        final_title = str(final_title_decision["title"])
         for warning in title_warnings(final_title, context.get("recent_title_ledger") or []):
             final_quality["warnings"] = self._dedupe_texts([*self._as_list(final_quality.get("warnings")), warning])
         self.repo.save_final(
@@ -1182,6 +1296,9 @@ class NovelWorkflow:
             ending_hook="",
             handoff="",
             memory_json="",
+            title_source=final_title_decision.get("source"),
+            title_reason=final_title_decision.get("reason"),
+            title_locked=False if final_title_decision.get("source") else None,
         )
         if review is not None:
             self.repo.save_review(work_id, chapter["id"], review)
@@ -1218,13 +1335,20 @@ class NovelWorkflow:
             memory_card = self.normalize_output_names(work_id, memory_card)
             memory_card["source_revision"] = source_revision
             memory_card["source_text_hash"] = source_text_hash
-            memory_title = self._choose_memory_title(chapter, memory_card, context, final_title)
+            memory_title_decision = self._memory_title_decision(
+                saved_chapter,
+                memory_card,
+                context,
+                final_title,
+            )
             self.repo.apply_memory_card(
                 work_id=work_id,
                 chapter_id=chapter["id"],
                 chapter_number=chapter_number,
                 memory=memory_card,
-                title=memory_title,
+                title=memory_title_decision["title"],
+                title_source=memory_title_decision.get("source"),
+                title_reason=memory_title_decision.get("reason"),
                 expected_revision=source_revision,
                 expected_text_hash=source_text_hash,
                 prune_intermediate=True,
@@ -1269,11 +1393,37 @@ class NovelWorkflow:
         review: dict[str, Any] | None,
         context: dict[str, Any],
     ) -> str:
+        return str(self._final_title_decision(chapter, review, context)["title"])
+
+    def _final_title_decision(
+        self,
+        chapter: dict[str, Any],
+        review: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         current_title = str(chapter.get("title") or "").strip()
-        if not self._title_can_be_auto_updated(chapter):
-            return current_title
-        candidates = review.get("title_candidates") if isinstance(review, dict) else []
-        return choose_chapter_title(candidates, context.get("recent_title_ledger") or [], current_title)
+        if not self._title_can_be_auto_updated(chapter, allowed_sources={"planner", "reviewer", "memory"}):
+            return {"title": current_title, "source": None, "reason": None}
+        decision = review.get("title_decision") if isinstance(review, dict) else {}
+        if not self._valid_title_decision(decision):
+            return {"title": current_title, "source": None, "reason": None}
+        chosen = choose_chapter_title(
+            decision,
+            context.get("recent_title_ledger") or [],
+            current_title,
+        )
+        recommended = str(decision.get("recommended_title") or "").strip()
+        candidates = [str(item or "").strip() for item in decision.get("candidates") or []]
+        if not chosen or chosen not in candidates:
+            return {"title": current_title, "source": None, "reason": None}
+        reason = str(decision.get("reason") or "").strip()
+        if chosen != recommended:
+            reason = f"推荐标题未通过重复或格式校验，改用候选《{chosen}》。"
+        return {
+            "title": chosen,
+            "source": "reviewer",
+            "reason": reason,
+        }
 
     def _choose_memory_title(
         self,
@@ -1282,18 +1432,68 @@ class NovelWorkflow:
         context: dict[str, Any],
         fallback: str,
     ) -> str:
-        if not self._title_can_be_auto_updated(chapter):
-            return fallback
+        return str(self._memory_title_decision(chapter, memory, context, fallback)["title"])
+
+    def _memory_title_decision(
+        self,
+        chapter: dict[str, Any],
+        memory: dict[str, Any],
+        context: dict[str, Any],
+        fallback: str,
+    ) -> dict[str, Any]:
+        if not self._title_can_be_auto_updated(chapter, allowed_sources={"planner"}):
+            return {"title": fallback, "source": None, "reason": None}
         result_card = memory.get("chapter_result_card") if isinstance(memory, dict) else {}
-        candidates = result_card.get("title_candidates") if isinstance(result_card, dict) else []
-        return choose_chapter_title(candidates, context.get("recent_title_ledger") or [], fallback)
+        decision = result_card.get("title_decision") if isinstance(result_card, dict) else {}
+        if not self._valid_title_decision(decision):
+            return {"title": fallback, "source": None, "reason": None}
+        chosen = choose_chapter_title(
+            decision,
+            context.get("recent_title_ledger") or [],
+            fallback,
+        )
+        recommended = str(decision.get("recommended_title") or "").strip()
+        candidates = [str(item or "").strip() for item in decision.get("candidates") or []]
+        if not chosen or chosen not in candidates:
+            return {"title": fallback, "source": None, "reason": None}
+        reason = str(decision.get("reason") or "").strip()
+        if chosen != recommended:
+            reason = f"推荐标题未通过重复或格式校验，改用候选《{chosen}》。"
+        return {
+            "title": chosen,
+            "source": "memory",
+            "reason": reason,
+        }
 
     @staticmethod
-    def _title_can_be_auto_updated(chapter: dict[str, Any]) -> bool:
+    def _title_can_be_auto_updated(
+        chapter: dict[str, Any],
+        *,
+        allowed_sources: set[str] | None = None,
+    ) -> bool:
+        if bool(int(chapter.get("title_locked") or 0)):
+            return False
+        source = str(chapter.get("title_source") or "legacy").strip().lower()
+        if allowed_sources is not None and source not in allowed_sources:
+            return False
         current = str(chapter.get("title") or "").strip()
         detail = parse_outline_detail(chapter.get("outline_json"))
         planned = str(detail.get("title") or "").strip() if isinstance(detail, dict) else ""
-        return not current or not planned or current == planned
+        return source != "planner" or not current or not planned or current == planned
+
+    @staticmethod
+    def _valid_title_decision(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        candidates = value.get("candidates")
+        recommended = str(value.get("recommended_title") or "").strip()
+        return bool(
+            str(value.get("chapter_summary") or "").strip()
+            and str(value.get("reason") or "").strip()
+            and recommended
+            and isinstance(candidates, list)
+            and recommended in candidates
+        )
 
     def _repeated_text_warnings(self, work_id: int, chapter_number: int, text: str) -> list[str]:
         recent_texts = self.repo.get_recent_chapter_texts(work_id, chapter_number, limit=5)

@@ -258,10 +258,17 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
         "recent_title_ledger": context.get("recent_title_ledger", []),
     }
     if task == "reviewer":
+        for key in ["book_bible", "chapter_word_target", "style_guard"]:
+            result.pop(key, None)
         result["minimal_memory_pack"] = {
             "selection_rule": "只保留如果不知道这个，本章就会写错的信息。",
-            "historical_constraints": memory_pack.get("historical_constraints", []),
+            "historical_constraints": _compact_reviewer_history(
+                memory_pack.get("historical_constraints")
+            ),
         }
+        result["recent_title_ledger"] = _compact_title_ledger(
+            context.get("recent_title_ledger")
+        )
         result.update(
             {
                 "previous_chapter": _previous_chapter(context.get("previous_chapter")),
@@ -271,11 +278,8 @@ def _agent_context(context: dict[str, Any], *, task: str) -> dict[str, Any]:
                 "recent_three_chapter_summaries": _compact_recent_summaries(
                     context.get("recent_three_chapter_summaries")
                 ),
-                "opening_variation_policy": context.get("opening_variation_policy", {}),
-                "ending_variation_policy": context.get("ending_variation_policy", {}),
                 "repeat_risk_warnings": context.get("repeat_risk_warnings", []),
                 "local_quality_report": context.get("local_quality_report", {}),
-                "recent_style_signatures": _recent_style_signatures(context),
             }
         )
     elif task == "reviser":
@@ -575,6 +579,26 @@ def _compact_recent_summaries(value: Any) -> list[dict[str, Any]]:
             )
         )
     return result
+
+
+def _compact_reviewer_history(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        _pick(item, ["content", "future_constraint"])
+        for item in value[-8:]
+        if isinstance(item, dict) and _pick(item, ["content", "future_constraint"])
+    ]
+
+
+def _compact_title_ledger(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        _pick(item, ["chapter_number", "title"])
+        for item in value[-8:]
+        if isinstance(item, dict) and _pick(item, ["chapter_number", "title"])
+    ]
 
 
 def _history_specialist_for_task(value: Any, task: str) -> dict[str, Any]:

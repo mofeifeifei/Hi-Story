@@ -85,8 +85,16 @@ def _stringify(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalize_outline_punctuation(value: str) -> str:
+    text = str(value or "").replace("\r\n", "\n")
+    text = re.sub(r"。{2,}", "。", text)
+    text = text.replace("。；", "；").replace("；。", "。")
+    text = re.sub(r"；{2,}", "；", text)
+    return text
+
+
 def _trim_join_punctuation(value: str) -> str:
-    return value.strip().rstrip("。；;，,、")
+    return _normalize_outline_punctuation(value.strip()).rstrip("。；;，,、")
 
 
 def _scene_cards_from_value(value: Any) -> Any:
@@ -128,6 +136,249 @@ def scene_cards_to_text(value: Any) -> str:
     return _stringify(cards)
 
 
+PLANNING_CORE_VERSION = 2
+
+
+def normalize_planning_core(value: Any) -> dict[str, Any]:
+    """Normalize the compact planner contract before compiling legacy fields."""
+    raw = dict(value) if isinstance(value, dict) else {}
+    chapter = dict(raw.get("chapter") or {}) if isinstance(raw.get("chapter"), dict) else {}
+    bridge = dict(raw.get("bridge") or {}) if isinstance(raw.get("bridge"), dict) else {}
+    result = dict(raw.get("result") or {}) if isinstance(raw.get("result"), dict) else {}
+    handoff = dict(raw.get("handoff") or {}) if isinstance(raw.get("handoff"), dict) else {}
+    sequence = dict(raw.get("sequence") or {}) if isinstance(raw.get("sequence"), dict) else {}
+    questions = dict(raw.get("questions") or {}) if isinstance(raw.get("questions"), dict) else {}
+
+    chapter.setdefault("chapter_number", raw.get("chapter_number", ""))
+    chapter.setdefault("volume_number", raw.get("volume_number", ""))
+    chapter.setdefault("title", raw.get("title", ""))
+    chapter.setdefault("sequence_id", sequence.get("id", ""))
+    chapter.setdefault("sequence_goal", sequence.get("goal", ""))
+    chapter.setdefault("sequence_position", sequence.get("position", ""))
+    chapter.setdefault("continuity_mode", "direct")
+    chapter.setdefault("story_time", "")
+    chapter.setdefault("allowed_shift", False)
+    chapter.setdefault("shift_reason", "")
+
+    for key in [
+        "previous_anchor",
+        "continuity_debt",
+        "debt_type",
+        "opening_mode",
+        "opening_subject",
+        "opening_action",
+        "opening_conflict",
+        "time_or_environment_function",
+        "forbidden_opening",
+        "reader_question",
+    ]:
+        bridge.setdefault(key, "")
+
+    result_defaults = {
+        "reader_question_in": questions.get("in", ""),
+        "reader_answer_out": questions.get("answer", ""),
+        "new_question_out": questions.get("out", ""),
+        "reader_expectation": "",
+        "new_information": "",
+        "clues": [],
+        "chapter_payoff": "",
+        "character_change": "",
+        "foreshadowing": "",
+        "emotional_turn": "",
+        "emotional_rhythm": "",
+    }
+    for key, fallback in result_defaults.items():
+        result.setdefault(key, fallback)
+
+    for key in [
+        "ending_event",
+        "next_opening_action",
+        "next_continuity_debt",
+        "cut_reason",
+        "unresolved_question",
+        "forbidden",
+    ]:
+        handoff.setdefault(key, "")
+
+    scenes = raw.get("scenes")
+    if scenes in (None, ""):
+        scenes = raw.get("scene_cards", [])
+    if not isinstance(scenes, list):
+        scenes = [scenes] if isinstance(scenes, dict) else []
+    normalized_scenes: list[dict[str, Any]] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        characters = scene.get("characters", scene.get("characters_present", []))
+        if isinstance(characters, str):
+            characters = [part.strip() for part in re.split(r"[、,，]", characters) if part.strip()]
+        if not isinstance(characters, list):
+            characters = []
+        normalized_scenes.append(
+            {
+                "location": str(scene.get("location", scene.get("main_scene", "")) or "").strip(),
+                "characters": [str(part).strip() for part in characters if str(part).strip()],
+                "goal": str(scene.get("goal", scene.get("scene_goal", "")) or "").strip(),
+                "obstacle": str(scene.get("obstacle", "") or "").strip(),
+                "turn": str(scene.get("turn", scene.get("information_gain", "")) or "").strip(),
+                "emotional_shift": str(scene.get("emotional_shift", "") or "").strip(),
+                "exit": str(scene.get("exit", scene.get("scene_exit", "")) or "").strip(),
+            }
+        )
+
+    return {
+        "schema_version": int(raw.get("schema_version") or PLANNING_CORE_VERSION),
+        "chapter": chapter,
+        "sequence": sequence,
+        "bridge": bridge,
+        "questions": questions,
+        "scenes": normalized_scenes,
+        "result": result,
+        "handoff": handoff,
+    }
+
+
+def compile_planning_core(
+    value: Any,
+    *,
+    chapter_number: Any = "",
+    volume_number: Any = "",
+) -> dict[str, Any]:
+    """Compile the compact contract into fields used by existing consumers."""
+    core = normalize_planning_core(value)
+    chapter = core["chapter"]
+    bridge = core["bridge"]
+    result = core["result"]
+    handoff = core["handoff"]
+    questions = core["questions"]
+    scenes = core["scenes"]
+
+    number = chapter_number or chapter.get("chapter_number", "")
+    volume = volume_number or chapter.get("volume_number", "")
+    title = str(chapter.get("title") or (f"第{number}章" if number else "未命名章节")).strip()
+    sequence_goal = str(chapter.get("sequence_goal") or "").strip()
+    sequence_position = str(chapter.get("sequence_position") or "").strip()
+    continuity_mode = str(chapter.get("continuity_mode") or "direct").strip()
+    opening_action = str(bridge.get("opening_action") or "").strip()
+    opening_conflict = str(bridge.get("opening_conflict") or "").strip()
+    previous_anchor = str(bridge.get("previous_anchor") or "").strip()
+    continuity_debt = str(bridge.get("continuity_debt") or "").strip()
+    ending_event = str(handoff.get("ending_event") or "").strip()
+    next_opening_action = str(handoff.get("next_opening_action") or "").strip()
+    next_debt = str(handoff.get("next_continuity_debt") or "").strip()
+    reader_question_in = str(
+        result.get("reader_question_in") or questions.get("in") or bridge.get("reader_question") or ""
+    ).strip()
+    reader_answer_out = str(
+        result.get("reader_answer_out") or questions.get("answer") or result.get("chapter_payoff") or ""
+    ).strip()
+    new_question_out = str(
+        result.get("new_question_out") or questions.get("out") or handoff.get("unresolved_question") or next_debt
+    ).strip()
+    chapter_goal = sequence_goal or str(result.get("chapter_goal") or "").strip()
+    conflict = opening_conflict or "；".join(
+        str(scene.get("obstacle") or "").strip()
+        for scene in scenes
+        if str(scene.get("obstacle") or "").strip()
+    )
+
+    locations: list[str] = []
+    characters: list[str] = []
+    for scene in scenes:
+        location = str(scene.get("location") or "").strip()
+        if location and location not in locations:
+            locations.append(location)
+        for character in scene.get("characters") or []:
+            text = str(character).strip()
+            if text and text not in characters:
+                characters.append(text)
+
+    scene_cards = [
+        {
+            "scene_goal": scene.get("goal", ""),
+            "obstacle": scene.get("obstacle", ""),
+            "information_gain": scene.get("turn", ""),
+            "emotional_shift": scene.get("emotional_shift", ""),
+            "scene_exit": scene.get("exit", ""),
+        }
+        for scene in scenes
+    ]
+    scene_summary = "；".join(
+        _trim_join_punctuation(
+            "、".join(part for part in [scene.get("location", ""), scene.get("goal", "")] if part)
+        )
+        for scene in scenes
+    )
+    outline = "。".join(
+        _trim_join_punctuation(str(part))
+        for part in [
+            chapter_goal,
+            conflict,
+            scene_summary,
+            str(result.get("new_information") or "").strip(),
+            ending_event,
+        ]
+        if str(part).strip()
+    )
+    handoff_text = "；".join(
+        part
+        for part in [
+            f"结尾：{ending_event}" if ending_event else "",
+            f"下一章从：{next_opening_action}" if next_opening_action else "",
+            f"承接：{next_debt}" if next_debt else "",
+            f"未解：{handoff.get('unresolved_question')}" if handoff.get("unresolved_question") else "",
+        ]
+        if part
+    )
+    return {
+        "chapter_number": number,
+        "volume_number": volume,
+        "title": title,
+        "sequence_id": str(chapter.get("sequence_id") or core.get("sequence", {}).get("id") or "").strip(),
+        "sequence_goal": sequence_goal,
+        "sequence_position": sequence_position,
+        "scene_id": str(chapter.get("scene_id") or "").strip(),
+        "continuity_mode": continuity_mode,
+        "story_time": str(chapter.get("story_time") or "").strip(),
+        "outline": outline,
+        "opening_hook": opening_action,
+        "continuity_debt": continuity_debt,
+        "debt_type": str(bridge.get("debt_type") or "前章后果").strip(),
+        "opening_mode": str(bridge.get("opening_mode") or "动作承接").strip(),
+        "opening_subject": str(bridge.get("opening_subject") or previous_anchor).strip(),
+        "allowed_shift": bool(chapter.get("allowed_shift", False)),
+        "shift_reason": str(chapter.get("shift_reason") or "").strip(),
+        "opening_trigger": opening_conflict,
+        "time_or_environment_function": str(bridge.get("time_or_environment_function") or "").strip(),
+        "previous_anchor": previous_anchor,
+        "first_screen_conflict": opening_conflict,
+        "forbidden_opening": str(bridge.get("forbidden_opening") or "").strip(),
+        "reader_question_in": reader_question_in,
+        "reader_answer_out": reader_answer_out,
+        "new_question_out": new_question_out,
+        "scene_cards": scene_cards,
+        "chapter_goal": chapter_goal,
+        "reader_expectation": str(result.get("reader_expectation") or reader_question_in).strip(),
+        "conflict": conflict,
+        "main_scene": "、".join(locations),
+        "characters_present": "、".join(characters),
+        "clues": result.get("clues", []),
+        "new_information": str(result.get("new_information") or "").strip(),
+        "chapter_payoff": str(result.get("chapter_payoff") or reader_answer_out).strip(),
+        "character_change": str(result.get("character_change") or "").strip(),
+        "foreshadowing": str(result.get("foreshadowing") or "").strip(),
+        "emotional_turn": str(result.get("emotional_turn") or "").strip(),
+        "emotional_rhythm": str(result.get("emotional_rhythm") or "").strip(),
+        "ending_external_anchor": ending_event,
+        "next_opening_action": next_opening_action,
+        "next_continuity_debt": next_debt,
+        "ending_hook": ending_event,
+        "cut_reason": str(handoff.get("cut_reason") or ending_event).strip(),
+        "handoff": handoff_text,
+        "forbidden": str(handoff.get("forbidden") or bridge.get("forbidden_opening") or "").strip(),
+    }
+
+
 def normalize_chapter_outline(chapter: dict[str, Any]) -> dict[str, Any]:
     detail = parse_outline_detail(chapter.get("outline_json"))
     normalized: dict[str, Any] = {}
@@ -148,12 +399,22 @@ def normalize_chapter_outline(chapter: dict[str, Any]) -> dict[str, Any]:
     if scene_cards in (None, ""):
         scene_cards = detail.get("scene_cards")
     normalized["scene_cards"] = _scene_cards_from_value(scene_cards)
+    planning_core = chapter.get("planning_core")
+    if not isinstance(planning_core, dict):
+        planning_core = detail.get("planning_core")
+    if isinstance(planning_core, dict):
+        normalized["planning_core"] = normalize_planning_core(planning_core)
+        normalized["outline_schema_version"] = int(
+            chapter.get("outline_schema_version")
+            or detail.get("outline_schema_version")
+            or PLANNING_CORE_VERSION
+        )
     return normalized
 
 
 def chapter_outline_payload(chapter: dict[str, Any]) -> dict[str, Any]:
     detail = normalize_chapter_outline(chapter)
-    return {
+    payload = {
         "chapter_number": detail.get("chapter_number", ""),
         "volume_number": detail.get("volume_number", ""),
         "title": detail.get("title", ""),
@@ -162,6 +423,10 @@ def chapter_outline_payload(chapter: dict[str, Any]) -> dict[str, Any]:
         "scene_cards": detail.get("scene_cards", []),
         **{key: detail.get(key, "") for key, _ in CHAPTER_OUTLINE_FIELDS},
     }
+    if isinstance(detail.get("planning_core"), dict):
+        payload["outline_schema_version"] = int(detail.get("outline_schema_version") or PLANNING_CORE_VERSION)
+        payload["planning_core"] = detail["planning_core"]
+    return payload
 
 
 def chapter_outline_json(chapter: dict[str, Any]) -> str:

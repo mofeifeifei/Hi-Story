@@ -21,9 +21,18 @@ class ClosingConnection(sqlite3.Connection):
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, factory=ClosingConnection)
+    conn = sqlite3.connect(db_path, timeout=30, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    # WAL lets chapter reads continue while a short write transaction commits.
+    # Read-only workspaces cannot change this persistent setting; keep reads
+    # available there and let an actual write report the real permission error.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -33,6 +42,12 @@ def init_db(db_path: Path) -> None:
         conn.executescript(schema)
         _ensure_column(conn, "chapters", "revision", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "chapters", "memory_revision", "INTEGER")
+        # Existing projects predate title provenance. Mark them as legacy so
+        # a later memory pass cannot silently replace a title the user may
+        # already have edited.
+        _ensure_column(conn, "chapters", "title_source", "TEXT NOT NULL DEFAULT 'legacy'")
+        _ensure_column(conn, "chapters", "title_locked", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "chapters", "title_reason", "TEXT")
         apply_migrations(conn, MIGRATIONS_DIR)
         _ensure_column(conn, "works", "book_bible_json", "TEXT")
         _ensure_column(conn, "works", "settings_locked", "INTEGER DEFAULT 0")
@@ -70,6 +85,7 @@ def init_db(db_path: Path) -> None:
             ("revision_plan", "TEXT"),
             ("revision_check", "TEXT"),
             ("reviewed_text_hash", "TEXT"),
+            ("title_decision_json", "TEXT"),
         ]:
             _ensure_column(conn, "reviews", column, definition)
         conn.execute(

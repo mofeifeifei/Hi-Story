@@ -11,6 +11,7 @@ export function ExportPage() {
   const store = useAppStore();
   const queryClient = useQueryClient();
   const workId = store.selectedWorkId;
+  const workTask = store.tasks.some((task) => Number(task.workId || 0) === Number(workId));
   const [scope, setScope] = useState("book");
   const [format, setFormat] = useState("txt");
   const [start, setStart] = useState(1);
@@ -36,7 +37,10 @@ export function ExportPage() {
   useEffect(() => { if (store.selectedChapter) setChapter(Number(store.selectedChapter)); }, [store.selectedChapter]);
 
   async function exportNow() {
-    if (!workId || pendingAction || store.task) return;
+    if (!workId || pendingAction || workTask) {
+      if (workTask && !pendingAction) store.notify("当前作品仍有任务运行，暂时不能导出。", "warning");
+      return;
+    }
     if (scope === "range" && start > end) {
       store.notify("起始章节不能大于结束章节。", "warning");
       return;
@@ -56,7 +60,10 @@ export function ExportPage() {
   }
 
   async function directory(action: "choose" | "open" | "reset") {
-    if (!workId || pendingAction || store.task) return;
+    if (!workId || pendingAction || workTask) {
+      if (workTask && !pendingAction) store.notify("当前作品仍有任务运行，暂时不能操作导出目录。", "warning");
+      return;
+    }
     setPendingAction(action);
     try {
       await api(`/api/works/${workId}/export-dir/${action}`, { method: "POST" });
@@ -77,9 +84,9 @@ export function ExportPage() {
           {scope === "range" && <><label className="field">起始章节<input type="number" min="1" value={start} onChange={(e) => setStart(Number(e.target.value))} /></label><label className="field">结束章节<input type="number" min="1" value={end} onChange={(e) => setEnd(Number(e.target.value))} /></label></>}
         </div>
         <label className="check-field"><input type="checkbox" checked={includeDraft} onChange={(e) => setIncludeDraft(e.target.checked)} />允许使用草稿补齐空章节</label>
-        <button className="btn primary export-action" disabled={Boolean(pendingAction) || Boolean(store.task)} onClick={exportNow}><FolderOpen size={16} />{pendingAction === "export" ? "正在导出" : "开始导出"}</button>
+        <button className="btn primary export-action" disabled={Boolean(pendingAction) || workTask} onClick={exportNow}><FolderOpen size={16} />{pendingAction === "export" ? "正在导出" : "开始导出"}</button>
       </section>
-      <section className="form-section"><h3 className="section-title">导出位置</h3><p className="path-line">{String(dir.data?.export_dir || "默认导出目录")}</p><div className="toolbar"><button className="btn" disabled={Boolean(pendingAction) || Boolean(store.task)} onClick={() => directory("choose")}><FolderOpen size={15} />{pendingAction === "choose" ? "正在选择" : "选择目录"}</button><button className="btn" disabled={Boolean(pendingAction) || Boolean(store.task)} onClick={() => directory("open")}><FolderOpen size={15} />{pendingAction === "open" ? "正在打开" : "打开目录"}</button><button className="btn quiet" disabled={Boolean(pendingAction) || Boolean(store.task)} onClick={() => directory("reset")}><RotateCcw size={15} />{pendingAction === "reset" ? "正在恢复" : "恢复默认"}</button></div></section>
+      <section className="form-section"><h3 className="section-title">导出位置</h3><p className="path-line">{String(dir.data?.export_dir || "默认导出目录")}</p><div className="toolbar"><button className="btn" disabled={Boolean(pendingAction) || workTask} onClick={() => directory("choose")}><FolderOpen size={15} />{pendingAction === "choose" ? "正在选择" : "选择目录"}</button><button className="btn" disabled={Boolean(pendingAction) || workTask} onClick={() => directory("open")}><FolderOpen size={15} />{pendingAction === "open" ? "正在打开" : "打开目录"}</button><button className="btn quiet" disabled={Boolean(pendingAction) || workTask} onClick={() => directory("reset")}><RotateCcw size={15} />{pendingAction === "reset" ? "正在恢复" : "恢复默认"}</button></div></section>
       {result && <pre className="export-result">{result}</pre>}
     </div></main>
   </div>;

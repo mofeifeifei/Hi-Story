@@ -28,7 +28,7 @@ output_contract: 结构化数据
 
 ## 章节结果与标题
 
-`chapter_result_card` 只概括最终稿的核心变化、读者回报、关键行动和关键代价，并提供 4 到 6 个标题候选。标题要概括本章实际变化，不泄露最后反转；候选结构要多样，避开近章反复使用的“X之Y”和抽象主题词。
+`chapter_result_card` 只概括最终稿的核心变化、读者回报、关键行动和关键代价，并提供 `title_decision`。先写清“谁做了什么，造成什么变化”，再提供 4 到 6 个自然中文标题并选出唯一推荐标题。标题不能只是地点、物件、人物名、时辰或案卷状态的拼接；不能写成公文式被动句、数据库标签或抽象主题词。候选结构要多样，避开近章反复使用的“X之Y”，不要泄露最后反转。
 
 ## 输出契约
 
@@ -49,8 +49,12 @@ output_contract: 结构化数据
     "reader_payoff": "",
     "key_action": "",
     "key_cost": "",
-    "title_reason": "",
-    "title_candidates": []
+    "title_decision": {
+      "chapter_summary": "",
+      "recommended_title": "",
+      "reason": "",
+      "candidates": []
+    }
   },
   "handoff": {
     "current_scene": "",

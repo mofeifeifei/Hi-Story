@@ -25,6 +25,27 @@ _GENERIC_TITLES = {
     "抉择",
     "真相",
 }
+_BUREAUCRATIC_PASSIVE_RE = re.compile(
+    r"(?:被|遭)(?:发回|退回|驳回|否决|撤销|取消|查封|并查|拒绝)$"
+)
+_TITLE_ACTION_CHARS = set("逼查开退归杀救取送逃拒改烧寻问还赢败破守追见失封夺换入出截拦扣验录留并锁携挡保")
+_OBJECT_ENDINGS = (
+    "门",
+    "墙",
+    "箱",
+    "箱笼",
+    "院",
+    "房",
+    "案",
+    "纸",
+    "灯",
+    "信",
+    "册",
+    "刀",
+    "剑",
+    "车",
+    "船",
+)
 
 
 def title_ledger(chapters: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, str | int]]:
@@ -49,14 +70,44 @@ def choose_chapter_title(
     recent_titles: list[dict[str, Any]],
     fallback: Any,
 ) -> str:
-    cleaned = _title_candidates(candidates)
+    decision = candidates if isinstance(candidates, dict) else {}
+    recommended = _clean_title(decision.get("recommended_title")) if decision else ""
+    raw_candidates = decision.get("candidates") if decision else candidates
+    cleaned = _title_candidates(raw_candidates)
     if not cleaned:
         return _clean_title(fallback)
+    if recommended and recommended not in cleaned:
+        cleaned.insert(0, recommended)
     recent = [_clean_title(item.get("title")) for item in recent_titles if isinstance(item, dict)]
     recent = [title for title in recent if title]
+
+    if recommended:
+        ranked = [recommended, *[title for title in cleaned if title != recommended]]
+        for title in ranked:
+            if not title_blockers(title, recent_titles):
+                return title
+        return _clean_title(fallback)
+
     scored = [(title_score(title, recent), -index, title) for index, title in enumerate(cleaned)]
-    best_score, _, best = max(scored)
-    return best if best_score > -60 else _clean_title(fallback)
+    scored.sort(reverse=True)
+    best_score, _, best = scored[0]
+    # Legacy responses did not identify a semantic winner. When several
+    # candidates are equally novel, preserve the planned title instead of
+    # letting JSON array order make the editorial decision.
+    tied = len(scored) > 1 and scored[1][0] == best_score
+    fallback_title = _clean_title(fallback)
+    if tied and fallback_title:
+        return fallback_title
+    return best if best_score > -60 else fallback_title
+
+
+def title_blockers(title: Any, recent_titles: list[dict[str, Any]]) -> list[str]:
+    cleaned = _clean_title(title)
+    blockers: list[str] = []
+    if len(cleaned) < 3 or len(cleaned) > 18:
+        blockers.append("章节标题长度应为 3 到 18 个字符。")
+    blockers.extend(title_warnings(cleaned, recent_titles))
+    return list(dict.fromkeys(blockers))
 
 
 def title_warnings(title: Any, recent_titles: list[dict[str, Any]]) -> list[str]:
@@ -80,6 +131,10 @@ def title_warnings(title: Any, recent_titles: list[dict[str, Any]]) -> list[str]
         warnings.append("近五章已多次使用“X之Y”标题结构，本章应换成具体事件或人物选择。")
     if cleaned in _GENERIC_TITLES:
         warnings.append("章节标题过于抽象，未概括本章独有行动、发现、选择或代价。")
+    if _BUREAUCRATIC_PASSIVE_RE.search(cleaned):
+        warnings.append("章节标题像公文处理状态，缺少自然的小说语言。")
+    if _looks_like_location_object_label(cleaned):
+        warnings.append("章节标题只组合了地点方位和物件，未概括本章发生的核心变化。")
     return warnings
 
 
@@ -112,6 +167,10 @@ def title_score(title: str, recent_titles: list[str]) -> int:
         score -= 50
     if title in _GENERIC_TITLES:
         score -= 45
+    if _BUREAUCRATIC_PASSIVE_RE.search(title):
+        score -= 55
+    if _looks_like_location_object_label(title):
+        score -= 55
     structure = title_structure(title)
     recent_structures = [title_structure(item) for item in recent_titles[-5:]]
     if structure == "X之Y":
@@ -124,6 +183,15 @@ def title_score(title: str, recent_titles: list[str]) -> int:
         elif _keyword_overlap(title, recent) >= 0.75:
             score -= 20
     return score
+
+
+def _looks_like_location_object_label(title: str) -> bool:
+    if any(char in title for char in _TITLE_ACTION_CHARS):
+        return False
+    if any(token in title for token in ("的", "之", "谁", "何", "为何", "怎会")):
+        return False
+    has_location = any(token in title for token in ("门内", "门外", "墙内", "墙外", "院内", "院外", "楼上", "楼下", "城内", "城外"))
+    return bool(has_location and title.endswith(_OBJECT_ENDINGS))
 
 
 def _title_candidates(value: Any) -> list[str]:

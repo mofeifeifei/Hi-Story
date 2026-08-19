@@ -40,6 +40,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_model": "gpt-4o-mini",
     "review_model": "",
     "model_reasoning_effort": "",
+    "supports_reasoning": None,
+    "supports_response_format": None,
     "disable_response_storage": True,
     "model_context_window": 1000000,
     "model_auto_compact_token_limit": 900000,

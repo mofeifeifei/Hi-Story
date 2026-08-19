@@ -16,6 +16,8 @@ ALLOWED_CONFIG_KEYS = {
     "agent_models",
     "temperature",
     "model_reasoning_effort",
+    "supports_reasoning",
+    "supports_response_format",
     "disable_response_storage",
     "model_context_window",
     "model_auto_compact_token_limit",
@@ -42,6 +44,8 @@ MODEL_DISCOVERY_KEYS = {
     "max_retries",
     "use_system_proxy",
     "proxy_url",
+    "supports_reasoning",
+    "supports_response_format",
 }
 BALANCE_QUERY_KEYS = {
     "provider",
@@ -80,6 +84,11 @@ def sanitize_config_update(current: dict[str, Any], body: dict[str, Any]) -> dic
     config["agent_models"] = _agent_models(config.get("agent_models"))
     config["temperature"] = _number(config.get("temperature"), "temperature", 0.0, 2.0, 0.8)
     config["model_reasoning_effort"] = _text(config.get("model_reasoning_effort"))
+    config["supports_reasoning"] = _optional_bool(config.get("supports_reasoning"), "supports_reasoning")
+    config["supports_response_format"] = _optional_bool(
+        config.get("supports_response_format"),
+        "supports_response_format",
+    )
     config["disable_response_storage"] = _bool(config.get("disable_response_storage", True), "disable_response_storage")
     config["model_context_window"] = _integer(config.get("model_context_window"), "model_context_window", 4096, 4000000, 1000000)
     config["model_auto_compact_token_limit"] = _integer(
@@ -124,6 +133,8 @@ def public_config(config: dict[str, Any]) -> dict[str, Any]:
         "agent_models": config.get("agent_models", {}),
         "temperature": float(config.get("temperature", 0.8) or 0.8),
         "model_reasoning_effort": config.get("model_reasoning_effort", ""),
+        "supports_reasoning": config.get("supports_reasoning"),
+        "supports_response_format": config.get("supports_response_format"),
         "disable_response_storage": bool(config.get("disable_response_storage", True)),
         "model_context_window": int(config.get("model_context_window", 1000000) or 1000000),
         "model_auto_compact_token_limit": int(config.get("model_auto_compact_token_limit", 900000) or 900000),
@@ -186,6 +197,12 @@ def _bool(value: Any, label: str) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     raise ValueError(f"配置 {label} 必须是布尔值。")
+
+
+def _optional_bool(value: Any, label: str) -> bool | None:
+    if value in (None, "", "auto"):
+        return None
+    return _bool(value, label)
 
 
 def _integer(value: Any, label: str, minimum: int, maximum: int, default: int) -> int:

@@ -201,7 +201,11 @@ export function WritingPage() {
 
   async function runTask(kind: "chapter" | "revise" | "memory") {
     const chapter = chapterState.data?.chapter;
-    if (!chapter || store.task) return;
+    const chapterTask = store.tasks.some((task) => Number(task.workId || 0) === Number(store.selectedWorkId) && Number(task.chapterNumber || 0) === Number(chapter?.chapter_number));
+    if (!chapter || chapterTask) {
+      if (chapterTask) store.notify("当前章节已有任务运行，请等待完成或先停止任务。", "warning");
+      return;
+    }
     const taskWorkId = Number(store.selectedWorkId);
     if (kind !== "chapter" && dirty && !window.confirm("当前修改尚未保存。修订和记忆将以编辑区当前内容为准，确定继续吗？")) return;
     if (kind === "revise" && !instruction.trim()) { store.notify("请先填写明确的修改要求。", "warning"); return; }
@@ -248,7 +252,7 @@ export function WritingPage() {
       }
     } catch (error) {
       if ((error as Error).name !== "AbortError") store.notify((error as Error).message, "danger");
-    } finally { if (useAppStore.getState().task?.id === taskId) store.setTask(null); }
+    } finally { useAppStore.getState().removeTask(taskId); }
   }
 
   async function loadContext(targetWorkId: number, targetChapter: number) {
@@ -285,6 +289,8 @@ export function WritingPage() {
     setExpanded(next); writeNumberList(expandedKey(), next);
   }
   const chapter = chapterState.data?.chapter;
+  const workTask = store.tasks.some((task) => Number(task.workId || 0) === Number(store.selectedWorkId));
+  const chapterTask = store.tasks.some((task) => Number(task.workId || 0) === Number(store.selectedWorkId) && Number(task.chapterNumber || 0) === Number(chapter?.chapter_number));
   const activeReview = dirty ? undefined : candidateReview || chapterState.data?.review;
   const revisionAdvice = useMemo(() => revisionAdviceFrom(activeReview), [activeReview]);
   const visibleRevisionAdvice = revisionAdvice;
@@ -295,14 +301,13 @@ export function WritingPage() {
     chapter
     && plainText().trim()
     && !saveMutation.isPending
-    && !store.task
+    && !workTask
   );
   const canGenerateMemory = Boolean(
     chapter
-    && String(chapter.final_text || "").trim()
-    && chapter.status !== "problem_draft"
+    && String(chapter.final_text || chapter.draft || "").trim()
     && !dirty
-    && !store.task
+    && !chapterTask
   );
 
   async function copyRevisionText() {
@@ -331,7 +336,10 @@ export function WritingPage() {
   }
 
   function loadCandidate(text: string, notify = true) {
-    if (store.task) return;
+    if (workTask) {
+      store.notify("当前作品仍有任务运行，暂时不能载入候选稿。", "warning");
+      return;
+    }
     loadingChapter.current = true;
     editor?.commands.setContent(textToHtml(text), { emitUpdate: false });
     setDirty(true);
@@ -341,7 +349,7 @@ export function WritingPage() {
   }
 
   function promoteCandidate(text: string) {
-    if (store.task || saveMutation.isPending) return;
+    if (workTask || saveMutation.isPending) return;
     if (candidateText === text && candidateBlockers.length) {
       const summary = candidateBlockers.slice(0, 3).map((item) => `- ${item}`).join("\n");
       if (!window.confirm(`这份候选稿仍有 ${candidateBlockers.length} 项问题：\n${summary}\n\n仍要保存为最终稿吗？`)) return;
@@ -355,7 +363,7 @@ export function WritingPage() {
   }
 
   async function deleteCandidate(versionId: unknown) {
-    if (!chapter || !versionId || store.task || !window.confirm("确定删除这份候选稿吗？此操作无法撤销。")) return;
+    if (!chapter || !versionId || workTask || !window.confirm("确定删除这份候选稿吗？此操作无法撤销。")) return;
     try {
       await api(`/api/works/${store.selectedWorkId}/chapters/${chapter.chapter_number}/versions/${versionId}`, { method: "DELETE" });
       await queryClient.invalidateQueries({ queryKey: ["chapter", store.selectedWorkId, chapter.chapter_number] });
@@ -364,7 +372,7 @@ export function WritingPage() {
   }
 
   async function deleteChapterRange(fromCurrent: boolean) {
-    if (!chapter || !store.selectedWorkId || store.task) return;
+    if (!chapter || !store.selectedWorkId || workTask) return;
     const message = fromCurrent
       ? `确定删除第 ${chapter.chapter_number} 章及之后的全部章节吗？正文、细纲和记忆都会删除，此操作无法撤销。`
       : `确定删除第 ${chapter.chapter_number} 章吗？正文、细纲和记忆都会删除，此操作无法撤销。`;
@@ -390,11 +398,11 @@ export function WritingPage() {
   return <div className="page">
     <PageHeader title="正文写作" description="章节独立加载，本地草稿与阅读位置自动保留。" actions={<>
       <select className="input" style={{ width: 116 }} value={mode} onChange={(event) => setMode(event.target.value)} aria-label="生成方式"><option value="standard">正式生成</option><option value="fast">快速试稿</option></select>
-      <button className="btn primary" disabled={!chapter || Boolean(store.task)} onClick={() => runTask("chapter")}><Sparkles size={17} />生成正文</button>
+      <button className="btn primary" disabled={!chapter || chapterTask} onClick={() => runTask("chapter")}><Sparkles size={17} />生成正文</button>
       <button className="btn" disabled={!canSaveFinal} onClick={() => saveMutation.mutate()}><Save size={16} />保存最终稿</button>
-      <button className="btn" disabled={!canGenerateMemory} title={canGenerateMemory ? "根据当前最终稿生成记忆，并清理旧稿" : "请先保存当前稿，再生成记忆"} onClick={() => runTask("memory")}><FileClock size={16} />记忆入库</button>
+      <button className="btn" disabled={!canGenerateMemory} title={canGenerateMemory ? "根据当前稿生成记忆；问题稿会先保存为最终稿" : "当前章节没有可用正文"} onClick={() => runTask("memory")}><FileClock size={16} />记忆入库</button>
       <button className="icon-button" onClick={store.toggleInspector} title={store.inspectorOpen ? "收起辅助面板" : "展开辅助面板"}>{store.inspectorOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
-      <details className="button-menu"><summary className="icon-button" title="更多操作"><MoreHorizontal size={18} /></summary><div className="menu-popover"><button className="btn danger" onClick={() => clearChapter(store.selectedWorkId!, chapter!, queryClient, store.notify, () => { localStorage.removeItem(draftKey(chapter!.chapter_number)); setDirty(false); })} disabled={!chapter || Boolean(store.task)}><Trash2 size={15} />清空本章正文</button><button className="btn danger" onClick={() => deleteChapterRange(false)} disabled={!chapter || Boolean(store.task)}><Trash2 size={15} />删除当前章节</button><button className="btn danger" onClick={() => deleteChapterRange(true)} disabled={!chapter || Boolean(store.task)}><Trash2 size={15} />删除本章及之后</button></div></details>
+      <details className="button-menu"><summary className="icon-button" title="更多操作"><MoreHorizontal size={18} /></summary><div className="menu-popover"><button className="btn danger" onClick={() => clearChapter(store.selectedWorkId!, chapter!, queryClient, store.notify, () => { localStorage.removeItem(draftKey(chapter!.chapter_number)); setDirty(false); })} disabled={!chapter || workTask}><Trash2 size={15} />清空本章正文</button><button className="btn danger" onClick={() => deleteChapterRange(false)} disabled={!chapter || workTask}><Trash2 size={15} />删除当前章节</button><button className="btn danger" onClick={() => deleteChapterRange(true)} disabled={!chapter || workTask}><Trash2 size={15} />删除本章及之后</button></div></details>
     </>} />
     <div className={`writing-shell ${store.inspectorOpen ? "" : "inspector-closed"}`}>
       <aside className="chapter-rail"><div className="rail-search"><div className="search-box"><Search size={16} /><input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索章节" /></div></div><div className="chapter-list">
@@ -408,12 +416,12 @@ export function WritingPage() {
       <aside className="inspector"><div className="inspector-tabs">{([['task','本章任务'],['continuity','上下章衔接'],['revision','修订'],['memory','记忆'],['versions','候选版本']] as Array<[InspectorTab,string]>).map(([key,label]) => <button key={key} className={inspectorTab === key ? "active" : ""} onClick={() => setInspectorTab(key)}>{label}</button>)}<button className="inspector-close" onClick={store.toggleInspector} title="关闭辅助面板"><X size={16} /></button></div><div className="inspector-content">
         {inspectorTab === "task" && <><h3>本章任务</h3><pre className="readable">{chapter ? taskText(chapter, chapterState.data?.outline_readable) : "未载入章节。"}</pre></>}
         {inspectorTab === "continuity" && <><h3>上下章衔接</h3><pre className="readable">{loadingContext ? "正在构建本章上下文..." : contextReadable || readable(context)}</pre></>}
-        {inspectorTab === "revision" && <div className="revision-box"><h3>修订建议</h3>{candidateText && <p className="candidate-warning">当前显示的是候选稿复审结果。候选稿未覆盖编辑器正文。</p>}{visibleRevisionAdvice.length ? <div className="revision-advice-list">{visibleRevisionAdvice.map((item, index) => <section className="revision-advice-item" key={`${index}-${item.target}-${item.action}`}><div className="revision-advice-head"><span>{index + 1}</span><strong>{item.target || item.evidence || "本章相关段落"}</strong></div><p><b>修改：</b>{item.action}</p></section>)}</div> : <p className="revision-empty">当前正文没有可用的修订建议。</p>}<button className="btn" disabled={!revisionCopyText.trim()} onClick={copyRevisionText}><Copy size={15} />复制修改话术</button><label className="field">修改要求<textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="粘贴上方修改话术，或直接写清楚要改什么。" /></label><button className="btn primary" disabled={!instruction.trim() || Boolean(store.task)} onClick={() => runTask("revise")}><Play size={15} />按要求修订</button></div>}
+        {inspectorTab === "revision" && <div className="revision-box"><h3>修订建议</h3>{candidateText && <p className="candidate-warning">当前显示的是候选稿复审结果。候选稿未覆盖编辑器正文。</p>}{visibleRevisionAdvice.length ? <div className="revision-advice-list">{visibleRevisionAdvice.map((item, index) => <section className="revision-advice-item" key={`${index}-${item.target}-${item.action}`}><div className="revision-advice-head"><span>{index + 1}</span><strong>{item.target || item.evidence || "本章相关段落"}</strong></div><p><b>修改：</b>{item.action}</p></section>)}</div> : <p className="revision-empty">当前正文没有可用的修订建议。</p>}<button className="btn" disabled={!revisionCopyText.trim()} onClick={copyRevisionText}><Copy size={15} />复制修改话术</button><label className="field">修改要求<textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="粘贴上方修改话术，或直接写清楚要改什么。" /></label><button className="btn primary" disabled={!instruction.trim() || chapterTask} onClick={() => runTask("revise")}><Play size={15} />按要求修订</button></div>}
         {inspectorTab === "memory" && <><h3>章节记忆</h3><pre className="readable">{chapterState.data?.memory_readable || readable(safeJson(chapter?.memory_json, null))}</pre></>}
-        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); const label = candidateLabel(version); return <Candidate key={String(version.id)} text={text} label={label} disabled={Boolean(store.task) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
+        {inspectorTab === "versions" && <><h3>候选版本</h3>{candidateText && <Candidate text={candidateText} label="本次修订候选稿" disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text: candidateText, label: "本次修订候选稿" })} onLoad={() => loadCandidate(candidateText)} onPromote={() => promoteCandidate(candidateText)} />}{visibleVersions.map((version) => { const text = String(version.content || ""); const label = candidateLabel(version); return <Candidate key={String(version.id)} text={text} label={label} disabled={Boolean(workTask) || saveMutation.isPending} onPreview={() => setPreviewCandidate({ text, label })} onLoad={() => loadCandidate(text)} onPromote={() => promoteCandidate(text)} onDelete={() => deleteCandidate(version.id)} />; })}{!candidateText && !visibleVersions.length && <p className="readable">暂无候选版本。未通过自动验收的稿件会保存在这里，不会覆盖最终稿。</p>}</>}
       </div></aside>
     </div>
-    {previewCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPreviewCandidate(null)}><section className="candidate-preview" role="dialog" aria-modal="true" aria-label="候选稿预览" onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{previewCandidate.label}</strong><span>候选稿，未覆盖最终稿</span></div><button className="icon-button" title="关闭预览" onClick={() => setPreviewCandidate(null)}><X size={17} /></button></header><div className="candidate-preview-body">{previewCandidate.text}</div><footer><button className="btn" onClick={() => setPreviewCandidate(null)}>关闭</button><button className="btn" disabled={Boolean(store.task) || saveMutation.isPending} onClick={() => loadCandidate(previewCandidate.text)}><Eye size={15} />载入编辑器</button><button className="btn primary" disabled={Boolean(store.task) || saveMutation.isPending} onClick={() => promoteCandidate(previewCandidate.text)}><Save size={15} />保存为最终稿</button></footer></section></div>}
+    {previewCandidate && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPreviewCandidate(null)}><section className="candidate-preview" role="dialog" aria-modal="true" aria-label="候选稿预览" onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{previewCandidate.label}</strong><span>候选稿，未覆盖最终稿</span></div><button className="icon-button" title="关闭预览" onClick={() => setPreviewCandidate(null)}><X size={17} /></button></header><div className="candidate-preview-body">{previewCandidate.text}</div><footer><button className="btn" onClick={() => setPreviewCandidate(null)}>关闭</button><button className="btn" disabled={Boolean(workTask) || saveMutation.isPending} onClick={() => loadCandidate(previewCandidate.text)}><Eye size={15} />载入编辑器</button><button className="btn primary" disabled={Boolean(workTask) || saveMutation.isPending} onClick={() => promoteCandidate(previewCandidate.text)}><Save size={15} />保存为最终稿</button></footer></section></div>}
   </div>;
 }
 

@@ -17,7 +17,9 @@ from app.utils.history import default_historical_profile, is_historical_inputs
 
 
 class AIClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,7 @@ class AIClient:
         self._last_call_by_agent: dict[str, dict[str, Any]] = {}
         self._last_response_meta_by_agent: dict[str, dict[str, Any]] = {}
         self._closed = False
+        self._response_format_override: bool | None = None
         self._request_process: Any | None = None
         self._request_process_lock = threading.Lock()
 
@@ -222,7 +225,8 @@ class AIClient:
                 )
                 raise AIClientError(
                     f"{agent_label}模型输出达到 Token 上限，有效内容未完整返回。"
-                    f"{retry_note}{budget_note}{reasoning_note}"
+                    f"{retry_note}{budget_note}{reasoning_note}",
+                    raw=str(output or "")[-8000:],
                 )
             if not str(output or "").strip():
                 attempt_label = "连续两次" if output_attempts > 1 else ""
@@ -463,8 +467,24 @@ class AIClient:
                 raise AIClientError("API 密钥无效，余额查询接口拒绝了认证。")
             if response.status_code == 403:
                 raise AIClientError("当前 API 密钥无权查询账户余额。")
+            if self._looks_like_html(response):
+                if custom_url and url == custom_url.rstrip("/"):
+                    raise AIClientError(
+                        "自定义余额地址返回了网页 HTML，不是余额 JSON 接口。"
+                        "请填写中转站文档提供的余额 API 地址；如果只有后台网页，请直接登录后台查看余额。"
+                    )
+                unsupported.append(url)
+                continue
             self._raise_for_status(response, "余额查询接口")
-            data = self._response_json(response, "余额查询接口")
+            try:
+                data = self._response_json(response, "余额查询接口")
+            except AIClientError as exc:
+                if custom_url and url == custom_url.rstrip("/"):
+                    raise AIClientError(
+                        "自定义余额地址没有返回 JSON。请确认它是余额 API，而不是中转站首页或管理后台。"
+                    ) from exc
+                unsupported.append(url)
+                continue
             normalized = self._normalize_balance(data, url)
             if normalized is not None:
                 return normalized
@@ -474,8 +494,14 @@ class AIClient:
         return {
             "supported": False,
             "balances": [],
-            "message": "当前服务商没有提供可由模型 API Key 读取的余额接口，可在高级设置中填写同域的余额查询地址。",
+            "message": "当前中转站没有发现可由模型 API Key 读取的余额接口。请在高级设置填写余额 JSON API；如果中转站只提供后台网页，请登录后台查看余额。",
         }
+
+    @staticmethod
+    def _looks_like_html(response: Any) -> bool:
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", "") or "").lower()
+        body = str(getattr(response, "text", "") or "").lstrip().lower()
+        return "text/html" in content_type or body.startswith("<!doctype html") or body.startswith("<html")
 
     @staticmethod
     def _normalize_balance(data: dict[str, Any], source_url: str) -> dict[str, Any] | None:
@@ -573,18 +599,32 @@ class AIClient:
         if json_mode and self._supports_response_format():
             payload["response_format"] = {"type": "json_object"}
 
-        response = self._post_json(
-            requests_module=requests,
-            agent_name=agent_name,
-            url=f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            payload=payload,
-            api_name="AI Chat Completions API",
-        )
-        self._raise_for_status(response, "AI Chat Completions API")
+        try:
+            response = self._post_json(
+                requests_module=requests,
+                agent_name=agent_name,
+                url=f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload=payload,
+                api_name="AI Chat Completions API",
+            )
+            self._raise_for_status(response, "AI Chat Completions API")
+        except AIClientError as exc:
+            if json_mode and self._supports_response_format() and self._is_response_format_error(exc):
+                self._response_format_override = False
+                logger.warning("response_format is unsupported; retrying without JSON response format")
+                return self._call_chat_completions(
+                    agent_name=agent_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    api_key=api_key,
+                    json_mode=False,
+                    max_output_tokens=max_output_tokens,
+                )
+            raise
 
         data = self._response_json(response, "AI Chat Completions API")
         try:
@@ -633,15 +673,29 @@ class AIClient:
         if max_output_tokens > 0:
             payload["max_output_tokens"] = max_output_tokens
 
-        response = self._post_json(
-            requests_module=requests,
-            agent_name=agent_name,
-            url=f"{base_url}/responses",
-            headers=self._headers(api_key),
-            payload=payload,
-            api_name="AI Responses API",
-        )
-        self._raise_for_status(response, "AI Responses API")
+        try:
+            response = self._post_json(
+                requests_module=requests,
+                agent_name=agent_name,
+                url=f"{base_url}/responses",
+                headers=self._headers(api_key),
+                payload=payload,
+                api_name="AI Responses API",
+            )
+            self._raise_for_status(response, "AI Responses API")
+        except AIClientError as exc:
+            if json_mode and self._supports_response_format() and self._is_response_format_error(exc):
+                self._response_format_override = False
+                logger.warning("response_format is unsupported; retrying without JSON response format")
+                return self._call_responses_api(
+                    agent_name=agent_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    api_key=api_key,
+                    json_mode=False,
+                    max_output_tokens=max_output_tokens,
+                )
+            raise
 
         data = self._response_json(response, "AI Responses API")
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
@@ -712,7 +766,15 @@ class AIClient:
                     exc,
                 )
                 self._interruptible_sleep(delay)
-        raise AIClientError(self._friendly_request_error(last_error, api_name, url, read_timeout))
+        raise AIClientError(
+            self._friendly_request_error(
+                last_error,
+                api_name,
+                url,
+                read_timeout,
+                agent_name=agent_name,
+            )
+        )
 
     def _cancellable_post(
         self,
@@ -814,12 +876,7 @@ class AIClient:
         return _ProcessResponse(result)
 
     def _read_timeout(self, agent_name: str) -> int:
-        configured = max(10, int(self.config.get("timeout", 300) or 300))
-        if agent_name == "reviser":
-            return min(configured, 300)
-        if agent_name == "reviewer":
-            return min(configured, 120)
-        return configured
+        return max(10, int(self.config.get("timeout", 300) or 300))
 
     def _effective_max_output_tokens(self, agent_name: str) -> int:
         configured = max(0, int(self.config.get("max_output_tokens", 0) or 0))
@@ -906,7 +963,14 @@ class AIClient:
         raise AIClientError(f"{api_name} 调用失败：{response.status_code}，{message}。返回片段：{body}")
 
     @staticmethod
-    def _friendly_request_error(exc: Exception | None, api_name: str, url: str, timeout: int) -> str:
+    def _friendly_request_error(
+        exc: Exception | None,
+        api_name: str,
+        url: str,
+        timeout: int,
+        *,
+        agent_name: str = "",
+    ) -> str:
         if exc is None:
             return f"{api_name} 调用失败：未知网络错误。"
         exc_name = exc.__class__.__name__
@@ -917,7 +981,10 @@ class AIClient:
             advice = "请在设置页关闭“使用系统代理”，或填写可用的代理地址；也可以把 Wire API 切到 chat_completions 再测试。"
         elif "read timed out" in lower_detail or "readtimeout" in exc_name.lower():
             reason = f"读取超时。外部 API 在 {timeout} 秒内没有返回完整结果。"
-            advice = "请把超时时间调大，降低推理强度，或减少一次生成的章节数量。"
+            if agent_name == "reviewer":
+                advice = "本次是单章质量检查，与生成章数无关。可提高请求超时，或为审稿智能体选择响应更快的模型；正文和修订候选稿不会因此丢失。"
+            else:
+                advice = "请把超时时间调大，降低推理强度，或稍后重试。"
         elif "connecttimeout" in exc_name.lower() or "timed out" in lower_detail:
             reason = f"连接超时。程序在 {timeout} 秒内没有连上 API 服务。"
             advice = "请检查网络、Base URL、代理设置，或稍后重试。"
@@ -942,16 +1009,35 @@ class AIClient:
         return str(self.config.get("model_provider") or self.config.get("provider") or "").strip().lower()
 
     def _supports_response_format(self) -> bool:
+        if self._response_format_override is not None:
+            return self._response_format_override
         if "supports_response_format" in self.config:
-            return bool(self.config.get("supports_response_format"))
+            value = self.config.get("supports_response_format")
+            if value is not None:
+                return bool(value)
         provider = self._provider_name()
         return provider not in {"deepseek"}
 
     def _supports_reasoning(self) -> bool:
         if "supports_reasoning" in self.config:
-            return bool(self.config.get("supports_reasoning"))
+            value = self.config.get("supports_reasoning")
+            if value is not None:
+                return bool(value)
         provider = self._provider_name()
         return provider in {"openai", "tokenflux"}
+
+    @staticmethod
+    def _is_response_format_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        mentions_format = any(
+            marker in message
+            for marker in ("response_format", "json_object", "structured output", "response format", "json 格式")
+        )
+        mentions_unsupported = any(
+            marker in message
+            for marker in ("unsupported", "not support", "不支持", "unknown parameter", "无效参数")
+        )
+        return mentions_format and mentions_unsupported
 
     def _supports_response_storage_flag(self) -> bool:
         if "supports_response_storage_flag" in self.config:
@@ -1449,6 +1535,16 @@ class AIClient:
                     "why_it_matters": "时代违和会破坏历史题材可信度。",
                 }
             )
+        planned_title = str(hint.get("chapter_title") or "").strip()
+        title_candidates = [
+            planned_title or "线索落到实处",
+            "一次选择改变局面",
+            "证据逼出新条件",
+            "代价从此摆上桌面",
+        ]
+        title_candidates = list(dict.fromkeys(title_candidates))
+        while len(title_candidates) < 4:
+            title_candidates.append(f"阶段变化之{len(title_candidates) + 1}")
         return {
             "continuity_score": 86,
             "character_score": 88,
@@ -1487,6 +1583,12 @@ class AIClient:
             ],
             "template_hits": template_hits,
             "risk_flags": [],
+            "title_decision": {
+                "chapter_summary": "主角通过一次具体行动确认关键线索，并让局面产生可见变化。",
+                "recommended_title": title_candidates[0],
+                "reason": "该标题对应本章已经完成的关键行动和局势变化。",
+                "candidates": title_candidates,
+            },
         }
 
     @staticmethod
@@ -1555,6 +1657,24 @@ class AIClient:
             "relationship_changes": [f"{protagonist}与{partner}从试探转向有限合作。"],
             "historical_updates": historical_updates,
             "ending_hook": "本章结尾出现新的验证条件，下一章必须从现场继续处理。",
+            "chapter_result_card": {
+                "core_change": f"{protagonist}确认新的阶段线索，并与{partner}形成有限合作。",
+                "reader_payoff": "线索从猜测变成可以继续验证的具体条件。",
+                "key_action": f"{protagonist}把关键线索按在灯下并决定继续验证。",
+                "key_cost": "主角的部分判断方式已经被同伴察觉。",
+                "title_reason": "标题概括本章已经发生的行动和关系变化。",
+                "title_decision": {
+                    "chapter_summary": f"{protagonist}确认新的阶段线索，并与{partner}形成有限合作。",
+                    "recommended_title": "线索落到灯下",
+                    "reason": "标题对应本章把猜测转成可验证线索的核心变化。",
+                    "candidates": [
+                        "线索落到灯下",
+                        "一次有限的合作",
+                        "把判断变成行动",
+                        "证据露出第二层",
+                    ],
+                },
+            },
             "handoff": {
                 "current_scene": "本章结尾的新线索现场",
                 "current_time": f"第{chapter_number}章结尾后",

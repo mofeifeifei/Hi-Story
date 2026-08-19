@@ -28,6 +28,74 @@ def _planner_context(bundle: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def _short_context(value: Any, limit: int = 360) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        return text if len(text) <= limit else text[:limit].rstrip("，,。；;：: ") + "…"
+    if isinstance(value, list):
+        return [_short_context(item, limit) for item in value[:12]]
+    if isinstance(value, dict):
+        return {key: _short_context(item, limit) for key, item in value.items()}
+    return value
+
+
+def _chapter_planner_context(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Keep chapter planning context focused without changing writer context."""
+    context = _planner_context(bundle)
+    context["book_bible"] = _short_context(context.get("book_bible", {}), 720)
+    context["characters"] = [
+        _short_context(
+            {
+                key: item.get(key, "")
+                for key in [
+                    "name",
+                    "role",
+                    "goal",
+                    "current_goal",
+                    "current_state",
+                    "relationship_stage",
+                    "locked_rules",
+                ]
+            },
+            300,
+        )
+        for item in context.get("characters", [])[:8]
+        if isinstance(item, dict)
+    ]
+    context["world_rules"] = [
+        _short_context(
+            {
+                key: item.get(key, "")
+                for key in ["rule_name", "rule_content", "limitations", "forbidden_changes"]
+            },
+            300,
+        )
+        for item in context.get("world_rules", [])[:8]
+        if isinstance(item, dict)
+    ]
+    context["open_plot_threads"] = [
+        _short_context(
+            {
+                key: item.get(key, "")
+                for key in ["first_chapter", "content", "planned_resolve_chapter"]
+            },
+            360,
+        )
+        for item in context.get("open_plot_threads", [])[:10]
+        if isinstance(item, dict)
+    ]
+    for key in [
+        "recent_chapter_outlines",
+        "recent_summaries",
+        "recent_chapter_openings",
+        "recent_title_ledger",
+        "volume_transition_context",
+    ]:
+        if key in context:
+            context[key] = _short_context(context[key], 420)
+    return context
+
+
 class PlannerAgent(BaseAgent):
     agent_name = "planner"
     prompt_file = "planner_prompt.md"
@@ -97,6 +165,7 @@ class PlannerAgent(BaseAgent):
         start_chapter: int = 1,
         count: int = 30,
         volume_number: int | None = None,
+        compact: bool = False,
     ) -> dict[str, Any]:
         history_section = history_prompt_section(work_bundle, task="chapter_outlines")
         target_volume_number = int(volume_number or work_bundle.get("target_volume_number") or 0)
@@ -119,25 +188,28 @@ class PlannerAgent(BaseAgent):
                 "如果不换卷，should_transition 为 false，from_volume/to_volume 写当前卷，reason 写继续当前卷的剧情理由。\n"
                 "不要把所有章节默认放进第一卷，也不要因为界面当前选中了某个分卷就强行归入该卷。\n"
             )
+        compact_instruction = (
+            "这是截断后的紧凑重试。只保留核心事实，每个普通字段 1 句，每个场景不超过 80 个中文字符；"
+            "不要解释、不要重复同一事实，整个 planning_core 尽量控制在 3000 个中文字符以内。\n"
+            if compact
+            else "所有内容只写一次，普通字段 1 到 2 句，每个场景不超过 120 个中文字符；整个 planning_core 控制在 4500 个中文字符以内。\n"
+        )
         user_prompt = (
             f"请生成从第 {start_chapter} 章开始的 {count} 章细纲，输出供程序解析的合法 JSON。\n"
             f"{volume_instruction}"
-            "JSON 字段：volume_decision, chapters。\n"
-            "无论是否换卷，都必须输出 chapters 数组；不能只输出 volume_decision，也不能把章节数组命名为 chapter_outlines。\n"
-            "volume_decision 是本批细纲开始前的卷决策；显式指定目标卷时仍要返回，但 should_transition 必须为 false。\n"
-            "chapters 内每项必须包含：chapter_number, volume_number, sequence_id, sequence_goal, sequence_position, scene_id, continuity_mode, story_time, title, outline, opening_hook, continuity_debt, debt_type, opening_mode, opening_subject, allowed_shift, shift_reason, opening_trigger, time_or_environment_function, "
-            "previous_anchor, first_screen_conflict, forbidden_opening, reader_question_in, reader_answer_out, new_question_out, scene_cards, chapter_goal, conflict, main_scene, "
-            "reader_expectation, characters_present, clues, new_information, chapter_payoff, "
-            "character_change, foreshadowing, emotional_turn, emotional_rhythm, "
-            "ending_external_anchor, next_opening_action, next_continuity_debt, ending_hook, cut_reason, handoff, forbidden。\n"
-            "每 3 到 5 章组成一个连续剧情单元并使用相同 sequence_id。每章写清目标、阻碍、行动、信息变化、阶段回报和自然切章原因；scene_cards 为 3 到 6 个。\n"
-            "continuity_mode 只能是 direct、shift 或 new_stage，默认 direct。转场时 shift_reason 必须说明上一章后果怎样进入新场景。\n"
-            "开头直接处理上一章未完成的动作或压力，并避开近期重复的发动方式；story_time 只记时间线，不能直接充当正文开头。\n"
-            "结尾来自本章事件，可停在行动未完、决定落地、后果发生、信息确认、关系变化或场景完成，不必每章强造悬念。next_opening_action 必须与结尾事实对应。\n"
-            "标题点出本章独有的行动、发现、决定、关系变化或代价，避开 recent_title_ledger 中的重复词和结构。\n"
-            "所有字段值使用自然中文，不写内部字段名或策略说明；不得复用同一段细纲，不得重启已有事件。\n\n"
+            f"{compact_instruction}"
+            "顶层 JSON 只能包含 volume_decision 和 chapters。无论是否换卷，都必须输出 chapters 数组。\n"
+            "每个 chapters 项只能包含 planning_core，不要输出旧版几十个平行字段。planning_core 必须包含：chapter, sequence, bridge, questions, scenes, result, handoff。\n"
+            "chapter 必须包含 chapter_number, volume_number, title, sequence_id, sequence_goal, sequence_position, continuity_mode, story_time。\n"
+            "bridge 必须包含 previous_anchor, continuity_debt, debt_type, opening_mode, opening_subject, opening_action, opening_conflict, forbidden_opening。上一章存在时，previous_anchor 必须指向具体人物、物件、动作或未完问题。\n"
+            "questions 必须包含 in, answer, out；result 必须包含 reader_expectation, new_information, clues, chapter_payoff, character_change。\n"
+            "scenes 必须是 3 到 5 个对象，每项包含 location, characters, goal, obstacle, turn, emotional_shift, exit。每场必须改变信息、关系、行动方向或代价，不能只换地点。\n"
+            "handoff 必须包含 ending_event, next_opening_action, next_continuity_debt, cut_reason, unresolved_question, forbidden。next_opening_action 必须直接承接 ending_event。\n"
+            "每 3 到 5 章组成连续剧情单元并使用相同 sequence_id。continuity_mode 只能是 direct、shift、new_stage；转场时写清上一章后果如何进入新场景。\n"
+            "开头先处理上一章留下的动作或压力，避开近期重复的发动方式；story_time 只记时间线，不能直接充当正文开头。结尾来自本章事件，不强造悬念或悠长意境。\n"
+            "标题概括本章独有的行动、发现、决定、关系变化或代价，避开 recent_title_ledger 中的重复词和结构。所有字段值使用自然中文，不写内部字段名、策略说明或 Markdown。\n\n"
             f"{history_section}\n"
-            f"作品资料：\n{json_dumps(_planner_context(work_bundle))}"
+            f"作品资料：\n{json_dumps(_chapter_planner_context(work_bundle))}"
         )
         parsed = self.complete_json(
             user_prompt,
@@ -149,6 +221,8 @@ class PlannerAgent(BaseAgent):
                 "start_chapter": start_chapter,
                 "count": count,
                 "volume_number": target_volume_number,
+                "planning_core": True,
             },
+            repair_attempts=0,
         )
         return parsed

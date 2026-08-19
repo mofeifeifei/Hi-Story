@@ -855,6 +855,21 @@ def format_review_readable(review: dict[str, Any] | None) -> str:
         _section(lines, "字数问题")
         lines.append(_text(review.get("length_problem")))
 
+    title_decision = review.get("title_decision")
+    if isinstance(title_decision, dict) and (
+        title_decision.get("recommended_title") or title_decision.get("chapter_summary")
+    ):
+        _section(lines, "标题判断")
+        if title_decision.get("chapter_summary"):
+            lines.append(f"本章概括：{_text(title_decision.get('chapter_summary'))}")
+        if title_decision.get("recommended_title"):
+            lines.append(f"推荐标题：{_text(title_decision.get('recommended_title'))}")
+        if title_decision.get("reason"):
+            lines.append(f"选择理由：{_text(title_decision.get('reason'))}")
+        candidates = [item for item in as_list(title_decision.get("candidates")) if str(item).strip()]
+        if candidates:
+            lines.append(f"候选标题：{'、'.join(_text(item) for item in candidates)}")
+
     _section(lines, "模板句与风险")
     lines.append(f"模板句：{_text(review.get('template_hits'), '未发现')}")
     lines.append(f"风险提示：{_text(review.get('risk_flags'), '未发现')}")

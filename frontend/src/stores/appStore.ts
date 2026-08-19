@@ -9,6 +9,7 @@ interface AppStore {
   sidebarCollapsed: boolean;
   inspectorOpen: boolean;
   task: TaskState | null;
+  tasks: TaskState[];
   notices: Notice[];
   pendingResults: PendingResult[];
   navigationGuard: (() => boolean) | null;
@@ -19,6 +20,8 @@ interface AppStore {
   toggleSidebar: () => void;
   toggleInspector: () => void;
   setTask: (task: TaskState | null) => void;
+  removeTask: (taskId: string) => void;
+  syncTasks: (tasks: TaskState[]) => void;
   setNavigationGuard: (guard: (() => boolean) | null) => void;
   notify: (message: string, tone?: Notice["tone"]) => void;
   dismissNotice: (id: number) => void;
@@ -36,6 +39,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   sidebarCollapsed: false,
   inspectorOpen: window.matchMedia("(min-width: 861px)").matches,
   task: null,
+  tasks: [],
   notices: [],
   pendingResults: [],
   navigationGuard: null,
@@ -55,7 +59,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selectChapter: (selectedChapter) => set({ selectedChapter }),
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
   toggleInspector: () => set((state) => ({ inspectorOpen: !state.inspectorOpen })),
-  setTask: (task) => set({ task }),
+  setTask: (task) => set((state) => {
+    if (task === null) {
+      const currentId = state.task?.id;
+      const tasks = currentId ? state.tasks.filter((item) => item.id !== currentId) : state.tasks;
+      return { tasks, task: tasks[0] || null };
+    }
+    const tasks = [...state.tasks.filter((item) => item.id !== task.id), task];
+    return { tasks, task };
+  }),
+  removeTask: (taskId) => set((state) => {
+    const tasks = state.tasks.filter((item) => item.id !== taskId);
+    const current = state.task?.id === taskId ? tasks[0] || null : state.task;
+    return { tasks, task: current };
+  }),
+  syncTasks: (remoteTasks) => set((state) => {
+    const byId = new Map(state.tasks.map((item) => [item.id, item]));
+    const tasks = remoteTasks.map((remote) => ({ ...byId.get(remote.id), ...remote, controller: byId.get(remote.id)?.controller || new AbortController() }));
+    const current = state.task && tasks.find((item) => item.id === state.task?.id) || tasks[0] || null;
+    return { tasks, task: current };
+  }),
   setNavigationGuard: (navigationGuard) => set({ navigationGuard }),
   notify: (message, tone = "info") => {
     const id = ++noticeId;

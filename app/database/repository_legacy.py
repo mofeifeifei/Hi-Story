@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -90,6 +91,10 @@ CREATE TABLE IF NOT EXISTS work_index (
 """
 
 
+_INIT_LOCK = threading.RLock()
+_INITIALIZED_INDEXES: set[str] = set()
+
+
 class Repository:
     def __init__(
         self,
@@ -108,13 +113,19 @@ class Repository:
     def init(self) -> None:
         if self._initialized:
             return
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        self.works_dir.mkdir(parents=True, exist_ok=True)
-        self._init_index_db()
-        self._migrate_legacy_db_if_needed()
-        self._cleanup_pending_deleted_dirs()
-        self._upgrade_existing_work_dbs()
-        self._initialized = True
+        key = str(self.index_path.resolve())
+        with _INIT_LOCK:
+            if self._initialized:
+                return
+            if key not in _INITIALIZED_INDEXES:
+                self.index_path.parent.mkdir(parents=True, exist_ok=True)
+                self.works_dir.mkdir(parents=True, exist_ok=True)
+                self._init_index_db()
+                self._migrate_legacy_db_if_needed()
+                self._cleanup_pending_deleted_dirs()
+                self._upgrade_existing_work_dbs()
+                _INITIALIZED_INDEXES.add(key)
+            self._initialized = True
 
     def create_work(self, inputs: dict[str, Any], plan: dict[str, Any]) -> int:
         self.init()
@@ -564,12 +575,17 @@ class Repository:
         ending_hook: str = "",
         outline_json: str | dict[str, Any] | None = None,
         protect_written: bool = False,
+        title_source: str = "planner",
+        title_locked: bool = False,
+        title_reason: str = "",
     ) -> int:
         self.init()
         title = self.normalize_official_names(work_id, title)
         outline = self.normalize_official_names(work_id, outline)
         ending_hook = self.normalize_official_names(work_id, ending_hook)
         outline_json = self.normalize_official_names(work_id, outline_json)
+        title_reason = self.normalize_official_names(work_id, title_reason)
+        title_source = str(title_source or "planner").strip().lower()
         timestamp = now_text()
         if isinstance(outline_json, dict):
             outline_json_text: str | None = chapter_outline_json(outline_json)
@@ -596,11 +612,42 @@ class Repository:
             conn.execute(
                 """
                 INSERT INTO chapters (
-                  work_id, chapter_number, title, outline, outline_json, scene_cards_json, ending_hook, status,
-                  created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'outline', ?, ?)
+                  work_id, chapter_number, title, title_source, title_locked, title_reason,
+                  outline, outline_json, scene_cards_json, ending_hook, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'outline', ?, ?)
                 ON CONFLICT(work_id, chapter_number) DO UPDATE SET
-                  title = excluded.title,
+                  title = CASE
+                    WHEN excluded.title_source = 'planner'
+                         AND COALESCE(chapters.title_source, 'legacy') <> 'planner'
+                      THEN chapters.title
+                    WHEN chapters.title_locked = 1 AND excluded.title_locked = 0
+                      THEN chapters.title
+                    ELSE excluded.title
+                  END,
+                  title_source = CASE
+                    WHEN excluded.title_source = 'planner'
+                         AND COALESCE(chapters.title_source, 'legacy') <> 'planner'
+                      THEN chapters.title_source
+                    WHEN chapters.title_locked = 1 AND excluded.title_locked = 0
+                      THEN chapters.title_source
+                    ELSE excluded.title_source
+                  END,
+                  title_locked = CASE
+                    WHEN excluded.title_source = 'planner'
+                         AND COALESCE(chapters.title_source, 'legacy') <> 'planner'
+                      THEN chapters.title_locked
+                    WHEN chapters.title_locked = 1 AND excluded.title_locked = 0
+                      THEN chapters.title_locked
+                    ELSE excluded.title_locked
+                  END,
+                  title_reason = CASE
+                    WHEN excluded.title_source = 'planner'
+                         AND COALESCE(chapters.title_source, 'legacy') <> 'planner'
+                      THEN chapters.title_reason
+                    WHEN chapters.title_locked = 1 AND excluded.title_locked = 0
+                      THEN chapters.title_reason
+                    ELSE excluded.title_reason
+                  END,
                   outline = excluded.outline,
                   outline_json = COALESCE(excluded.outline_json, chapters.outline_json),
                   scene_cards_json = COALESCE(excluded.scene_cards_json, chapters.scene_cards_json),
@@ -611,6 +658,9 @@ class Repository:
                     work_id,
                     chapter_number,
                     title,
+                    title_source,
+                    int(bool(title_locked)),
+                    title_reason,
                     outline,
                     outline_json_text,
                     scene_cards_json_text,
@@ -1426,12 +1476,16 @@ class Repository:
         ending_hook: str | None = None,
         handoff: str | None = None,
         memory_json: str | None = None,
+        title_source: str | None = None,
+        title_reason: str | None = None,
+        title_locked: bool | None = None,
     ) -> None:
         final_text = self.normalize_official_names(work_id, final_text)
         title = self.normalize_official_names(work_id, title)
         ending_hook = self.normalize_official_names(work_id, ending_hook)
         handoff = self.normalize_official_names(work_id, handoff)
         memory_json = self.normalize_official_names(work_id, memory_json)
+        title_reason = self.normalize_official_names(work_id, title_reason)
         fields: dict[str, Any] = {
             "final_text": final_text,
             "ending_hook": ending_hook,
@@ -1441,6 +1495,12 @@ class Repository:
         }
         if title is not None:
             fields["title"] = title
+        if title_source is not None:
+            fields["title_source"] = str(title_source or "").strip().lower()
+        if title_reason is not None:
+            fields["title_reason"] = title_reason
+        if title_locked is not None:
+            fields["title_locked"] = int(bool(title_locked))
         self._update_chapter_text(work_id, chapter_id, **fields)
         self.add_version(work_id, chapter_id, f"final_{now_text()}", final_text)
 
@@ -1456,17 +1516,22 @@ class Repository:
         memory_json: str | None = None,
         invalidate_memory: bool = False,
         expected_revision: int | None = None,
+        title_source: str | None = None,
+        title_reason: str | None = None,
+        title_locked: bool | None = None,
     ) -> bool:
         final_text = self.normalize_official_names(work_id, final_text)
         title = self.normalize_official_names(work_id, title)
         ending_hook = self.normalize_official_names(work_id, ending_hook)
         handoff = self.normalize_official_names(work_id, handoff)
         memory_json = self.normalize_official_names(work_id, memory_json)
+        title_reason = self.normalize_official_names(work_id, title_reason)
         timestamp = now_text()
         with connect(self._db_path_for_work(work_id)) as conn:
             row = conn.execute(
                 """
-                SELECT chapter_number, title, final_text, revision, memory_json, memory_revision
+                SELECT chapter_number, title, title_source, title_locked, title_reason,
+                       final_text, revision, memory_json, memory_revision
                 FROM chapters
                 WHERE id = ? AND work_id = ?
                 """,
@@ -1478,6 +1543,24 @@ class Repository:
             if expected_revision is not None and current_revision != int(expected_revision):
                 raise ValueError("该章节已被其他操作更新，请重新载入章节后再保存。")
             content_changed = str(row["final_text"] or "") != str(final_text or "")
+            next_title = title if title is not None else row["title"]
+            title_changed = str(next_title or "") != str(row["title"] or "")
+            current_source = str(row["title_source"] or "legacy")
+            current_locked = int(row["title_locked"] or 0)
+            current_reason = str(row["title_reason"] or "")
+            if title_source is None:
+                next_source = "manual" if title_changed else current_source
+                next_locked = 1 if title_changed else current_locked
+                next_reason = "用户手动修改章节标题。" if title_changed else current_reason
+            elif current_locked and str(title_source).lower() != "manual":
+                next_title = row["title"]
+                next_source = current_source
+                next_locked = current_locked
+                next_reason = current_reason
+            else:
+                next_source = str(title_source or current_source).strip().lower()
+                next_locked = current_locked if title_locked is None else int(bool(title_locked))
+                next_reason = current_reason if title_reason is None else str(title_reason or "")
             had_memory = bool(str(row["memory_json"] or "").strip())
             clear_derived_data = bool(content_changed or invalidate_memory)
             clear_memory = bool(clear_derived_data and had_memory)
@@ -1493,12 +1576,16 @@ class Repository:
             conn.execute(
                 """
                 UPDATE chapters
-                SET title = ?, final_text = ?, ending_hook = ?, handoff = ?, memory_json = ?,
+                SET title = ?, title_source = ?, title_locked = ?, title_reason = ?,
+                    final_text = ?, ending_hook = ?, handoff = ?, memory_json = ?,
                     memory_revision = ?, status = 'final', revision = ?, updated_at = ?
                 WHERE id = ? AND work_id = ? AND revision = ?
                 """,
                 (
-                    title if title is not None else row["title"],
+                    next_title,
+                    next_source,
+                    next_locked,
+                    next_reason,
                     final_text,
                     ending_hook,
                     handoff,
@@ -1565,8 +1652,8 @@ class Repository:
                   chapter_id, continuity_score, character_score, emotion_score,
                   rhythm_score, foreshadow_score, payoff_score, hook_score,
                   historical_score, repeat_risk, scene_coverage, problems, suggestions, template_hits,
-                  risk_flags, revision_plan, revision_check, reviewed_text_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  risk_flags, revision_plan, revision_check, reviewed_text_hash, title_decision_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chapter_id,
@@ -1587,6 +1674,7 @@ class Repository:
                     json_dumps(review.get("revision_plan", [])),
                     json_dumps(review.get("revision_check", {})),
                     reviewed_text_hash,
+                    json_dumps(review.get("title_decision", {})),
                     timestamp,
                 ),
             )
@@ -1616,12 +1704,15 @@ class Repository:
             ("risk_flags", []),
             ("revision_plan", []),
             ("revision_check", {}),
+            ("title_decision_json", {}),
         ]:
             try:
                 parsed = json.loads(str(review.get(key) or ""))
             except (TypeError, json.JSONDecodeError):
                 parsed = fallback
             review[key] = parsed if isinstance(parsed, type(fallback)) else fallback
+        if not isinstance(review.get("title_decision"), dict):
+            review["title_decision"] = review.get("title_decision_json") or {}
         return normalize_review(review)
 
     def update_review_check(self, work_id: int, review_id: int, revision_check: dict[str, Any]) -> bool:
@@ -1767,9 +1858,12 @@ class Repository:
         expected_revision: int | None = None,
         expected_text_hash: str = "",
         prune_intermediate: bool = False,
+        title_source: str | None = None,
+        title_reason: str | None = None,
     ) -> None:
         memory = self.normalize_official_names(work_id, memory)
         title = self.normalize_official_names(work_id, title)
+        title_reason = self.normalize_official_names(work_id, title_reason)
         if not isinstance(memory, dict):
             raise ValueError("记忆卡格式错误：必须是 JSON 对象")
         timestamp = now_text()
@@ -1778,7 +1872,8 @@ class Repository:
         with connect(self._db_path_for_work(work_id)) as conn:
             chapter = conn.execute(
                 """
-                SELECT chapter_number, final_text, revision
+                SELECT chapter_number, title, title_source, title_locked, title_reason,
+                       final_text, revision
                 FROM chapters
                 WHERE id = ? AND work_id = ?
                 """,
@@ -1798,15 +1893,29 @@ class Repository:
                     raise ValueError("正文在记忆生成期间已经变化，本次记忆未入库，请重新生成。")
 
             self._clear_chapter_memory_side_effects(conn, work_id, chapter_number, timestamp)
+            can_update_title = bool(
+                str(title or "").strip()
+                and str(title_source or "").strip().lower() == "memory"
+                and not int(chapter["title_locked"] or 0)
+                and str(chapter["title_source"] or "legacy").strip().lower() == "planner"
+            )
+            saved_title = title if can_update_title else chapter["title"]
+            saved_title_source = "memory" if can_update_title else chapter["title_source"]
+            saved_title_reason = (
+                str(title_reason or "") if can_update_title else str(chapter["title_reason"] or "")
+            )
             cur = conn.execute(
                 """
                 UPDATE chapters
-                SET title = COALESCE(NULLIF(?, ''), title), summary = ?, ending_hook = ?, handoff = ?, memory_json = ?,
+                SET title = ?, title_source = ?, title_reason = ?,
+                    summary = ?, ending_hook = ?, handoff = ?, memory_json = ?,
                     memory_revision = revision, status = 'memory', updated_at = ?
                 WHERE id = ? AND work_id = ? AND revision = ?
                 """,
                 (
-                    _memory_text(title),
+                    _memory_text(saved_title),
+                    _memory_text(saved_title_source),
+                    _memory_text(saved_title_reason),
                     _memory_text(memory.get("summary")),
                     _memory_text(memory.get("ending_hook")),
                     handoff_text,
@@ -4062,7 +4171,18 @@ class Repository:
         )
 
     def _update_chapter_text(self, work_id: int, chapter_id: int, **fields: Any) -> None:
-        allowed = {"title", "draft", "final_text", "ending_hook", "handoff", "memory_json", "status"}
+        allowed = {
+            "title",
+            "title_source",
+            "title_locked",
+            "title_reason",
+            "draft",
+            "final_text",
+            "ending_hook",
+            "handoff",
+            "memory_json",
+            "status",
+        }
         updates = {key: value for key, value in fields.items() if key in allowed and value is not None}
         updates["updated_at"] = now_text()
         assignments = ", ".join(f"{key} = ?" for key in updates)

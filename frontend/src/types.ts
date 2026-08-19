@@ -64,6 +64,7 @@ export interface TaskState {
   title: string;
   detail: string;
   startedAt: number;
+  remoteSeen?: boolean;
   controller: AbortController;
   workId?: number;
   chapterNumber?: number;

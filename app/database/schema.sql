@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS chapters (
   work_id INTEGER NOT NULL,
   chapter_number INTEGER NOT NULL,
   title TEXT,
+  title_source TEXT NOT NULL DEFAULT 'planner',
+  title_locked INTEGER NOT NULL DEFAULT 0,
+  title_reason TEXT,
   outline TEXT,
   outline_json TEXT,
   scene_cards_json TEXT,
@@ -185,6 +188,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   reviewed_text_hash TEXT,
   template_hits TEXT,
   risk_flags TEXT,
+  title_decision_json TEXT,
   created_at TEXT,
   FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
 );

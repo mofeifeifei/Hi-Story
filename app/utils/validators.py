@@ -85,6 +85,53 @@ def validate_outline(data: Any) -> list[str]:
     return issues
 
 
+def validate_planning_core(core: Any, *, label: str = "章节") -> list[str]:
+    if not isinstance(core, dict):
+        return [f"{label}缺少 planning_core"]
+    issues: list[str] = []
+    chapter = core.get("chapter") if isinstance(core.get("chapter"), dict) else {}
+    bridge = core.get("bridge") if isinstance(core.get("bridge"), dict) else {}
+    result = core.get("result") if isinstance(core.get("result"), dict) else {}
+    questions = core.get("questions") if isinstance(core.get("questions"), dict) else {}
+    handoff = core.get("handoff") if isinstance(core.get("handoff"), dict) else {}
+
+    for key in ["chapter_number", "volume_number", "title", "sequence_id", "sequence_goal"]:
+        if chapter.get(key) in (None, ""):
+            issues.append(f"{label}核心契约缺少 chapter.{key}")
+    for key in ["opening_action", "opening_conflict", "continuity_debt"]:
+        if not _is_text(bridge.get(key)):
+            issues.append(f"{label}核心契约缺少 bridge.{key}")
+    try:
+        chapter_number = int(chapter.get("chapter_number") or 1)
+    except (TypeError, ValueError):
+        chapter_number = 1
+    if chapter_number > 1 and not _is_text(bridge.get("previous_anchor")):
+        issues.append(f"{label}核心契约缺少 bridge.previous_anchor")
+
+    scenes = core.get("scenes")
+    if not _is_list(scenes, 3):
+        issues.append(f"{label}核心契约 scenes 少于 3 个")
+    else:
+        for index, scene in enumerate(scenes, 1):
+            if not isinstance(scene, dict):
+                issues.append(f"{label}核心契约第 {index} 个场景不是对象")
+                continue
+            for key in ["location", "goal", "obstacle", "turn", "exit"]:
+                if not _is_text(scene.get(key)):
+                    issues.append(f"{label}核心契约第 {index} 个场景缺少 {key}")
+
+    for key in ["in", "answer", "out"]:
+        if not _is_text(questions.get(key)):
+            issues.append(f"{label}核心契约缺少 questions.{key}")
+    for key in ["new_information", "chapter_payoff", "character_change"]:
+        if not _is_text(result.get(key)):
+            issues.append(f"{label}核心契约缺少 result.{key}")
+    for key in ["ending_event", "next_opening_action", "next_continuity_debt"]:
+        if not _is_text(handoff.get(key)):
+            issues.append(f"{label}核心契约缺少 handoff.{key}")
+    return issues
+
+
 def validate_chapter_outlines(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return ["章节细纲必须是 JSON 对象"]
@@ -100,6 +147,8 @@ def validate_chapter_outlines(data: Any) -> list[str]:
             issues.append(f"返回第 {index} 项不是章节对象")
             continue
         label = _chapter_issue_label(index, chapter)
+        if "planning_core" in chapter:
+            issues.extend(validate_planning_core(chapter.get("planning_core"), label=label))
         if chapter.get("chapter_number") in (None, ""):
             issues.append(f"{label}缺少 chapter_number")
         if chapter.get("volume_number") in (None, ""):
@@ -193,6 +242,7 @@ def validate_review(data: Any) -> list[str]:
         for key in ["target", "action"]:
             if not str(item.get(key) or "").strip():
                 issues.append(f"suggestions 第 {index} 项缺少 {key}")
+    _validate_title_decision(data.get("title_decision"), issues, "title_decision")
     return issues
 
 
@@ -234,4 +284,39 @@ def validate_memory_card(data: Any) -> list[str]:
             issues.append(f"handoff.{key} 不能为空")
     if not isinstance(handoff.get("suggested_opening_modes"), list):
         issues.append("handoff.suggested_opening_modes 必须是数组")
+    result_card = data.get("chapter_result_card")
+    if not isinstance(result_card, dict):
+        issues.append("缺少 chapter_result_card")
+    else:
+        _validate_title_decision(
+            result_card.get("title_decision"),
+            issues,
+            "chapter_result_card.title_decision",
+        )
     return issues
+
+
+def _validate_title_decision(value: Any, issues: list[str], label: str) -> None:
+    # Title selection is advisory. A model that omits it must not block an
+    # otherwise usable review or memory card; populated decisions remain strict.
+    if value is None or value == "":
+        return
+    if isinstance(value, dict) and not any(
+        str(value.get(key) or "").strip() for key in ["chapter_summary", "recommended_title", "reason"]
+    ) and not value.get("candidates"):
+        return
+    if not isinstance(value, dict):
+        issues.append(f"{label} 必须是对象")
+        return
+    if not _is_text(value.get("chapter_summary"), 12):
+        issues.append(f"{label}.chapter_summary 过短")
+    recommended = str(value.get("recommended_title") or "").strip()
+    if not recommended:
+        issues.append(f"{label}.recommended_title 不能为空")
+    if not _is_text(value.get("reason"), 8):
+        issues.append(f"{label}.reason 过短")
+    candidates = value.get("candidates")
+    if not _is_list(candidates, 4):
+        issues.append(f"{label}.candidates 少于 4 个")
+    elif recommended and recommended not in candidates:
+        issues.append(f"{label}.recommended_title 必须来自 candidates")

@@ -10,7 +10,9 @@ export default defineConfig({
   base: "./",
   build: {
     outDir: resolve(rootDir, "../web"),
-    emptyOutDir: true,
+    // Keep the last runnable frontend if a build is interrupted or the
+    // target directory is temporarily unavailable.
+    emptyOutDir: false,
     sourcemap: false,
   },
   server: {
