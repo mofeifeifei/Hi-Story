@@ -324,6 +324,8 @@ export function WritingPage() {
   const visibleRevisionAdvice = revisionAdvice;
   const revisionCopyText = useMemo(() => formatRevisionCopy(visibleRevisionAdvice), [visibleRevisionAdvice]);
   const versions = chapterState.data?.candidate_versions || [];
+  const titleStatus = titleStatusInfo(chapter?.title_status, Boolean(chapter?.title_locked));
+  const titleReason = String(chapter?.title_reason || titleQualityReason(chapter?.title_quality_json) || "").trim();
   const visibleVersions = versions.filter((version) => !candidateText || Number(version.id || 0) !== Number(candidateVersion?.id || 0));
   const canSaveFinal = Boolean(
     chapter
@@ -437,9 +439,9 @@ export function WritingPage() {
         {grouped.map((group) => <div className="volume-group" key={group.number}><button className="volume-heading" onClick={() => toggleWritingVolume(group.number)}>{expanded.includes(group.number) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}第 {group.number} 卷 · {group.title}</button>{expanded.includes(group.number) && group.chapters.map((item) => <button className={`chapter-row ${Number(item.chapter_number) === Number(store.selectedChapter) ? "active" : ""}`} key={item.chapter_number} onClick={() => chooseChapter(Number(item.chapter_number))}><span><strong>第 {item.chapter_number} 章 · {item.title || "未命名"}</strong><small>{statusText(item.status)}</small></span><i className={`chapter-status-dot ${item.status || ""}`} /></button>)}</div>)}
       </div></aside>
       <section className="editor-column">{chapterState.isLoading ? <div className="loading-block">正在载入章节...</div> : chapter ? <>
-        <div className="editor-toolbar"><span className="chapter-number">第 {chapter.chapter_number} 章</span><input className="title-input" value={title} onChange={(event) => { const nextTitle = event.target.value; setTitle(nextTitle); setDirty(true); saveLocalDraft(nextTitle); }} placeholder="章节标题" /><span className={`status-badge ${chapter.status || ""}`}>{statusText(chapter.status)}</span></div>
+        <div className="editor-toolbar"><span className="chapter-number">第 {chapter.chapter_number} 章</span><input className="title-input" value={title} onChange={(event) => { const nextTitle = event.target.value; setTitle(nextTitle); setDirty(true); saveLocalDraft(nextTitle); }} placeholder="章节标题" /><span className={`title-status ${titleStatus.key}`} title={titleReason || titleStatus.hint}>{titleStatus.label}</span><span className={`status-badge ${chapter.status || ""}`}>{statusText(chapter.status)}</span></div>
         <div className="editor-scroll" ref={editorScroll} onScroll={saveScroll}><div className="manuscript-wrap"><EditorContent editor={editor} /></div></div>
-        <div className="editor-status"><span className={dirty ? "dirty" : "saved"}>{dirty ? "有未保存修改" : savedAt ? `${savedAt} 已保存` : "已同步"}</span><span>第 {Number(chapter.revision || 0)} 版</span><span>{wordCount(plainText()).toLocaleString()} 字</span><span>记忆：{String(chapter.memory_json || "").trim() ? "已入库" : "未入库"}</span></div>
+        <div className="editor-status"><span className={dirty ? "dirty" : "saved"}>{dirty ? "有未保存修改" : savedAt ? `${savedAt} 已保存` : "已同步"}</span><span>第 {Number(chapter.revision || 0)} 版</span><span>{wordCount(plainText()).toLocaleString()} 字</span><span>记忆：{String(chapter.memory_json || "").trim() ? "已入库" : "未入库"}</span><span className={`title-verdict ${titleStatus.key}`} title={titleReason || titleStatus.hint}>标题：{titleReason || titleStatus.label}</span></div>
       </> : <EmptyState title="选择一章开始写作" description="左侧会按分卷展示所有已有细纲的章节。" />}</section>
       <aside className="inspector"><div className="inspector-tabs">{([['task','本章任务'],['continuity','上下章衔接'],['revision','修订'],['memory','记忆'],['versions','候选版本']] as Array<[InspectorTab,string]>).map(([key,label]) => <button key={key} className={inspectorTab === key ? "active" : ""} onClick={() => setInspectorTab(key)}>{label}</button>)}<button className="inspector-close" onClick={store.toggleInspector} title="关闭辅助面板"><X size={16} /></button></div><div className="inspector-content">
         {inspectorTab === "task" && <><h3>本章任务</h3><pre className="readable">{chapter ? taskText(chapter, chapterState.data?.outline_readable) : "未载入章节。"}</pre></>}
@@ -469,6 +471,20 @@ function formatCandidateTime(value?: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value.replace("T", " ").slice(0, 19);
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+function titleStatusInfo(value: unknown, locked: boolean) {
+  const key = locked ? "manual" : String(value || "provisional").toLowerCase();
+  const states: Record<string, { label: string; hint: string }> = {
+    final: { label: "标题已研判", hint: "标题已通过正文事实、核心变化和细纲一致性研判。" },
+    provisional: { label: "暂定标题", hint: "该标题来自细纲，正文完成后会自动研判。" },
+    pending: { label: "标题待确认", hint: "正文已保存，但当前标题未通过自动研判，暂保留现有标题。" },
+    manual: { label: "手动标题", hint: "此标题由你手动确认，自动研判不会覆盖。" },
+  };
+  return { key: states[key] ? key : "pending", ...(states[key] || states.pending) };
+}
+function titleQualityReason(value: unknown) {
+  const quality = safeJson(value, {}) as Record<string, unknown>;
+  return String(quality.reason || "");
 }
 function textToHtml(text: string) { return String(text || "").split(/\n{2,}|\r?\n/).filter(Boolean).map((line) => `<p>${escapeHtml(line)}</p>`).join(""); }
 function escapeHtml(text: string) { return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }

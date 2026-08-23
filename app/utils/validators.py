@@ -95,7 +95,16 @@ def validate_planning_core(core: Any, *, label: str = "章节") -> list[str]:
     questions = core.get("questions") if isinstance(core.get("questions"), dict) else {}
     handoff = core.get("handoff") if isinstance(core.get("handoff"), dict) else {}
 
-    for key in ["chapter_number", "volume_number", "title", "sequence_id", "sequence_goal"]:
+    for key in [
+        "chapter_number",
+        "volume_number",
+        "title",
+        "chapter_core_change",
+        "title_anchor",
+        "title_focus",
+        "sequence_id",
+        "sequence_goal",
+    ]:
         if chapter.get(key) in (None, ""):
             issues.append(f"{label}核心契约缺少 chapter.{key}")
     for key in ["opening_action", "opening_conflict", "continuity_debt"]:
@@ -155,6 +164,9 @@ def validate_chapter_outlines(data: Any) -> list[str]:
             issues.append(f"{label}缺少 volume_number")
         if not _is_text(chapter.get("title")):
             issues.append(f"{label}缺少 title")
+        for key in ["chapter_core_change", "title_anchor", "title_focus"]:
+            if not _is_text(chapter.get(key)):
+                issues.append(f"{label}缺少 {key}")
         if not _is_text(chapter.get("outline"), 30):
             issues.append(f"{label}outline 过短")
         for key in [
@@ -308,15 +320,9 @@ def _validate_title_decision(value: Any, issues: list[str], label: str) -> None:
     if not isinstance(value, dict):
         issues.append(f"{label} 必须是对象")
         return
-    if not _is_text(value.get("chapter_summary"), 12):
-        issues.append(f"{label}.chapter_summary 过短")
-    recommended = str(value.get("recommended_title") or "").strip()
-    if not recommended:
-        issues.append(f"{label}.recommended_title 不能为空")
-    if not _is_text(value.get("reason"), 8):
-        issues.append(f"{label}.reason 过短")
-    candidates = value.get("candidates")
-    if not _is_list(candidates, 4):
-        issues.append(f"{label}.candidates 少于 4 个")
-    elif recommended and recommended not in candidates:
-        issues.append(f"{label}.recommended_title 必须来自 candidates")
+    if not isinstance(value.get("fulfilled"), bool):
+        issues.append(f"{label}.fulfilled 必须是布尔值")
+    if not _is_text(value.get("evidence"), 8) and value.get("fulfilled") is True:
+        issues.append(f"{label}.evidence 过短")
+    if value.get("fulfilled") is False and not _is_text(value.get("problem"), 8):
+        issues.append(f"{label}.problem 过短")

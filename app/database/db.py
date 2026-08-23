@@ -48,6 +48,24 @@ def init_db(db_path: Path) -> None:
         _ensure_column(conn, "chapters", "title_source", "TEXT NOT NULL DEFAULT 'legacy'")
         _ensure_column(conn, "chapters", "title_locked", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "chapters", "title_reason", "TEXT")
+        _ensure_column(conn, "chapters", "title_status", "TEXT NOT NULL DEFAULT 'provisional'")
+        _ensure_column(conn, "chapters", "title_quality_json", "TEXT")
+        conn.execute(
+            """
+            UPDATE chapters
+            SET title_status = CASE
+                WHEN title_locked = 1 OR LOWER(COALESCE(title_source, '')) = 'manual' THEN 'manual'
+                WHEN TRIM(COALESCE(final_text, '')) <> '' THEN 'pending'
+                ELSE 'provisional'
+            END
+            WHERE title_status = 'provisional'
+              AND (
+                TRIM(COALESCE(final_text, '')) <> ''
+                OR title_locked = 1
+                OR LOWER(COALESCE(title_source, '')) = 'manual'
+              )
+            """
+        )
         apply_migrations(conn, MIGRATIONS_DIR)
         _ensure_column(conn, "works", "book_bible_json", "TEXT")
         _ensure_column(conn, "works", "settings_locked", "INTEGER DEFAULT 0")

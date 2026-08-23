@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS chapters (
   title_source TEXT NOT NULL DEFAULT 'planner',
   title_locked INTEGER NOT NULL DEFAULT 0,
   title_reason TEXT,
+  title_status TEXT NOT NULL DEFAULT 'provisional',
+  title_quality_json TEXT,
   outline TEXT,
   outline_json TEXT,
   scene_cards_json TEXT,

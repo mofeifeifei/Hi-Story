@@ -24,7 +24,7 @@ from app.exporters.export_txt import export_chapter_txt, export_range_txt, expor
 from app.exporters.naming import book_export_path, chapter_export_path, chapter_range_export_path
 from app.services.ai_client import AIClient, AIClientError
 from app.services.base_agent import JsonValidationError
-from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, save_config
+from app.utils.config import DATA_DIR, RESOURCE_DIR, ROOT_DIR, load_config, resolve_ai_channel, save_config
 from app.utils.formatters import (
     format_context_readable,
     format_memory_readable,
@@ -38,7 +38,7 @@ from app.utils.outline_utils import normalize_chapter_outline
 from app.utils.text_cleaner import strip_chapter_heading
 from app.utils.text_check import manuscript_quality_report, quality_summary, style_guard_warnings, style_regression_warnings
 from app.utils.word_target import chapter_word_target_from_style
-from app.web.config_api import balance_query_config, model_discovery_config, public_config, sanitize_config_update
+from app.web.config_api import balance_query_config, model_discovery_config, public_config, reveal_api_key, sanitize_config_update
 from app.web.state import STATE
 from app.workflow import NovelWorkflow
 
@@ -128,6 +128,12 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 return public_config(config)
         if parts == ["api", "config", "test"] and method == "POST":
             return _test_ai_connection(body)
+        if parts == ["api", "config", "secret", "reveal"] and method == "POST":
+            channel_id = str(body.get("channel_id") or "").strip()
+            api_key = reveal_api_key(load_config(), channel_id or None)
+            if not api_key:
+                raise ValueError("当前通道尚未配置 API 密钥。")
+            return {"channel_id": channel_id, "api_key": api_key}
         if parts == ["api", "config", "models"] and method == "POST":
             task_id = _task_id(body)
             STATE.start_task(task_id, kind="configModels", title="获取可用模型")
@@ -231,7 +237,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                 _start_task(task_id, work_id, kind="plan", title="生成设定草稿", stage="project", input_data=body)
                 try:
                     inputs = _clean_inputs(body or _inputs_from_work(STATE.repo.get_work(work_id)))
-                    workflow = _task_workflow_for(task_id)
+                    workflow = _task_workflow_for(task_id, _channel_id(body))
                     plan = normalize_work_plan(workflow.planner.generate_work_plan(inputs))
                     _raise_if_stopped(task_id, "任务已停止：设定草稿已返回，但未写入界面。")
                     return {"plan": plan, "readable": format_project_readable(plan)}
@@ -264,7 +270,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     task_id = _task_id(body)
                     _start_task(task_id, work_id, kind="outline", title="生成全书大纲", stage="outline", input_data=body)
                     try:
-                        workflow = _task_workflow_for(task_id)
+                        workflow = _task_workflow_for(task_id, _channel_id(body))
                         workflow.generate_outline(work_id, should_stop=lambda: STATE.task_cancelled(task_id))
                         return _outline_state(work_id)
                     except Exception as exc:
@@ -284,7 +290,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     start = max(1, int(body.get("start_chapter") or 1))
                     count = min(30, max(1, int(body.get("count") or 3)))
                     volume_number = int(body["volume_number"]) if body.get("volume_number") not in (None, "") else None
-                    workflow = _task_workflow_for(task_id)
+                    workflow = _task_workflow_for(task_id, _channel_id(body))
                     outline_result = workflow.generate_chapter_outlines(
                         work_id,
                         start_chapter=start,
@@ -466,7 +472,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                     try:
                         mode = str(body.get("mode") or "standard")
                         formal_mode = mode != "fast"
-                        workflow = _task_workflow_for(task_id)
+                        workflow = _task_workflow_for(task_id, _channel_id(body))
                         result = workflow.generate_chapter(
                             work_id,
                             chapter_number,
@@ -504,7 +510,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         input_data=body,
                     )
                     try:
-                        workflow = _task_workflow_for(task_id)
+                        workflow = _task_workflow_for(task_id, _channel_id(body))
                         result = _generate_memory(
                             work_id,
                             chapter_number,
@@ -538,7 +544,7 @@ class HiStoryWebHandler(BaseHTTPRequestHandler):
                         input_data={"instruction": body.get("instruction", "")},
                     )
                     try:
-                        workflow = _task_workflow_for(task_id)
+                        workflow = _task_workflow_for(task_id, _channel_id(body))
                         result = _revise_chapter_with_instruction(
                             work_id,
                             chapter_number,
@@ -681,12 +687,13 @@ def _work_mutation_requires_idle_task(method: str, parts: list[str]) -> bool:
     return True
 
 
-def _task_workflow() -> NovelWorkflow:
-    return NovelWorkflow(repo=Repository(), client=AIClient(load_config()))
+def _task_workflow(channel_id: str | None = None) -> NovelWorkflow:
+    config = resolve_ai_channel(load_config(), channel_id or None)
+    return NovelWorkflow(repo=Repository(), client=AIClient(config))
 
 
-def _task_workflow_for(task_id: str) -> NovelWorkflow:
-    workflow = _task_workflow()
+def _task_workflow_for(task_id: str, channel_id: str | None = None) -> NovelWorkflow:
+    workflow = _task_workflow(channel_id)
     STATE.register_task_cleanup(task_id, workflow.client.close)
     return workflow
 
@@ -696,7 +703,7 @@ def _test_ai_connection(body: dict[str, Any] | None = None) -> dict[str, Any]:
     STATE.start_task(task_id, kind="configTest", title="接口连接测试")
     client: AIClient | None = None
     try:
-        config = load_config()
+        config = model_discovery_config(load_config(), _without_task_control(body or {}))
         config["timeout"] = min(60, max(10, int(config.get("timeout", 300) or 300)))
         config["max_retries"] = 0
         config["max_output_tokens"] = 64
@@ -759,6 +766,11 @@ def _is_expected_cancellation(exc: Exception) -> bool:
 
 def _task_id(body: dict[str, Any]) -> str:
     return str(body.get("task_id") or "").strip() or f"task-{uuid.uuid4().hex}"
+
+
+def _channel_id(body: dict[str, Any] | None) -> str:
+    payload = body if isinstance(body, dict) else {}
+    return str(payload.get("ai_channel_id") or payload.get("channel_id") or "").strip()
 
 
 def _without_task_control(body: dict[str, Any]) -> dict[str, Any]:
@@ -1218,9 +1230,24 @@ def _generate_memory(
         final_text = str(chapter.get("final_text") or "").strip()
     if not final_text:
         raise ValueError("当前章节没有可保存的正文，无法生成记忆。")
+    context = workflow.build_chapter_context(work_id, chapter_number)
+    if (
+        not bool(int(chapter.get("title_locked") or 0))
+        and str(chapter.get("title_status") or "").lower() != "final"
+    ):
+        workflow.finalize_chapter_title(
+            work_id,
+            chapter_number,
+            final_text,
+            context,
+            STATE.repo.get_review_for_current_text(work_id, int(chapter["id"])),
+            stage="记忆入库前标题研判",
+        )
+        chapter = STATE.repo.get_chapter(work_id, chapter_number)
+        final_text = str(chapter.get("final_text") or final_text).strip()
+        context = workflow.build_chapter_context(work_id, chapter_number)
     source_revision = int(chapter.get("revision") or 0)
     source_text_hash = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-    context = workflow.build_chapter_context(work_id, chapter_number)
     memory_context = context_for_memory(context)
     try:
         memory = workflow.memory.make_memory_card(memory_context, final_text)
@@ -1247,20 +1274,11 @@ def _generate_memory(
     memory = workflow.normalize_output_names(work_id, memory)
     memory["source_revision"] = source_revision
     memory["source_text_hash"] = source_text_hash
-    memory_title_decision = workflow._memory_title_decision(
-        chapter,
-        memory,
-        context,
-        str(chapter.get("title") or f"第{chapter_number}章"),
-    )
     STATE.repo.apply_memory_card(
         work_id=work_id,
         chapter_id=chapter["id"],
         chapter_number=chapter_number,
         memory=memory,
-        title=memory_title_decision["title"],
-        title_source=memory_title_decision.get("source"),
-        title_reason=memory_title_decision.get("reason"),
         expected_revision=source_revision,
         expected_text_hash=source_text_hash,
         prune_intermediate=True,
@@ -1707,26 +1725,36 @@ def _revise_chapter_with_instruction(
     _revision_stage(on_stage, "revision_save", "正在保存修订结果")
     content_changed = revised != str(latest_chapter.get("final_text") or "")
     memory_invalidated = content_changed and bool(str(latest_chapter.get("memory_json") or "").strip())
-    revision_title_decision = workflow._final_title_decision(
-        latest_chapter,
-        post_review,
-        context,
-    )
     STATE.repo.add_version(work_id, chapter["id"], "web_user_instruction_before_revise", current_text)
+    save_kwargs: dict[str, Any] = {}
+    if (
+        content_changed
+        and not bool(int(latest_chapter.get("title_locked") or 0))
+        and str(latest_chapter.get("title_source") or "").lower() != "manual"
+    ):
+        save_kwargs = {"title_status": "pending", "title_quality_json": ""}
     memory_invalidated = STATE.repo.save_final_after_manual_edit(
         work_id,
         chapter["id"],
         revised,
-        title=revision_title_decision["title"],
-        title_source=revision_title_decision.get("source"),
-        title_reason=revision_title_decision.get("reason"),
-        title_locked=False if revision_title_decision.get("source") else None,
         ending_hook="" if content_changed else latest_chapter.get("ending_hook") or "",
         handoff="" if content_changed else latest_chapter.get("handoff") or "",
         memory_json=latest_chapter.get("memory_json") or "",
         invalidate_memory=memory_invalidated,
         expected_revision=int(latest_chapter.get("revision") or 0),
+        **save_kwargs,
     )
+    title_result: dict[str, Any] | None = None
+    if content_changed or str(latest_chapter.get("title_status") or "").lower() != "final":
+        _revision_stage(on_stage, "revision_title", "正在根据修订后的正文研判标题")
+        title_result = workflow.finalize_chapter_title(
+            work_id,
+            chapter_number,
+            revised,
+            context,
+            post_review,
+            stage="修订完成后标题研判",
+        )
     latest_review = STATE.repo.get_latest_review(work_id, int(chapter["id"])) or {}
     revision_plan = latest_review.get("revision_plan") if isinstance(latest_review, dict) else []
     if not isinstance(revision_plan, list):
@@ -1752,7 +1780,7 @@ def _revise_chapter_with_instruction(
         "revised_text": revised,
         "saved": True,
         "memory_invalidated": memory_invalidated,
-        "quality_gate": {"final": after_quality, "blockers": []},
+        "quality_gate": {"final": after_quality, "title": (title_result or {}).get("quality", {}), "blockers": []},
     }
 
 

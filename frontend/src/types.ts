@@ -37,6 +37,11 @@ export interface Chapter extends ChapterSummary {
   memory_json?: string | Record<string, unknown>;
   revision?: number;
   handoff?: string;
+  title_source?: string;
+  title_locked?: number | boolean;
+  title_reason?: string;
+  title_status?: "provisional" | "pending" | "final" | "manual" | string;
+  title_quality_json?: string | Record<string, unknown>;
 }
 
 export interface OutlineState {

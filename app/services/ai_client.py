@@ -156,7 +156,16 @@ class AIClient:
                         base_output_budget,
                         min(64_000, max(base_output_budget + 8_000, ceil(base_output_budget * 1.5))),
                     )
-                if wire_api == "responses":
+                if self._protocol() == "anthropic":
+                    output = self._call_anthropic(
+                        agent_name=agent_name,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        api_key=api_key,
+                        json_mode=json_mode,
+                        max_output_tokens=output_budget,
+                    )
+                elif wire_api == "responses":
                     output = self._call_responses_api(
                         agent_name=agent_name,
                         system_prompt=system_prompt,
@@ -605,8 +614,7 @@ class AIClient:
                 agent_name=agent_name,
                 url=f"{base_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
+                    **self._headers(api_key),
                 },
                 payload=payload,
                 api_name="AI Chat Completions API",
@@ -638,6 +646,71 @@ class AIClient:
             return choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise AIClientError(f"AI Chat Completions API 返回格式异常，程序没有找到正文内容。返回片段：{str(data)[:500]}") from exc
+
+    def _call_anthropic(
+        self,
+        *,
+        agent_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        api_key: str,
+        json_mode: bool,
+        max_output_tokens: int = 0,
+    ) -> str:
+        try:
+            import requests
+        except ImportError as exc:
+            raise AIClientError("缺少 requests，请先运行 pip install -r requirements.txt") from exc
+
+        base_url = str(self.config.get("base_url", "") or "").strip().rstrip("/")
+        if not base_url:
+            raise AIClientError("config.json 缺少 base_url")
+        if base_url.endswith("/messages"):
+            url = base_url
+        elif base_url.endswith("/v1"):
+            url = f"{base_url}/messages"
+        else:
+            url = f"{base_url}/v1/messages"
+        output_limit = max_output_tokens or int(self.config.get("max_output_tokens", 12000) or 12000)
+        payload: dict[str, Any] = {
+            "model": self.model_for(agent_name),
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "max_tokens": output_limit,
+            "temperature": float(self.config.get("temperature", 0.8)),
+        }
+        if json_mode:
+            payload["system"] = f"{system_prompt}\n\n只输出合法 JSON，不要使用 Markdown 代码块。"
+        try:
+            response = self._post_json(
+                requests_module=requests,
+                agent_name=agent_name,
+                url=url,
+                headers=self._headers(api_key),
+                payload=payload,
+                api_name="Anthropic Messages API",
+            )
+            self._raise_for_status(response, "Anthropic Messages API")
+        except AIClientError:
+            raise
+        data = self._response_json(response, "Anthropic Messages API")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        self._last_response_meta_by_agent[agent_name] = {
+            "finish_reason": str(data.get("stop_reason") or ""),
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+        }
+        content = data.get("content")
+        if not isinstance(content, list):
+            raise AIClientError(f"Anthropic Messages API 返回格式异常，程序没有找到正文内容。返回片段：{str(data)[:500]}")
+        text = "".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and str(item.get("type") or "text") == "text"
+        ).strip()
+        if not text:
+            raise AIClientError(f"Anthropic Messages API 返回了空正文。返回片段：{str(data)[:500]}")
+        return text
 
     def _call_responses_api(
         self,
@@ -882,8 +955,13 @@ class AIClient:
         configured = max(0, int(self.config.get("max_output_tokens", 0) or 0))
         if agent_name not in {"writer", "reviser", "memory"}:
             return configured
-        long_text_budget = max(4_096, int(self.config.get("long_text_max_output_tokens", 24_000) or 24_000))
-        return max(configured, long_text_budget)
+        # Long-form agents already have continuation/revision passes in the workflow.
+        # Do not silently double the configured request budget: a large reasoning
+        # response can make a relay wait until its timeout before returning anything.
+        if configured > 0:
+            return configured
+        legacy_budget = max(4_096, int(self.config.get("long_text_max_output_tokens", 12_000) or 12_000))
+        return min(legacy_budget, 12_000)
 
     def _interruptible_sleep(self, delay: float) -> None:
         deadline = time.monotonic() + max(0.0, delay)
@@ -1001,9 +1079,16 @@ class AIClient:
 
     def _headers(self, api_key: str) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.config.get("requires_openai_auth", True):
+        if self._protocol() == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+        elif self.config.get("requires_openai_auth", True):
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
+
+    def _protocol(self) -> str:
+        value = str(self.config.get("protocol") or "").strip().lower()
+        return "anthropic" if value == "anthropic" else "openai_compatible"
 
     def _provider_name(self) -> str:
         return str(self.config.get("model_provider") or self.config.get("provider") or "").strip().lower()
@@ -1102,6 +1187,68 @@ class AIClient:
         if agent_name == "memory":
             chapter_number = int(hint.get("chapter_number", 1))
             return json.dumps(self._mock_memory(user_prompt, chapter_number), ensure_ascii=False, indent=2)
+
+        if agent_name == "title":
+            task = str(hint.get("task") or "")
+            candidates = [str(item).strip() for item in hint.get("candidates", []) if str(item).strip()]
+            if task == "title_regenerate":
+                return json.dumps(
+                    {
+                        "candidates": [
+                            {"title": "把账册压在灯下", "anchor": "主角主动扣住关键账册，迫使对手表态。"},
+                            {"title": "一页账册，两方人心", "anchor": "账册让原本合作的人出现明确分歧。"},
+                            {"title": "账上的名字不能抹", "anchor": "主角确认名单关系到下一步的真实代价。"},
+                            {"title": "谁来认这笔旧账", "anchor": "核心冲突转为谁承担旧账后果。"},
+                        ],
+                        "reason": "围绕已经发生的行动、关系变化和后果重新拟题。",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            if not candidates:
+                candidates = ["账上的名字不能抹"]
+            assessments = []
+            for index, title in enumerate(candidates):
+                scores = {
+                    "text_fidelity": 23 if index == 0 else 21,
+                    "core_change": 22 if index == 0 else 19,
+                    "character_action": 13 if index == 0 else 10,
+                    "outline_alignment": 13,
+                    "naturalness": 13,
+                    "novelty": 4,
+                }
+                scores["total"] = sum(scores.values())
+                assessments.append(
+                    {
+                        "title": title,
+                        "evidence": "正文中人物围绕关键证据作出选择，局势和关系随之改变。",
+                        "is_plot_summary": False,
+                        "is_novel_title": True,
+                        "style_type": "choice" if index == 0 else "evidence",
+                        "scores": scores,
+                        "hard_reject": False,
+                        "issues": [],
+                        "accepted": index == 0,
+                    }
+                )
+            return json.dumps(
+                {
+                    "fact_card": {
+                        "who_did_what": "主角扣住关键证据并迫使相关人物回应。",
+                        "main_action": "主角扣住关键证据并迫使相关人物回应。",
+                        "key_choice": "主角选择把证据推到台面，承担关系破裂的风险。",
+                        "core_change": "原本隐蔽的矛盾被推进为必须承担后果的公开选择。",
+                        "reader_payoff": "读者得到一项可验证的信息与新的行动压力。",
+                        "cost_or_risk": "公开证据会让主角失去原有的缓冲空间。",
+                        "evidence": ["关键证据被拿到台面", "人物因证据改变立场"],
+                    },
+                    "assessments": assessments,
+                    "recommended_title": candidates[0],
+                    "reason": "标题概括了本章已经发生的关键行动及其后果。",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
         return "{}" if json_mode else "Mock response"
 
@@ -1402,6 +1549,9 @@ class AIClient:
                     "volume_number": volume_number or max(1, (number - 1) // 10 + 1),
                     "story_time": f"第{number}章对应的故事时间段，紧接上一章后推进",
                     "title": title,
+                    "chapter_core_change": f"{protagonist}确认“{title}”相关证据的真实指向，并决定立即采取行动。",
+                    "title_anchor": f"标题“{title}”对应的事实是：{protagonist}确认相关证据的真实指向。",
+                    "title_focus": "发现",
                     "opening_hook": f"前 300 字从{protagonist}发现“{title}”相关异常开始，让冲突和行动先出现，再补充背景。",
                     "continuity_debt": f"承接上一章留下的“{title}”相关证据尚未处理完的问题。",
                     "debt_type": debt_types[index],

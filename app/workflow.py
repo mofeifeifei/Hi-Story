@@ -11,6 +11,7 @@ from app.services.memory_agent import MemoryAgent
 from app.services.planner_agent import PlannerAgent
 from app.services.reviewer_agent import ReviewerAgent
 from app.services.reviser_agent import ReviserAgent
+from app.services.title_agent import TitleAgent
 from app.services.writer_agent import WriterAgent
 from app.utils.context_filter import (
     compact_genre_contract,
@@ -47,7 +48,7 @@ from app.utils.text_check import (
     style_regression_warnings,
 )
 from app.utils.text_cleaner import strip_chapter_heading
-from app.utils.title_tools import choose_chapter_title, title_ledger, title_warnings
+from app.utils.title_tools import title_ledger
 from app.utils.word_target import chapter_word_target_from_style
 
 
@@ -68,6 +69,7 @@ class NovelWorkflow:
         self.reviewer = ReviewerAgent(self.client)
         self.reviser = ReviserAgent(self.client)
         self.memory = MemoryAgent(self.client)
+        self.title = TitleAgent(self.client)
 
     def create_work(self, inputs: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         plan = self.planner.generate_work_plan(inputs)
@@ -1284,22 +1286,31 @@ class NovelWorkflow:
         else:
             final_quality = draft_quality
 
-        final_title_decision = self._final_title_decision(chapter, review, context)
-        final_title = str(final_title_decision["title"])
-        for warning in title_warnings(final_title, context.get("recent_title_ledger") or []):
-            final_quality["warnings"] = self._dedupe_texts([*self._as_list(final_quality.get("warnings")), warning])
+        title_save_fields: dict[str, Any] = {}
+        if not bool(int(chapter.get("title_locked") or 0)) and str(chapter.get("title_source") or "").lower() != "manual":
+            title_save_fields = {"title_status": "pending", "title_quality_json": ""}
         self.repo.save_final(
             work_id,
             chapter["id"],
             final_text,
-            title=final_title,
             ending_hook="",
             handoff="",
             memory_json="",
-            title_source=final_title_decision.get("source"),
-            title_reason=final_title_decision.get("reason"),
-            title_locked=False if final_title_decision.get("source") else None,
+            **title_save_fields,
         )
+        title_result = self.finalize_chapter_title(
+            work_id,
+            chapter_number,
+            final_text,
+            {},
+            review,
+            stage="正文保存后标题研判",
+        )
+        final_title = str(chapter.get("title") or f"第{chapter_number}章")
+        if title_result.get("status") == "mismatch":
+            final_quality["warnings"] = self._dedupe_texts(
+                [*self._as_list(final_quality.get("warnings")), "正文尚未兑现细纲标题所对应的核心变化。"]
+            )
         if review is not None:
             self.repo.save_review(work_id, chapter["id"], review)
 
@@ -1335,20 +1346,11 @@ class NovelWorkflow:
             memory_card = self.normalize_output_names(work_id, memory_card)
             memory_card["source_revision"] = source_revision
             memory_card["source_text_hash"] = source_text_hash
-            memory_title_decision = self._memory_title_decision(
-                saved_chapter,
-                memory_card,
-                context,
-                final_title,
-            )
             self.repo.apply_memory_card(
                 work_id=work_id,
                 chapter_id=chapter["id"],
                 chapter_number=chapter_number,
                 memory=memory_card,
-                title=memory_title_decision["title"],
-                title_source=memory_title_decision.get("source"),
-                title_reason=memory_title_decision.get("reason"),
                 expected_revision=source_revision,
                 expected_text_hash=source_text_hash,
                 prune_intermediate=True,
@@ -1379,6 +1381,7 @@ class NovelWorkflow:
             "quality_gate": {
                 "draft": draft_quality,
                 "final": final_quality,
+                "title": title_result.get("quality", {}),
                 "summary": "；".join(
                     item
                     for item in [quality_summary(draft_quality), quality_summary(final_quality)]
@@ -1387,112 +1390,221 @@ class NovelWorkflow:
             },
         }
 
-    def _choose_final_title(
+    def _verify_planned_title(
         self,
         chapter: dict[str, Any],
-        review: dict[str, Any] | None,
-        context: dict[str, Any],
-    ) -> str:
-        return str(self._final_title_decision(chapter, review, context)["title"])
-
-    def _final_title_decision(
-        self,
-        chapter: dict[str, Any],
-        review: dict[str, Any] | None,
-        context: dict[str, Any],
+        text: str,
+        review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        current_title = str(chapter.get("title") or "").strip()
-        if not self._title_can_be_auto_updated(chapter, allowed_sources={"planner", "reviewer", "memory"}):
-            return {"title": current_title, "source": None, "reason": None}
-        decision = review.get("title_decision") if isinstance(review, dict) else {}
-        if not self._valid_title_decision(decision):
-            return {"title": current_title, "source": None, "reason": None}
-        chosen = choose_chapter_title(
-            decision,
-            context.get("recent_title_ledger") or [],
-            current_title,
-        )
-        recommended = str(decision.get("recommended_title") or "").strip()
-        candidates = [str(item or "").strip() for item in decision.get("candidates") or []]
-        if not chosen or chosen not in candidates:
-            return {"title": current_title, "source": None, "reason": None}
-        reason = str(decision.get("reason") or "").strip()
-        if chosen != recommended:
-            reason = f"推荐标题未通过重复或格式校验，改用候选《{chosen}》。"
-        return {
-            "title": chosen,
-            "source": "reviewer",
-            "reason": reason,
-        }
-
-    def _choose_memory_title(
-        self,
-        chapter: dict[str, Any],
-        memory: dict[str, Any],
-        context: dict[str, Any],
-        fallback: str,
-    ) -> str:
-        return str(self._memory_title_decision(chapter, memory, context, fallback)["title"])
-
-    def _memory_title_decision(
-        self,
-        chapter: dict[str, Any],
-        memory: dict[str, Any],
-        context: dict[str, Any],
-        fallback: str,
-    ) -> dict[str, Any]:
-        if not self._title_can_be_auto_updated(chapter, allowed_sources={"planner"}):
-            return {"title": fallback, "source": None, "reason": None}
-        result_card = memory.get("chapter_result_card") if isinstance(memory, dict) else {}
-        decision = result_card.get("title_decision") if isinstance(result_card, dict) else {}
-        if not self._valid_title_decision(decision):
-            return {"title": fallback, "source": None, "reason": None}
-        chosen = choose_chapter_title(
-            decision,
-            context.get("recent_title_ledger") or [],
-            fallback,
-        )
-        recommended = str(decision.get("recommended_title") or "").strip()
-        candidates = [str(item or "").strip() for item in decision.get("candidates") or []]
-        if not chosen or chosen not in candidates:
-            return {"title": fallback, "source": None, "reason": None}
-        reason = str(decision.get("reason") or "").strip()
-        if chosen != recommended:
-            reason = f"推荐标题未通过重复或格式校验，改用候选《{chosen}》。"
-        return {
-            "title": chosen,
-            "source": "memory",
-            "reason": reason,
-        }
-
-    @staticmethod
-    def _title_can_be_auto_updated(
-        chapter: dict[str, Any],
-        *,
-        allowed_sources: set[str] | None = None,
-    ) -> bool:
-        if bool(int(chapter.get("title_locked") or 0)):
-            return False
-        source = str(chapter.get("title_source") or "legacy").strip().lower()
-        if allowed_sources is not None and source not in allowed_sources:
-            return False
-        current = str(chapter.get("title") or "").strip()
+        """Verify the outline title; never invent or replace it after planning."""
         detail = parse_outline_detail(chapter.get("outline_json"))
-        planned = str(detail.get("title") or "").strip() if isinstance(detail, dict) else ""
-        return source != "planner" or not current or not planned or current == planned
+        planned_title = str(chapter.get("title") or detail.get("title") or "").strip()
+        core_change = str(
+            detail.get("chapter_core_change")
+            or detail.get("new_information")
+            or detail.get("chapter_payoff")
+            or ""
+        ).strip()
+        anchor = str(detail.get("title_anchor") or core_change).strip()
+        decision = review.get("title_decision") if isinstance(review, dict) else {}
+        if isinstance(decision, dict) and decision.get("fulfilled") is False:
+            status = "mismatch"
+            reason = str(decision.get("problem") or "审稿未确认正文兑现细纲标题锚点。")
+        elif isinstance(decision, dict) and decision.get("fulfilled") is True:
+            status = "verified"
+            reason = str(decision.get("evidence") or "正文已兑现细纲标题锚点。")
+        else:
+            status = "planned"
+            reason = "标题沿用细纲阶段确定的标题；正文后不自动改写。"
+        quality = {
+            "version": 2,
+            "status": status,
+            "title": planned_title,
+            "chapter_core_change": core_change,
+            "title_anchor": anchor,
+            "title_focus": str(detail.get("title_focus") or "").strip(),
+            "reason": reason,
+        }
+        return {"title": planned_title, "status": status, "quality": quality}
+
+    def finalize_chapter_title(
+        self,
+        work_id: int,
+        chapter_number: int,
+        text: str,
+        context: dict[str, Any],
+        review: dict[str, Any] | None = None,
+        *,
+        stage: str = "标题研判",
+    ) -> dict[str, Any]:
+        """Verify and persist the planned title without changing its text."""
+        chapter = self.repo.get_chapter(work_id, chapter_number)
+        result = self._verify_planned_title(chapter, text, review)
+        db_status = {
+            "verified": "final",
+            "planned": "provisional",
+            "mismatch": "pending",
+        }.get(str(result.get("status") or "planned"), "provisional")
+        try:
+            quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+            self.repo.save_title_assessment(
+                work_id,
+                int(chapter["id"]),
+                quality,
+                title_reason=str(quality.get("reason") or ""),
+                title_status=db_status,
+                expected_revision=int(chapter.get("revision") or 0),
+            )
+        except ValueError as exc:
+            result["quality"] = {
+                **(result.get("quality") if isinstance(result.get("quality"), dict) else {}),
+                "save_error": str(exc),
+            }
+        return result
+
+    def _judge_title_candidates(
+        self,
+        work_id: int,
+        chapter: dict[str, Any],
+        stage: str,
+        brief: dict[str, Any],
+        candidates: list[str],
+        attempts: list[dict[str, Any]],
+        *,
+        label: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        candidates = list(dict.fromkeys(str(item or "").strip() for item in candidates if str(item or "").strip()))[:6]
+        if not 4 <= len(candidates) <= 6:
+            return None, None
+        try:
+            adjudication = self.title.judge(brief, candidates)
+        except (AIClientError, JsonValidationError) as exc:
+            attempts.append({"kind": "judge_failed", "label": label, "candidates": candidates, "error": str(exc)})
+            return None, None
+        attempts.append({"kind": "judge", "label": label, "candidates": candidates, "result": adjudication})
+        self._log_title_agent_run(work_id, chapter, stage, label, brief, adjudication)
+        return choose_title_gate_result(adjudication, brief.get("recent_title_ledger") or []), adjudication
+
+    def _save_pending_title_result(
+        self,
+        work_id: int,
+        chapter: dict[str, Any],
+        attempts: list[dict[str, Any]],
+        reason: str,
+        *,
+        adjudication: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        quality = {
+            "version": 1,
+            "status": "pending",
+            "attempts": attempts,
+            "fact_card": adjudication.get("fact_card", {}) if isinstance(adjudication, dict) else {},
+            "assessments": adjudication.get("assessments", []) if isinstance(adjudication, dict) else [],
+            "reason": reason,
+        }
+        current_title = str(chapter.get("title") or f"第{chapter.get('chapter_number')}章")
+        try:
+            self.repo.save_title_assessment(
+                work_id,
+                int(chapter["id"]),
+                quality,
+                expected_revision=int(chapter.get("revision") or 0),
+            )
+        except ValueError as exc:
+            quality["save_error"] = str(exc)
+        return {"title": current_title, "status": "pending", "quality": quality}
 
     @staticmethod
-    def _valid_title_decision(value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-        candidates = value.get("candidates")
-        recommended = str(value.get("recommended_title") or "").strip()
-        return bool(
-            str(value.get("chapter_summary") or "").strip()
-            and str(value.get("reason") or "").strip()
-            and recommended
-            and isinstance(candidates, list)
-            and recommended in candidates
+    def _review_title_candidates(review: dict[str, Any] | None) -> list[str]:
+        decision = review.get("title_decision") if isinstance(review, dict) else {}
+        if not isinstance(decision, dict):
+            return []
+        candidates = [str(item or "").strip() for item in decision.get("candidates", [])]
+        recommended = str(decision.get("recommended_title") or "").strip()
+        if recommended and recommended not in candidates:
+            candidates.insert(0, recommended)
+        return list(dict.fromkeys(item for item in candidates if item))[:6]
+
+    @staticmethod
+    def _title_gate_brief(
+        chapter: dict[str, Any],
+        text: str,
+        context: dict[str, Any],
+        review: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        detail = parse_outline_detail(chapter.get("outline_json"))
+        scene_cards = detail.get("scene_cards") if isinstance(detail.get("scene_cards"), list) else []
+        review_title = review.get("title_decision") if isinstance(review, dict) else {}
+        if not isinstance(review_title, dict):
+            review_title = {}
+        scene_evidence = []
+        for scene in scene_cards:
+            if not isinstance(scene, dict):
+                continue
+            for key in ("goal", "information_gain", "turn", "scene_exit"):
+                value = str(scene.get(key) or "").strip()
+                if value and value not in scene_evidence:
+                    scene_evidence.append(value)
+        fact_card = {
+            "main_character": detail.get("opening_subject") or detail.get("characters_present", ""),
+            "main_action": detail.get("chapter_payoff") or detail.get("new_information", ""),
+            "key_choice": detail.get("emotional_turn") or detail.get("character_change", ""),
+            "core_change": detail.get("new_information") or detail.get("character_change", ""),
+            "reader_payoff": detail.get("reader_answer_out") or detail.get("chapter_payoff", ""),
+            "cost_or_risk": detail.get("new_question_out") or detail.get("next_continuity_debt", ""),
+            "supporting_evidence": scene_evidence[:6],
+        }
+        if len(text) > 12_000:
+            middle_start = max(0, len(text) // 2 - 1_250)
+            text = (
+                f"{text[:5_000].rstrip()}\n\n[正文中段窗口]\n\n"
+                f"{text[middle_start:middle_start + 2_500].strip()}\n\n[正文结尾窗口]\n\n"
+                f"{text[-4_500:].lstrip()}"
+            )
+        return {
+            "chapter_number": chapter.get("chapter_number"),
+            "provisional_title": chapter.get("title", ""),
+            "outline_contract": {
+                "chapter_goal": detail.get("chapter_goal") or detail.get("sequence_goal") or chapter.get("outline", ""),
+                "conflict": detail.get("conflict", ""),
+                "expected_payoff": detail.get("reader_answer_out") or detail.get("chapter_payoff", ""),
+                "new_information": detail.get("new_information", ""),
+                "character_change": detail.get("character_change", ""),
+            },
+            "fact_card": fact_card,
+            "review_summary": str(review_title.get("chapter_summary") or "").strip(),
+            "recent_title_ledger": context.get("recent_title_ledger", [])[-20:],
+            "chapter_text": text,
+        }
+
+    def _log_title_agent_run(
+        self,
+        work_id: int,
+        chapter: dict[str, Any],
+        stage: str,
+        phase: str,
+        brief: dict[str, Any],
+        output: dict[str, Any],
+    ) -> None:
+        self.repo.log_agent_run(
+            work_id=work_id,
+            chapter_id=int(chapter["id"]),
+            agent_name="title",
+            model=self.client.model_for("title"),
+            prompt_name="title_prompt.md",
+            input_preview=json_dumps(
+                {
+                    "stage": stage,
+                    "phase": phase,
+                    "chapter_number": chapter.get("chapter_number"),
+                    "provisional_title": brief.get("provisional_title"),
+                    "outline_contract": brief.get("outline_contract"),
+                    "fact_card": brief.get("fact_card"),
+                    "review_summary": brief.get("review_summary"),
+                }
+            ),
+            output=json_dumps(output),
+            **self.client.last_usage("title"),
         )
 
     def _repeated_text_warnings(self, work_id: int, chapter_number: int, text: str) -> list[str]:

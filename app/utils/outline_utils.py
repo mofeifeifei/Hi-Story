@@ -30,6 +30,9 @@ CHAPTER_OUTLINE_FIELDS: list[tuple[str, str]] = [
     ("clues", "推进线索"),
     ("new_information", "新增信息"),
     ("chapter_payoff", "本章回报"),
+    ("chapter_core_change", "本章核心变化"),
+    ("title_anchor", "标题事实锚点"),
+    ("title_focus", "标题概括重点"),
     ("character_change", "人物变化"),
     ("foreshadowing", "伏笔安排"),
     ("emotional_turn", "情绪转折"),
@@ -152,6 +155,9 @@ def normalize_planning_core(value: Any) -> dict[str, Any]:
     chapter.setdefault("chapter_number", raw.get("chapter_number", ""))
     chapter.setdefault("volume_number", raw.get("volume_number", ""))
     chapter.setdefault("title", raw.get("title", ""))
+    chapter.setdefault("chapter_core_change", raw.get("chapter_core_change", ""))
+    chapter.setdefault("title_anchor", raw.get("title_anchor", ""))
+    chapter.setdefault("title_focus", raw.get("title_focus", ""))
     chapter.setdefault("sequence_id", sequence.get("id", ""))
     chapter.setdefault("sequence_goal", sequence.get("goal", ""))
     chapter.setdefault("sequence_position", sequence.get("position", ""))
@@ -276,6 +282,15 @@ def compile_planning_core(
         result.get("new_question_out") or questions.get("out") or handoff.get("unresolved_question") or next_debt
     ).strip()
     chapter_goal = sequence_goal or str(result.get("chapter_goal") or "").strip()
+    core_change = str(
+        chapter.get("chapter_core_change")
+        or result.get("new_information")
+        or result.get("chapter_payoff")
+        or result.get("character_change")
+        or ""
+    ).strip()
+    title_anchor = str(chapter.get("title_anchor") or core_change).strip()
+    title_focus = str(chapter.get("title_focus") or "核心变化").strip()
     conflict = opening_conflict or "；".join(
         str(scene.get("obstacle") or "").strip()
         for scene in scenes
@@ -365,6 +380,9 @@ def compile_planning_core(
         "clues": result.get("clues", []),
         "new_information": str(result.get("new_information") or "").strip(),
         "chapter_payoff": str(result.get("chapter_payoff") or reader_answer_out).strip(),
+        "chapter_core_change": core_change,
+        "title_anchor": title_anchor,
+        "title_focus": title_focus,
         "character_change": str(result.get("character_change") or "").strip(),
         "foreshadowing": str(result.get("foreshadowing") or "").strip(),
         "emotional_turn": str(result.get("emotional_turn") or "").strip(),

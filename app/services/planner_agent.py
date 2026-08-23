@@ -42,6 +42,9 @@ def _short_context(value: Any, limit: int = 360) -> Any:
 def _chapter_planner_context(bundle: dict[str, Any]) -> dict[str, Any]:
     """Keep chapter planning context focused without changing writer context."""
     context = _planner_context(bundle)
+    # Historical titles are for program-side duplicate detection only. They
+    # must not become examples that steer the next title toward the same mold.
+    context.pop("recent_title_ledger", None)
     context["book_bible"] = _short_context(context.get("book_bible", {}), 720)
     context["characters"] = [
         _short_context(
@@ -200,14 +203,14 @@ class PlannerAgent(BaseAgent):
             f"{compact_instruction}"
             "顶层 JSON 只能包含 volume_decision 和 chapters。无论是否换卷，都必须输出 chapters 数组。\n"
             "每个 chapters 项只能包含 planning_core，不要输出旧版几十个平行字段。planning_core 必须包含：chapter, sequence, bridge, questions, scenes, result, handoff。\n"
-            "chapter 必须包含 chapter_number, volume_number, title, sequence_id, sequence_goal, sequence_position, continuity_mode, story_time。\n"
+            "chapter 必须包含 chapter_number, volume_number, title, chapter_core_change, title_anchor, title_focus, sequence_id, sequence_goal, sequence_position, continuity_mode, story_time。\n"
             "bridge 必须包含 previous_anchor, continuity_debt, debt_type, opening_mode, opening_subject, opening_action, opening_conflict, forbidden_opening。上一章存在时，previous_anchor 必须指向具体人物、物件、动作或未完问题。\n"
             "questions 必须包含 in, answer, out；result 必须包含 reader_expectation, new_information, clues, chapter_payoff, character_change。\n"
             "scenes 必须是 3 到 5 个对象，每项包含 location, characters, goal, obstacle, turn, emotional_shift, exit。每场必须改变信息、关系、行动方向或代价，不能只换地点。\n"
             "handoff 必须包含 ending_event, next_opening_action, next_continuity_debt, cut_reason, unresolved_question, forbidden。next_opening_action 必须直接承接 ending_event。\n"
             "每 3 到 5 章组成连续剧情单元并使用相同 sequence_id。continuity_mode 只能是 direct、shift、new_stage；转场时写清上一章后果如何进入新场景。\n"
             "开头先处理上一章留下的动作或压力，避开近期重复的发动方式；story_time 只记时间线，不能直接充当正文开头。结尾来自本章事件，不强造悬念或悠长意境。\n"
-            "标题概括本章独有的行动、发现、决定、关系变化或代价，避开 recent_title_ledger 中的重复词和结构。所有字段值使用自然中文，不写内部字段名、策略说明或 Markdown。\n\n"
+            "先完成本章剧情契约，再确定标题。chapter_core_change 只能写本章最独有的一项变化，不能并列罗列多个结果；title_anchor 必须说明标题对应的具体事实；title_focus 只能写行动、发现、决定、关系或代价之一。title 是细纲阶段确定的工作标题，优先简洁凝练，但不得为了四字而牺牲准确性。历史标题只用于程序查重，不是创作范本，不要模仿其词语、句式或意象。所有字段值使用自然中文，不写内部字段名、策略说明或 Markdown。\n\n"
             f"{history_section}\n"
             f"作品资料：\n{json_dumps(_chapter_planner_context(work_bundle))}"
         )

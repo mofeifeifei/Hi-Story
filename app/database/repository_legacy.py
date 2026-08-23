@@ -1506,6 +1506,8 @@ class Repository:
         title_source: str | None = None,
         title_reason: str | None = None,
         title_locked: bool | None = None,
+        title_status: str | None = None,
+        title_quality_json: str | dict[str, Any] | None = None,
     ) -> None:
         final_text = self.normalize_official_names(work_id, final_text)
         title = self.normalize_official_names(work_id, title)
@@ -1513,6 +1515,7 @@ class Repository:
         handoff = self.normalize_official_names(work_id, handoff)
         memory_json = self.normalize_official_names(work_id, memory_json)
         title_reason = self.normalize_official_names(work_id, title_reason)
+        title_quality_json = self.normalize_official_names(work_id, title_quality_json)
         fields: dict[str, Any] = {
             "final_text": final_text,
             "ending_hook": ending_hook,
@@ -1528,6 +1531,12 @@ class Repository:
             fields["title_reason"] = title_reason
         if title_locked is not None:
             fields["title_locked"] = int(bool(title_locked))
+        if title_status is not None:
+            fields["title_status"] = str(title_status or "pending").strip().lower()
+        if title_quality_json is not None:
+            fields["title_quality_json"] = (
+                json_dumps(title_quality_json) if isinstance(title_quality_json, dict) else title_quality_json
+            )
         self._update_chapter_text(work_id, chapter_id, **fields)
         self.add_version(work_id, chapter_id, f"final_{now_text()}", final_text)
 
@@ -1546,6 +1555,8 @@ class Repository:
         title_source: str | None = None,
         title_reason: str | None = None,
         title_locked: bool | None = None,
+        title_status: str | None = None,
+        title_quality_json: str | dict[str, Any] | None = None,
     ) -> bool:
         final_text = self.normalize_official_names(work_id, final_text)
         title = self.normalize_official_names(work_id, title)
@@ -1553,11 +1564,14 @@ class Repository:
         handoff = self.normalize_official_names(work_id, handoff)
         memory_json = self.normalize_official_names(work_id, memory_json)
         title_reason = self.normalize_official_names(work_id, title_reason)
+        title_quality_json = self.normalize_official_names(work_id, title_quality_json)
+        if isinstance(title_quality_json, dict):
+            title_quality_json = json_dumps(title_quality_json)
         timestamp = now_text()
         with connect(self._db_path_for_work(work_id)) as conn:
             row = conn.execute(
                 """
-                SELECT chapter_number, title, title_source, title_locked, title_reason,
+                SELECT chapter_number, title, title_source, title_locked, title_reason, title_status, title_quality_json,
                        final_text, revision, memory_json, memory_revision
                 FROM chapters
                 WHERE id = ? AND work_id = ?
@@ -1575,19 +1589,31 @@ class Repository:
             current_source = str(row["title_source"] or "legacy")
             current_locked = int(row["title_locked"] or 0)
             current_reason = str(row["title_reason"] or "")
+            current_status = str(row["title_status"] or "provisional")
+            current_quality = str(row["title_quality_json"] or "")
             if title_source is None:
                 next_source = "manual" if title_changed else current_source
                 next_locked = 1 if title_changed else current_locked
                 next_reason = "用户手动修改章节标题。" if title_changed else current_reason
+                if title_changed or current_locked or current_source.lower() == "manual":
+                    next_status = "manual"
+                    next_quality = "" if title_changed else current_quality
+                else:
+                    next_status = "pending" if content_changed else current_status
+                    next_quality = "" if content_changed else current_quality
             elif current_locked and str(title_source).lower() != "manual":
                 next_title = row["title"]
                 next_source = current_source
                 next_locked = current_locked
                 next_reason = current_reason
+                next_status = "manual"
+                next_quality = current_quality
             else:
                 next_source = str(title_source or current_source).strip().lower()
                 next_locked = current_locked if title_locked is None else int(bool(title_locked))
                 next_reason = current_reason if title_reason is None else str(title_reason or "")
+                next_status = str(title_status or current_status).strip().lower()
+                next_quality = current_quality if title_quality_json is None else str(title_quality_json or "")
             had_memory = bool(str(row["memory_json"] or "").strip())
             clear_derived_data = bool(content_changed or invalidate_memory)
             clear_memory = bool(clear_derived_data and had_memory)
@@ -1603,7 +1629,7 @@ class Repository:
             conn.execute(
                 """
                 UPDATE chapters
-                SET title = ?, title_source = ?, title_locked = ?, title_reason = ?,
+                SET title = ?, title_source = ?, title_locked = ?, title_reason = ?, title_status = ?, title_quality_json = ?,
                     final_text = ?, ending_hook = ?, handoff = ?, memory_json = ?,
                     memory_revision = ?, status = 'final', revision = ?, updated_at = ?
                 WHERE id = ? AND work_id = ? AND revision = ?
@@ -1613,6 +1639,8 @@ class Repository:
                     next_source,
                     next_locked,
                     next_reason,
+                    next_status,
+                    next_quality,
                     final_text,
                     ending_hook,
                     handoff,
@@ -1636,6 +1664,88 @@ class Repository:
             )
             conn.commit()
         return bool(clear_memory and had_memory)
+
+    def save_title_assessment(
+        self,
+        work_id: int,
+        chapter_id: int,
+        assessment: dict[str, Any],
+        *,
+        title: str | None = None,
+        title_reason: str = "",
+        title_status: str | None = None,
+        expected_revision: int | None = None,
+    ) -> bool:
+        """Persist title verification metadata without overriding a planned title.
+
+        ``title`` remains optional for compatibility with older callers. The
+        current workflow leaves it empty: the planner owns the title and this
+        method only records whether the final text fulfilled it.
+        """
+        title = self.normalize_official_names(work_id, title)
+        title_reason = self.normalize_official_names(work_id, title_reason)
+        assessment = self.normalize_official_names(work_id, assessment)
+        timestamp = now_text()
+        with connect(self._db_path_for_work(work_id)) as conn:
+            row = conn.execute(
+                """
+                SELECT title, title_source, title_locked, title_status, revision
+                FROM chapters
+                WHERE id = ? AND work_id = ?
+                """,
+                (chapter_id, work_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("章节不存在，无法保存标题研判结果。")
+            revision = int(row["revision"] or 0)
+            if expected_revision is not None and revision != int(expected_revision):
+                raise ValueError("正文或标题已被其他操作更新，请重新载入章节后再试。")
+            if int(row["title_locked"] or 0) or str(row["title_source"] or "").lower() == "manual":
+                return False
+            accepted = bool(str(title or "").strip())
+            assessment_status = str(assessment.get("status") or "").strip().lower()
+            next_status = str(title_status or "").strip().lower()
+            if next_status not in {"provisional", "pending", "final", "manual"}:
+                next_status = {
+                    "verified": "final",
+                    "planned": "provisional",
+                    "mismatch": "pending",
+                    "pending": "pending",
+                    "provisional": "provisional",
+                    "final": "final",
+                }.get(assessment_status, str(row["title_status"] or "provisional").strip().lower())
+            next_reason = str(title_reason or "").strip()
+            if not next_reason:
+                next_reason = (
+                    "正文已兑现细纲标题锚点。"
+                    if next_status == "final"
+                    else "标题沿用细纲阶段确定的标题，等待正文核对。"
+                    if next_status == "provisional"
+                    else "正文尚未兑现细纲标题锚点，保留原标题并标记待处理。"
+                )
+            conn.execute(
+                """
+                UPDATE chapters
+                SET title = ?, title_source = ?, title_locked = 0, title_reason = ?,
+                    title_status = ?, title_quality_json = ?, revision = revision + 1, updated_at = ?
+                WHERE id = ? AND work_id = ? AND revision = ?
+                """,
+                (
+                    title if accepted else row["title"],
+                    "title" if accepted else row["title_source"],
+                    next_reason,
+                    "final" if accepted else next_status,
+                    json_dumps(assessment),
+                    timestamp,
+                    chapter_id,
+                    work_id,
+                    revision,
+                ),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("章节已被其他操作更新，请重新载入章节后再试。")
+            conn.commit()
+        return accepted
 
     def clear_chapter_memory(self, work_id: int, chapter_id: int) -> None:
         with connect(self._db_path_for_work(work_id)) as conn:
@@ -4220,6 +4330,8 @@ class Repository:
             "title_source",
             "title_locked",
             "title_reason",
+            "title_status",
+            "title_quality_json",
             "draft",
             "final_text",
             "ending_hook",

@@ -225,19 +225,16 @@ def _normalize_title_decision(
     fallback_reason: Any = "",
 ) -> dict[str, Any]:
     decision = dict(value) if isinstance(value, dict) else {}
-    candidates = _normalize_title_candidates(
-        decision.get("candidates") or fallback_candidates
-    )
+    candidates = _normalize_title_candidates(decision.get("candidates") or fallback_candidates)
     recommended = str(decision.get("recommended_title") or "").strip()
-    if not recommended and candidates:
-        recommended = candidates[0]
-    if recommended and recommended not in candidates:
-        candidates.insert(0, recommended)
     return {
         "chapter_summary": str(decision.get("chapter_summary") or "").strip(),
         "recommended_title": recommended,
         "reason": str(decision.get("reason") or fallback_reason or "").strip(),
         "candidates": candidates[:8],
+        "fulfilled": decision.get("fulfilled") if isinstance(decision.get("fulfilled"), bool) else None,
+        "evidence": str(decision.get("evidence") or "").strip(),
+        "problem": str(decision.get("problem") or "").strip(),
     }
 
 
@@ -385,15 +382,10 @@ def normalize_memory_card(data: Any) -> dict[str, Any]:
     result_card = memory.get("chapter_result_card")
     if not isinstance(result_card, dict):
         result_card = {}
-    for key in ["core_change", "reader_payoff", "key_action", "key_cost", "title_reason"]:
+    for key in ["core_change", "reader_payoff", "key_action", "key_cost"]:
         result_card.setdefault(key, "")
-    result_card["title_decision"] = _normalize_title_decision(
-        result_card.get("title_decision"),
-        fallback_candidates=result_card.get("title_candidates"),
-        fallback_reason=result_card.get("title_reason"),
-    )
-    result_card["title_candidates"] = list(result_card["title_decision"]["candidates"])
-    result_card["recommended_title"] = result_card["title_decision"]["recommended_title"]
+    for key in ["title_decision", "title_candidates", "recommended_title", "title_reason"]:
+        result_card.pop(key, None)
     memory["chapter_result_card"] = result_card
     if isinstance(memory["historical_updates"], list):
         normalized_history = []
